@@ -3,3 +3,7 @@ gunicorn
 pytest
 flake8
 mypy
+kubernetes
+mock
+pydash
+bitmath
