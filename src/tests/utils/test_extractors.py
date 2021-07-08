@@ -59,8 +59,8 @@ def test_should_extract_pod_resources_where_container_doesnt_have_resources_spec
     # Then
     assert pod_resources.name == 'etcd'
     assert pod_resources.node_name == 'master'
-    assert _.head(pod_resources.containers).cpu is None
-    assert _.head(pod_resources.containers).memory is None
+    assert _.head(pod_resources.containers).cpu == 0
+    assert _.head(pod_resources.containers).memory == 0
 
 
 def test_should_extract_node_resources():

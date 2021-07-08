@@ -1,4 +1,5 @@
 from flask import Flask, jsonify
+from flask_cors import cross_origin  # type: ignore
 from typing import Optional
 from app.k8s.k8s_client import K8sClient
 from app.utils.mappers import FoamTreeMapper
@@ -9,10 +10,12 @@ def create_app() -> Optional[Flask]:
         app = Flask(__name__)
 
         @app.route('/healthcheck', methods=['GET'])
+        @cross_origin()
         def healthcheck():
             return jsonify({'status': 'ok'})
 
         @app.route('/resources/<resource_type>', methods=['GET'])
+        @cross_origin()
         def get_k8s_resources(resource_type: str):
             try:
                 k8s_client = K8sClient()

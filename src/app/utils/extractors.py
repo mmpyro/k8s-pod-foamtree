@@ -18,8 +18,8 @@ class ResourcesExtractor():
         else:
             return int(cpu) * 1000
 
-    def __convert_memory(self, memory: str) -> Optional[float]:
-        value = None
+    def __convert_memory(self, memory: str) -> float:
+        value = 0
         if 'Ki' in memory:
             value = bitmath.KiB(self.__convert_to_int(memory, 'Ki')).kB
         elif 'Mi' in memory:
@@ -44,7 +44,7 @@ class ResourcesExtractor():
             value = bitmath.PB(self.__convert_to_int(memory, 'P')).kB
         elif 'E' in memory:
             value = bitmath.EB(self.__convert_to_int(memory, 'E')).kB
-        return float(value) if value else None
+        return float(value)
 
     def extract_pod_requested_resources(self, pod) -> PodResources:
         name = pod.metadata.name
@@ -52,11 +52,11 @@ class ResourcesExtractor():
         containers = []
         for container in pod.spec.containers:
             requests = container.resources.requests
-            cpu = self.__convert_cpu(requests['cpu']) if self.__requests_contains_key(requests, 'cpu') else None
-            memory = self.__convert_memory(requests['memory']) if self.__requests_contains_key(requests, 'memory') else None
+            cpu = self.__convert_cpu(requests['cpu']) if self.__requests_contains_key(requests, 'cpu') else 0
+            memory = self.__convert_memory(requests['memory']) if self.__requests_contains_key(requests, 'memory') else 0
             containers.append(ContainerResources(container.name, cpu, memory))
-        cpu = sum(map(lambda c: c.cpu, filter(lambda c: c.cpu is not None, containers)))
-        memory = sum(map(lambda c: c.memory, filter(lambda c: c.memory is not None, containers)))
+        cpu = sum(map(lambda c: c.cpu, containers))
+        memory = sum(map(lambda c: c.memory, containers))
         return PodResources(name, node_name, cpu, memory, containers)
 
     def extract_node_resources(self, node) -> NodeResources:
