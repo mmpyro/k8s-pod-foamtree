@@ -17,3 +17,6 @@ check_types:
 	mypy ./src
 
 tests: check_types static_code_analysis unit_tests
+
+start_server:
+	cd ./src; gunicorn -b 0.0.0.0:8080 webserver:app
