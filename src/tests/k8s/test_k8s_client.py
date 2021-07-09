@@ -46,3 +46,20 @@ def test_should_return_pod_resources(client, config):
     assert _.head(pod.containers).name == 'etcd'
     assert _.head(pod.containers).cpu == 100
     assert _.head(pod.containers).memory == bitmath.GB(1).kB
+
+
+@patch('app.k8s.k8s_client.config')
+def test_should_return_k8s_contexts(config):
+    # Given
+    config.list_kube_config_contexts.return_value = ([{'context': {'cluster': 'minikube', 'extensions': [{'extension': {'last-update': 'Fri, 09 Jul 2021 16:29:57 CEST', 'provider': 'minikube.sigs.k8s.io', 'version': 'v1.21.0'}, 'name': 'context_info'}], 'namespace': 'default', 'user': 'minikube'}, 'name': 'minikube'}, {'context': {'cluster': 'minikube-test', 'extensions': [{'extension': {'last-update': 'Fri, 09 Jul 2021 16:29:57 CEST', 'provider': 'minikube.sigs.k8s.io', 'version': 'v1.21.0'}, 'name': 'context_info'}], 'namespace': 'default', 'user': 'minikube-test'}, 'name': 'minikube-test'}], {'context': {'cluster': 'minikube', 'extensions': [{'extension': {'last-update': 'Fri, 09 Jul 2021 16:29:57 CEST', 'provider': 'minikube.sigs.k8s.io', 'version': 'v1.21.0'}, 'name': 'context_info'}], 'namespace': 'default', 'user': 'minikube'}, 'name': 'minikube'})  # noqa: E501
+    k8s_client = K8sClient()
+
+    # When
+    contexts = k8s_client.get_contexts()
+
+    # Then
+    assert len(contexts) == 2
+    assert contexts[0]['context'] == 'minikube'
+    assert contexts[0]['active'] is True
+    assert contexts[1]['context'] == 'minikube-test'
+    assert contexts[1]['active'] is False

@@ -71,3 +71,36 @@ def test_should_return_internal_server_error(k8s_client, test_client):
 
     # Then
     assert response.status_code == 500
+
+
+@patch('app.app.K8sClient')
+def test_should_return_internal_server_error_when_get_contexts(k8s_client, test_client):
+    # Given
+    k8s_client_instance = MagicMock()
+    k8s_client_instance.get_contexts.side_effect = Exception('Cannot connect to k8s api')
+    k8s_client.return_value = k8s_client_instance
+
+    # When
+    response = test_client.get('/contexts')
+
+    # Then
+    assert response.status_code == 500
+
+
+@patch('app.app.K8sClient')
+def test_should_return_contexts_when_get_contexts(k8s_client, test_client):
+    # Given
+    k8s_client_instance = MagicMock()
+    k8s_client_instance.get_contexts.return_value = [{'context': 'minikube', 'active': True}, {'context': 'minikube-test', 'active': False}]
+    k8s_client.return_value = k8s_client_instance
+
+    # When
+    response = test_client.get('/contexts')
+    json = response.json
+
+    # Then
+    assert response.status_code == 200
+    assert json[0]['context'] == 'minikube'
+    assert json[0]['active'] is True
+    assert json[1]['context'] == 'minikube-test'
+    assert json[1]['active'] is False

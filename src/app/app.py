@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import cross_origin  # type: ignore
 from typing import Optional
 from app.k8s.k8s_client import K8sClient
@@ -18,7 +18,8 @@ def create_app() -> Optional[Flask]:
         @cross_origin()
         def get_k8s_resources(resource_type: str):
             try:
-                k8s_client = K8sClient()
+                context = request.args.get('context')
+                k8s_client = K8sClient(context)
                 mapper = FoamTreeMapper(k8s_client.get_node_resources(), k8s_client.get_pod_resources())
                 if resource_type.lower() == 'memory':
                     return jsonify(mapper.transform_memory_resources_to_foamtree())
@@ -26,6 +27,15 @@ def create_app() -> Optional[Flask]:
                     return jsonify(mapper.transform_cpu_resources_to_foamtree())
                 else:
                     return f'Resource type: {resource_type} is not supported. Supported types are: [cpu, memory]', 400
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/contexts', methods=['GET'])
+        @cross_origin()
+        def get_k8s_contexts():
+            try:
+                k8s_client = K8sClient()
+                return jsonify(k8s_client.get_contexts())
             except Exception as ex:
                 return str(ex), 500
 
