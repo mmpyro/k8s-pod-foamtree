@@ -21,10 +21,6 @@ click==8.0.1
 flake8==3.9.2
     # via -r requirements.in
 flask==2.0.1
-    # via
-    #   -r requirements.in
-    #   flask-cors
-flask-cors==3.0.10
     # via -r requirements.in
 google-auth==1.32.1
     # via kubernetes
@@ -88,7 +84,6 @@ rsa==4.7.2
     # via google-auth
 six==1.16.0
     # via
-    #   flask-cors
     #   google-auth
     #   kubernetes
     #   python-dateutil

@@ -1,5 +1,4 @@
 from flask import Flask, jsonify, request
-from flask_cors import cross_origin  # type: ignore
 from typing import Optional
 from app.k8s.k8s_client import K8sClient
 from app.utils.mappers import FoamTreeMapper
@@ -7,15 +6,13 @@ from app.utils.mappers import FoamTreeMapper
 
 def create_app() -> Optional[Flask]:
     try:
-        app = Flask(__name__)
+        app = Flask(__name__, static_url_path='', static_folder='frontend')
 
         @app.route('/healthcheck', methods=['GET'])
-        @cross_origin()
         def healthcheck():
             return jsonify({'status': 'ok'})
 
         @app.route('/resources/<resource_type>', methods=['GET'])
-        @cross_origin()
         def get_k8s_resources(resource_type: str):
             try:
                 context = request.args.get('context')
@@ -31,13 +28,16 @@ def create_app() -> Optional[Flask]:
                 return str(ex), 500
 
         @app.route('/contexts', methods=['GET'])
-        @cross_origin()
         def get_k8s_contexts():
             try:
                 k8s_client = K8sClient()
                 return jsonify(k8s_client.get_contexts())
             except Exception as ex:
                 return str(ex), 500
+
+        @app.route('/', methods=['GET'])
+        def web():
+            return app.send_static_file('index.html')
 
         return app
     except Exception:
