@@ -16,7 +16,10 @@ static_code_analysis:
 check_types:
 	mypy ./src
 
-tests: check_types static_code_analysis unit_tests
+bandit:
+	bandit --configfile bandit.yaml -r ./src
+
+tests: check_types static_code_analysis bandit unit_tests
 
 start_server:
 	cd ./src; gunicorn -b 0.0.0.0:8080 webserver:app

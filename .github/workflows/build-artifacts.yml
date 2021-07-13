@@ -13,4 +13,4 @@ jobs:
         with:
           context: .
           push: false
-          tags: mmpyro/k8s-cost-advisor:latest
+          tags: mmpyro/k8s-pod-foamtree:latest
