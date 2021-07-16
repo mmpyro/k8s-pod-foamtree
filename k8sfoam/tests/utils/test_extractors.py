@@ -1,7 +1,7 @@
 import bitmath  # type: ignore
-from app.utils.extractors import ResourcesExtractor
+from k8sfoam.app.utils.extractors import ResourcesExtractor
 from pydash import py_ as _  # type: ignore
-from tests.common.mocks import create_container, create_pod, create_node
+from k8sfoam.tests.common.mocks import create_container, create_pod, create_node
 from unittest.mock import MagicMock
 
 

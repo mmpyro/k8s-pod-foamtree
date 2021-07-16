@@ -1,7 +1,7 @@
 from kubernetes import config, client  # type: ignore
 from typing import List, Dict, Any, Optional
-from app.utils.extractors import ResourcesExtractor
-from app.common.dtos import PodResources, NodeResources
+from k8sfoam.app.utils.extractors import ResourcesExtractor
+from k8sfoam.app.common.dtos import PodResources, NodeResources
 
 
 class K8sClient():

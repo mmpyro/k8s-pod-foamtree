@@ -1,4 +1,4 @@
-from app.common.dtos import NodeResources, PodResources
+from k8sfoam.app.common.dtos import NodeResources, PodResources
 from typing import List
 
 

@@ -1,5 +1,5 @@
 import bitmath  # type: ignore
-from app.common.dtos import PodResources, ContainerResources, NodeResources
+from k8sfoam.app.common.dtos import PodResources, ContainerResources, NodeResources
 from typing import Optional
 
 

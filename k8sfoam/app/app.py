@@ -1,7 +1,7 @@
 from flask import Flask, jsonify, request
 from typing import Optional
-from app.k8s.k8s_client import K8sClient
-from app.utils.mappers import FoamTreeMapper
+from k8sfoam.app.k8s.k8s_client import K8sClient
+from k8sfoam.app.utils.mappers import FoamTreeMapper
 
 
 def create_app() -> Optional[Flask]:

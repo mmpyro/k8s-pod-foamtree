@@ -1,12 +1,12 @@
 import bitmath  # type: ignore
-from app.k8s.k8s_client import K8sClient
+from k8sfoam.app.k8s.k8s_client import K8sClient
 from unittest.mock import patch, MagicMock
-from tests.common.mocks import create_node, create_pod, create_container
+from k8sfoam.tests.common.mocks import create_node, create_pod, create_container
 from pydash import py_ as _  # type: ignore
 
 
-@patch('app.k8s.k8s_client.config')
-@patch('app.k8s.k8s_client.client')
+@patch('k8sfoam.app.k8s.k8s_client.config')
+@patch('k8sfoam.app.k8s.k8s_client.client')
 def test_should_return_node_resources(client, config):
     # Given
     k8s_client = K8sClient()
@@ -25,8 +25,8 @@ def test_should_return_node_resources(client, config):
     assert _.head(node_resources).memory == bitmath.KiB(8162156).kB
 
 
-@patch('app.k8s.k8s_client.config')
-@patch('app.k8s.k8s_client.client')
+@patch('k8sfoam.app.k8s.k8s_client.config')
+@patch('k8sfoam.app.k8s.k8s_client.client')
 def test_should_return_pod_resources(client, config):
     # Given
     k8s_client = K8sClient()
@@ -48,7 +48,7 @@ def test_should_return_pod_resources(client, config):
     assert _.head(pod.containers).memory == bitmath.GB(1).kB
 
 
-@patch('app.k8s.k8s_client.config')
+@patch('k8sfoam.app.k8s.k8s_client.config')
 def test_should_return_k8s_contexts(config):
     # Given
     config.list_kube_config_contexts.return_value = ([{'context': {'cluster': 'minikube', 'extensions': [{'extension': {'last-update': 'Fri, 09 Jul 2021 16:29:57 CEST', 'provider': 'minikube.sigs.k8s.io', 'version': 'v1.21.0'}, 'name': 'context_info'}], 'namespace': 'default', 'user': 'minikube'}, 'name': 'minikube'}, {'context': {'cluster': 'minikube-test', 'extensions': [{'extension': {'last-update': 'Fri, 09 Jul 2021 16:29:57 CEST', 'provider': 'minikube.sigs.k8s.io', 'version': 'v1.21.0'}, 'name': 'context_info'}], 'namespace': 'default', 'user': 'minikube-test'}, 'name': 'minikube-test'}], {'context': {'cluster': 'minikube', 'extensions': [{'extension': {'last-update': 'Fri, 09 Jul 2021 16:29:57 CEST', 'provider': 'minikube.sigs.k8s.io', 'version': 'v1.21.0'}, 'name': 'context_info'}], 'namespace': 'default', 'user': 'minikube'}, 'name': 'minikube'})  # noqa: E501
