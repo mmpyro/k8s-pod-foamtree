@@ -1,9 +1,10 @@
 from setuptools import setup, find_packages
 setup(
     name='k8sfoams',
-    version='1.0.0',
+    version='1.0.2',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
+    url='https://github.com/mmpyro/k8s-pod-foamtree',
 
     description='K8s pod foamtree visualizer',
     author="Michal Marszalek",
@@ -65,4 +66,11 @@ setup(
         'websocket-client==1.1.0',
         'werkzeug==2.0.1',
     ],
+    classifiers=[
+    'Development Status :: 3 - Alpha',
+    'Topic :: Scientific/Engineering :: Visualization',
+    'License :: OSI Approved :: Apache Software License',
+    'Programming Language :: Python :: 3.8',
+  ],
+  keywords = ['foamtree', 'k8s', 'visualization']
 )

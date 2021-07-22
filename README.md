@@ -32,6 +32,11 @@ To run it type in your shell:
 k8sfoams
 ```
 
+## Install via PyPi
+```
+pip install k8sfoams
+```
+
 ## Command lines arguments
 - host: host IP address on which server listen, default is **127.0.0.1**
 - port: port number on which server listen, default is **8080**
