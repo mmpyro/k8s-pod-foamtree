@@ -17,7 +17,7 @@ def test_should_return_node_resources(client, config):
     client.CoreV1Api.return_value = v1_client
 
     # When
-    node_resources = k8s_client.get_node_resources()
+    node_resources = [*k8s_client.get_node_resources()]
 
     # Then
     assert _.head(node_resources).name == 'minikube'
@@ -37,7 +37,7 @@ def test_should_return_pod_resources(client, config):
     client.CoreV1Api.return_value = v1_client
 
     # When
-    pod_resources = k8s_client.get_pod_resources()
+    pod_resources = [*k8s_client.get_pod_resources()]
 
     # Then
     pod = _.head(pod_resources)
