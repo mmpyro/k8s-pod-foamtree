@@ -1,6 +1,6 @@
 import bitmath  # type: ignore
-from k8sfoam.app.utils.mappers import FoamTreeMapper
-from k8sfoam.app.common.dtos import NodeResources, PodResources, ContainerResources
+from k8sfoam.src.utils.mappers import FoamTreeMapper
+from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
 from pydash import py_ as _  # type: ignore
 
 

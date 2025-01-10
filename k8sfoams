@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import argparse
-from k8sfoam.app.app import create_app
+from k8sfoam.src.app import create_app
 
 
 app = create_app()
