@@ -1,8 +1,8 @@
 import pytest
 import bitmath  # type: ignore
-from k8sfoam.app.app import create_app
+from k8sfoam.src.app import create_app
 from unittest.mock import patch, MagicMock
-from k8sfoam.app.common.dtos import NodeResources, PodResources, ContainerResources
+from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def test_healthcheck(test_client):
 
 
 @pytest.mark.parametrize("parameter", ['cpu', 'memory'])
-@patch('k8sfoam.app.app.K8sClient')
+@patch('k8sfoam.src.app.K8sClient')
 def test_get_k8s_resources(k8s_client, parameter, test_client):
     # Given
     k8s_client_instance = MagicMock()
@@ -40,7 +40,7 @@ def test_get_k8s_resources(k8s_client, parameter, test_client):
     assert len(json['groups'][0]['groups'][0]['groups']) == 2
 
 
-@patch('k8sfoam.app.app.K8sClient')
+@patch('k8sfoam.src.app.K8sClient')
 def test_should_return_bad_request(k8s_client, test_client):
     # Given
     k8s_client_instance = MagicMock()
@@ -57,7 +57,7 @@ def test_should_return_bad_request(k8s_client, test_client):
     assert response.status_code == 400
 
 
-@patch('k8sfoam.app.app.K8sClient')
+@patch('k8sfoam.src.app.K8sClient')
 def test_should_return_internal_server_error(k8s_client, test_client):
     # Given
     k8s_client_instance = MagicMock()
@@ -73,7 +73,7 @@ def test_should_return_internal_server_error(k8s_client, test_client):
     assert response.status_code == 500
 
 
-@patch('k8sfoam.app.app.K8sClient')
+@patch('k8sfoam.src.app.K8sClient')
 def test_should_return_internal_server_error_when_get_contexts(k8s_client, test_client):
     # Given
     k8s_client_instance = MagicMock()
@@ -87,7 +87,7 @@ def test_should_return_internal_server_error_when_get_contexts(k8s_client, test_
     assert response.status_code == 500
 
 
-@patch('k8sfoam.app.app.K8sClient')
+@patch('k8sfoam.src.app.K8sClient')
 def test_should_return_contexts_when_get_contexts(k8s_client, test_client):
     # Given
     k8s_client_instance = MagicMock()

@@ -1,7 +1,7 @@
 from flask import Flask, jsonify, request
 from typing import Optional
-from k8sfoam.app.k8s.k8s_client import K8sClient
-from k8sfoam.app.utils.mappers import FoamTreeMapper
+from k8sfoam.src.k8s.k8s_client import K8sClient
+from k8sfoam.src.utils.mappers import FoamTreeMapper
 
 
 def create_app() -> Optional[Flask]:
@@ -17,7 +17,7 @@ def create_app() -> Optional[Flask]:
             try:
                 context = request.args.get('context')
                 k8s_client = K8sClient(context)
-                mapper = FoamTreeMapper(k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
                 if resource_type.lower() == 'memory':
                     return jsonify(mapper.transform_memory_resources_to_foamtree())
                 elif resource_type.lower() == 'cpu':

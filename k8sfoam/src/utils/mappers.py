@@ -1,9 +1,9 @@
-from k8sfoam.app.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.dtos import NodeResources, PodResources
 from typing import Iterator
 
 
 class FoamTreeMapper():
-    def __init__(self, node_resources: Iterator[NodeResources], pod_resources: Iterator[PodResources]):
+    def __init__(self, node_resources: Iterator[NodeResources], pod_resources: list[PodResources]):
         self.__nodes = node_resources
         self.__pods = pod_resources
 

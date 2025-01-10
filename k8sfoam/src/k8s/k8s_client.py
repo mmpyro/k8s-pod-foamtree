@@ -1,11 +1,11 @@
 from kubernetes import config, client  # type: ignore
 from typing import List, Dict, Any, Optional, Iterator
-from k8sfoam.app.utils.extractors import ResourcesExtractor
-from k8sfoam.app.common.dtos import PodResources, NodeResources
+from k8sfoam.src.utils.extractors import ResourcesExtractor
+from k8sfoam.src.common.dtos import PodResources, NodeResources
 
 
 class K8sClient():
-    def __init__(self, current_context: str = None):
+    def __init__(self, current_context: Optional[str] = None):
         config.load_kube_config(context=current_context)
         self.__current_context = current_context
         self.__extractor = ResourcesExtractor()

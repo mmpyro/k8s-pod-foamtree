@@ -26,15 +26,18 @@ tests: check_types static_code_analysis bandit unit_tests
 # 	gunicorn -b 0.0.0.0:8080 webserver:app
 
 setup:
-	python3 ./setup.py sdist
+	python ./setup.py sdist
 
 build:
-	python3 ./setup.py build
+	python ./setup.py build
 
 install:
-	python3 ./setup.py install --record $(record)
+	python ./setup.py install --record $(record)
 
 clean:
-	rm -rf ./build ./dist ./k8s_pod_foamtree.egg-info; xargs rm -rf < $(record); rm $(record); touch $(record)
+	python setup.py clean --all
 
 reinstall: clean build install
+
+uninstall: clean
+	pip uninstall k8sfoams
