@@ -22,6 +22,9 @@ bandit:
 
 tests: check_types static_code_analysis bandit unit_tests
 
+# start_server:
+# 	gunicorn -b 0.0.0.0:8080 webserver:app
+
 setup:
 	python ./setup.py sdist
 
