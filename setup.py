@@ -29,7 +29,6 @@ setup(
       'flake8==7.1.1',
       'flask==3.1.0',
       'google-auth==2.37.0',
-      'gunicorn==23.0.0',
       'idna==3.10',
       'iniconfig==2.0.0',
       'itsdangerous==2.2.0',
