@@ -1,7 +1,11 @@
-name: Tests
+name: Publish to PyPI
 
 on:
   pull_request:
+    branches:
+      - main
+      
+  push:
     branches:
       - main
 
@@ -34,6 +38,21 @@ jobs:
       - name: Run unit tests
         run: make unit_tests
 
+      - name: Unit tests report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Helm charts unittests
+          path: test-results.xml
+          reporter: java-junit
+
       - name: Build the package
         run: python setup.py sdist bdist_wheel
 
+      - name: Publish to PyPI
+        if: github.ref_name == 'main'
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          python -m twine upload dist/*

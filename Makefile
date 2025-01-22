@@ -9,7 +9,7 @@ restore:
 	pip install -r $(output)
 
 unit_tests:
-	pytest -v
+	pytest -v --junit-xml=test-results.xml
 
 static_code_analysis:
 	flake8 ./k8sfoam
