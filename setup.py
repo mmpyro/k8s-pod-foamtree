@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name='k8sfoams',
-    version='1.1.0',
+    version='1.1.1',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
     url='https://github.com/mmpyro/k8s-pod-foamtree',
