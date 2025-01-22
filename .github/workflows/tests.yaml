@@ -42,7 +42,7 @@ jobs:
         uses: dorny/test-reporter@v1
         if: always()
         with:
-          name: Helm charts unittests
+          name: unittests
           path: test-results.xml
           reporter: java-junit
 
