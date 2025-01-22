@@ -1,1 +1,1 @@
-graft k8sfoam/app/frontend
+graft k8sfoam/src/frontend
