@@ -132,3 +132,6 @@ dmypy.json
 .vscode/
 
 record.txt
+
+# Unit test report
+test-results.xml

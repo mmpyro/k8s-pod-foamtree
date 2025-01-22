@@ -9,7 +9,7 @@ restore:
 	pip install -r $(output)
 
 unit_tests:
-	pytest -v
+	pytest -v --junit-xml=test-results.xml
 
 static_code_analysis:
 	flake8 ./k8sfoam
@@ -21,9 +21,6 @@ bandit:
 	bandit --configfile bandit.yaml -r ./k8sfoam
 
 tests: check_types static_code_analysis bandit unit_tests
-
-# start_server:
-# 	gunicorn -b 0.0.0.0:8080 webserver:app
 
 setup:
 	python ./setup.py sdist
