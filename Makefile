@@ -25,13 +25,6 @@ tests: check_types static_code_analysis bandit unit_tests
 build:
 	python ./setup.py sdist bdist_wheel
 
-install:
-	python ./setup.py install --record $(record)
-
 clean:
 	python setup.py clean --all
-
-reinstall: clean build install
-
-uninstall: clean
-	pip uninstall k8sfoams
+	rm -rf dist *.egg-info
