@@ -1,7 +1,0 @@
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-.vscode
-.github/
-LICENSE
-record.txt

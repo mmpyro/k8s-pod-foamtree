@@ -1,12 +1,8 @@
-input='requirements.in'
-output='requirements.txt'
-record='record.txt'
-
-compile:
-	pip-compile $(input) -o $(output)
-
 restore:
-	pip install -r $(output)
+	python setup.py install
+
+restore_dev:
+	pip install 'k8sfoams[dev]'
 
 unit_tests:
 	pytest -v --junit-xml=test-results.xml
@@ -22,19 +18,9 @@ bandit:
 
 tests: check_types static_code_analysis bandit unit_tests
 
-setup:
-	python ./setup.py sdist
-
 build:
-	python ./setup.py build
-
-install:
-	python ./setup.py install --record $(record)
+	python ./setup.py sdist bdist_wheel
 
 clean:
 	python setup.py clean --all
-
-reinstall: clean build install
-
-uninstall: clean
-	pip uninstall k8sfoams
+	rm -rf dist *.egg-info
