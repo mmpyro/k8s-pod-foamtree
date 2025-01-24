@@ -48,9 +48,7 @@ jobs:
           reporter: java-junit
 
       - name: Build the package
-        run: |
-          make restore
-          make build
+        run: make build
 
       - name: Publish to PyPI
         if: github.ref_name == 'main'

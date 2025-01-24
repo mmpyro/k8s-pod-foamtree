@@ -1,7 +1,3 @@
-input='requirements.in'
-output='requirements.txt'
-record='record.txt'
-
 restore:
 	python setup.py install
 
