@@ -4,9 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "k8sfoams"
-version = "1.1.4"
+version = "1.1.5"
 description = "K8s pod foamtree visualizer"
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 license = { text = "Apache 2.0" }
 authors = [
     { name = "Michal Marszalek", email = "mmpyro@gmail.com" }
