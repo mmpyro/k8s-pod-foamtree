@@ -44,12 +44,9 @@ k8sfoams = "k8sfoam.src.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["k8sfoam"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"k8sfoam/src/frontend" = "k8sfoam/src/frontend"
+only-include = ["k8sfoam"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/k8sfoam",
-    "MANIFEST.in",
 ]
