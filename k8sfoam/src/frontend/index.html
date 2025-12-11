@@ -5,18 +5,20 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <title>K8s requested resources</title>
+    <title>Kubernetes Resources | FoamTree</title>
 
+    <!-- Bootstrap 4 (Keep for JS dependencies like collapse) -->
     <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.0/css/bootstrap.min.css"
         integrity="sha384-9gVQ4dYFwwWSjIDZnLEWnxCjeSWFphJiwGPXr1jddIhOegiu1FwO5qRGvFXOdJZ4" crossorigin="anonymous">
-    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/font-awesome/4.4.0/css/font-awesome.min.css">
+
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.0.13/css/all.css"
+        integrity="sha384-DNOHZ68U8hZfKXOrtjWvjxusGo9WQnrNx2sqG0tfsghAvtVlRW3tvkXWZh58N9jp" crossorigin="anonymous">
+
+    <!-- Custom CSS -->
     <link rel="stylesheet" href="style.css">
-    <script defer src="https://use.fontawesome.com/releases/v5.0.13/js/solid.js"
-        integrity="sha384-tzzSw1/Vo+0N5UhStP3bvwWPq+uvzCMfrN1fEFe+xBmv1C/AtVX5K0uZtmcHitFZ"
-        crossorigin="anonymous"></script>
-    <script defer src="https://use.fontawesome.com/releases/v5.0.13/js/fontawesome.js"
-        integrity="sha384-6OIrr52G08NpOFSZdxxz1xdNSndlD4vdcf/q2myIUVO0VsqaGHJsB0RaBE01VTOY"
-        crossorigin="anonymous"></script>
+
+    <!-- Scripts -->
     <script src="./node_modules/@carrotsearch/foamtree/foamtree.min.js"></script>
     <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.0/umd/popper.min.js"
@@ -30,88 +32,88 @@
 
 <body>
     <div class="wrapper">
-        <!-- Sidebar Holder -->
+        <!-- Sidebar -->
         <nav id="sidebar">
             <div class="sidebar-header">
-                <h3>K8s requested resources</h3>
+                <h3>K8s Resources</h3>
             </div>
 
             <ul class="list-unstyled components">
                 <li class="active">
-                    <a href="#homeSubmenu" data-toggle="collapse" aria-expanded="false"
-                        class="dropdown-toggle">Resources</a>
-                    <ul class="collapse list-unstyled" id="homeSubmenu">
+                    <a href="#resourcesSubmenu" data-toggle="collapse" aria-expanded="true" class="dropdown-toggle">
+                        <i class="fas fa-chart-pie mr-2"></i> Resources
+                    </a>
+                    <ul class="collapse list-unstyled show" id="resourcesSubmenu">
                         <li>
-                            <a class="resources" href="#">CPU</a>
+                            <a class="resources" href="#"><i class="fas fa-microchip mr-2"></i> CPU</a>
                         </li>
                         <li>
-                            <a class="resources" href="#">Memory</a>
+                            <a class="resources" href="#"><i class="fas fa-memory mr-2"></i> Memory</a>
                         </li>
-                        <li>
-                            <p>Refresh time</p>
+                        <li class="sidebar-control-group">
+                            <p
+                                style="padding: 0; margin-bottom: 5px; color: var(--text-secondary); text-transform:none;">
+                                Refresh Interval</p>
                             <input type="range" min="30" max="600" value="180" class="slider" id="refreshRange">
-                            <dev style="padding: 3px 5px 0px 5px;" id="refreshRangeValue">180[s]</dev>
-                            <button type="button" class="btn btn-sm" id="refreshButton"
-                                style="margin-top: 10px; width: calc(100% - 20px); margin-left: 10px; margin-right: 10px; background-color: #6d7fcc; color: white; border: none;">
-                                <i class="fa fa-refresh"></i> Refresh Now
+                            <div
+                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                                <span id="refreshRangeValue"
+                                    style="font-size: 0.85rem; color: var(--text-primary);">180s</span>
+                            </div>
+
+                            <button type="button" class="btn-primary-custom" id="refreshButton">
+                                <i class="fas fa-sync-alt"></i> Refresh
                             </button>
                         </li>
-                        <li>
-                            <p>
-                                <dev>Memory unit</dev>
-                                <select class="form-control" id="memoryUnit">
-                                    <option value="KB">KB</option>
-                                    <option selected="selected" value="MB">MB</option>
-                                    <option value="GB">GB</option>
-                                    <option value="TB">TB</option>
-                                </select>
-                            </p>
+                        <li class="sidebar-control-group">
+                            <p
+                                style="padding: 0; margin-bottom: 5px; color: var(--text-secondary); text-transform:none;">
+                                Memory Unit</p>
+                            <select class="form-control form-control-sm" id="memoryUnit">
+                                <option value="KB">KB</option>
+                                <option selected="selected" value="MB">MB</option>
+                                <option value="GB">GB</option>
+                                <option value="TB">TB</option>
+                            </select>
                         </li>
                     </ul>
                 </li>
                 <li>
-                    <a href="#pageSubmenu" data-toggle="collapse" aria-expanded="false"
-                        class="dropdown-toggle">Contexts</a>
-                    <ul class="collapse list-unstyled" id="pageSubmenu">
-                        <li>
-                            <select class="form-control" id="contexts"></select>
+                    <a href="#contextsSubmenu" data-toggle="collapse" aria-expanded="false" class="dropdown-toggle">
+                        <i class="fas fa-cubes mr-2"></i> Contexts
+                    </a>
+                    <ul class="collapse list-unstyled" id="contextsSubmenu">
+                        <li class="sidebar-control-group">
+                            <select class="form-control form-control-sm" id="contexts"></select>
                         </li>
                     </ul>
                 </li>
             </ul>
         </nav>
 
-        <!-- Page Content Holder -->
+        <!-- Page Content -->
         <div id="content">
-            <nav class="navbar navbar-expand-lg navbar-light bg-light">
-                <div class="container-fluid">
+            <nav class="navbar">
+                <button type="button" id="sidebarCollapse">
+                    <span></span>
+                </button>
 
-                    <button type="button" id="sidebarCollapse" class="navbar-btn">
-                        <span></span>
-                        <span></span>
-                        <span></span>
-                    </button>
-                    <button class="btn btn-dark d-inline-block d-lg-none ml-auto" type="button" data-toggle="collapse"
-                        data-target="#navbarSupportedContent" aria-controls="navbarSupportedContent"
-                        aria-expanded="false" aria-label="Toggle navigation">
-                        <i class="fas fa-align-justify"></i>
-                    </button>
-
-                    <div class="collapse navbar-collapse" id="navbarSupportedContent"></div>
+                <div style="text-align: right;">
+                    <h2 id="k8sTitle">Loading...</h2>
+                    <div id="k8sSelectedItem">Hover over a group to see details</div>
                 </div>
             </nav>
 
-            <h2 id="k8sSelectedItem"></h2>
-            <p>
-            <div id="loading"
-                style="display: flex; justify-content: center; align-items: center; width: 1000px; height: 800px;">
-                <div class="loading-content">
-                    <div class="spinner"></div>
-                    <p class="loading-text">Loading visualization...</p>
+            <div class="visualization-container">
+                <div id="loading">
+                    <div class="loading-content">
+                        <div class="spinner"></div>
+                        <p class="loading-text">Loading visualization...</p>
+                    </div>
                 </div>
+                <!-- FoamTree will be rendered here -->
+                <div id="visualization"></div>
             </div>
-            <div id="visualization" style="width: 1000px; height: 800px; opacity: 0; position: absolute;"></div>
-            </p>
         </div>
     </div>
 </body>

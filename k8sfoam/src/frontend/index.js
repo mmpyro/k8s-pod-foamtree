@@ -51,6 +51,8 @@ $(document).ready(function () {
                 content = `${selectedFoam.label}, ${resourceType}: ${convertMemory(selectedFoam.weight, memoryUnit)}`;
             }
             $('#k8sSelectedItem').text(content);
+        } else {
+            $('#k8sSelectedItem').text('Hover over a group to see details');
         }
     }
 
@@ -61,18 +63,22 @@ $(document).ready(function () {
         } else {
             url = `${baseUrl}/resources/${resourceType}?context=${context}`;
         }
-        $('#k8sTitle').text(`K8s ${resourceType.toUpperCase()} request resources`);
+        $('#k8sTitle').text(`K8s ${resourceType.toUpperCase()} Resources`);
         $.get(url, function (data, status) {
             if (status === 'success') {
                 if (foamtree === null) {
                     try {
                         console.log('Initializing FoamTree with data:', data);
                         // Make visualization div have dimensions but invisible before FoamTree init
-                        $('#visualization').css({ display: 'block', opacity: 0 });
+                        // In new CSS, #visualization is always block, just verify opacity
+                        $('#visualization').css({ opacity: 0 });
 
                         foamtree = new CarrotSearchFoamTree({
                             id: "visualization",
                             dataObject: data,
+                            layout: "squarified",
+                            stacking: "flattened",
+                            pixelRatio: window.devicePixelRatio || 1,
                             groupColorDecorator: function (opts, params, vars) {
                                 if (params.group.color !== undefined) {
                                     vars.groupColor = params.group.color;
@@ -84,10 +90,16 @@ $(document).ready(function () {
                         // Hide loading indicator and show visualization
                         console.log('FoamTree initialized successfully, hiding loading indicator');
                         $('#loading').hide();
-                        $('#visualization').css({ opacity: 1, position: 'static' });
+                        $('#visualization').animate({ opacity: 1 }, 500);
+
+                        // Handle resizing
+                        window.addEventListener("resize", function () {
+                            if (foamtree) foamtree.resize();
+                        });
+
                     } catch (error) {
                         console.error('Error initializing FoamTree:', error);
-                        $('#loading').html('<div class="loading-content"><p class="loading-text" style="color: #d32f2f;">Error loading visualization. Check console for details.</p></div>');
+                        $('#loading').html('<div class="loading-content"><p class="loading-text" style="color: #ff6b6b;">Error loading visualization. Check console for details.</p></div>');
                     }
                 } else {
                     foamtree.set('dataObject', data);
@@ -150,11 +162,16 @@ $(document).ready(function () {
     $('#sidebarCollapse').on('click', function () {
         $('#sidebar').toggleClass('active');
         $(this).toggleClass('active');
+
+        // Wait for CSS transition to complete (300ms) then resize FoamTree
+        setTimeout(function () {
+            if (foamtree) foamtree.resize();
+        }, 310);
     });
 
     $('#refreshRange').on('change', function () {
         refreshInterval = this.value;
-        $('#refreshRangeValue').text(`${refreshInterval} [s]`);
+        $('#refreshRangeValue').text(`${refreshInterval}s`);
         if (worker !== undefined) {
             stopWorker();
             startWorker();
@@ -165,8 +182,10 @@ $(document).ready(function () {
         memoryUnit = this.value;
     });
 
-    $('.resources').on('click', function () {
-        resourceType = this.innerText;
+    $('.resources').on('click', function (e) {
+        e.preventDefault(); // Prevent default anchor behavior
+        // trim() to remove whitespace from icon spacing
+        resourceType = this.innerText.trim();
         getResources(resourceType.toLowerCase());
     });
 
