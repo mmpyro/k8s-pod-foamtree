@@ -170,6 +170,11 @@ $(document).ready(function () {
         getResources(resourceType.toLowerCase());
     });
 
+    $('#refreshButton').on('click', function () {
+        console.log('Manual refresh triggered');
+        getResources(resourceType.toLowerCase());
+    });
+
     getContexts();
     getResources(resourceType.toLowerCase());
     startWorker();
