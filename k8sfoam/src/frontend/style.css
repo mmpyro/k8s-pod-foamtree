@@ -222,3 +222,36 @@ a.article, a.article:hover {
     }
 
 }
+
+/* ---------------------------------------------------
+    LOADING INDICATOR STYLE
+----------------------------------------------------- */
+#loading {
+    background: #fafafa;
+}
+
+.loading-content {
+    text-align: center;
+}
+
+.spinner {
+    border: 8px solid #f3f3f3;
+    border-top: 8px solid #7386D5;
+    border-radius: 50%;
+    width: 60px;
+    height: 60px;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 20px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.loading-text {
+    color: #7386D5;
+    font-size: 1.2em;
+    font-weight: 500;
+    margin: 0;
+}

@@ -1,3 +1,6 @@
+// Move foamtree to global scope for debugging
+let foamtree = null;
+
 $(document).ready(function () {
     const resourceTypes = {
         cpu: 'CPU',
@@ -10,15 +13,14 @@ $(document).ready(function () {
         TB: 'TB',
     };
     const baseUrl = window.location.origin;
-    let foamtree = null;
     let resourceType = resourceTypes.cpu;
     let memoryUnit = memoryUnits.MB;
-    let refreshInterval = 60;
+    let refreshInterval = 180;
     let worker = null;
     let context = sessionStorage.getItem('context');
 
     function convertMemory(memory, memoryUnit) {
-        switch(memoryUnit) {
+        switch (memoryUnit) {
             case memoryUnits.KB:
                 return `${memory.toFixed(0)} [${memoryUnit}]`;
             case memoryUnits.MB:
@@ -36,17 +38,17 @@ $(document).ready(function () {
             weight: null
         };
 
-        if(event.group !== null && event.group !== undefined) {
+        if (event.group !== null && event.group !== undefined) {
             selectedFoam.label = event.group.label;
             selectedFoam.weight = event.group.weight;
         }
 
-        if(selectedFoam.label !== null && selectedFoam.weight !== null) {
+        if (selectedFoam.label !== null && selectedFoam.weight !== null) {
             let content = '';
-            if(resourceType === resourceTypes.cpu) {
-                content = `${selectedFoam.label}, ${resourceType}: ${selectedFoam.weight}`; 
+            if (resourceType === resourceTypes.cpu) {
+                content = `${selectedFoam.label}, ${resourceType}: ${selectedFoam.weight}`;
             } else {
-                content = `${selectedFoam.label}, ${resourceType}: ${convertMemory(selectedFoam.weight, memoryUnit)}`; 
+                content = `${selectedFoam.label}, ${resourceType}: ${convertMemory(selectedFoam.weight, memoryUnit)}`;
             }
             $('#k8sSelectedItem').text(content);
         }
@@ -54,26 +56,39 @@ $(document).ready(function () {
 
     function getResources(resourceType) {
         let url;
-        if(context === null) {
+        if (context === null) {
             url = `${baseUrl}/resources/${resourceType}`;
         } else {
             url = `${baseUrl}/resources/${resourceType}?context=${context}`;
         }
         $('#k8sTitle').text(`K8s ${resourceType.toUpperCase()} request resources`);
-        $.get(url, function(data, status){
-            if(status === 'success') {
+        $.get(url, function (data, status) {
+            if (status === 'success') {
                 if (foamtree === null) {
-                    foamtree = new CarrotSearchFoamTree({
-                    id: "visualization",
-                    dataObject: data,
-                    groupColorDecorator: function (opts, params, vars) {
-                        if (params.group.color !== undefined) {
-                            vars.groupColor = params.group.color;
-                            vars.labelColor = "auto";
-                        }
-                    },
-                    onGroupHover: onGroupHover
-                    });
+                    try {
+                        console.log('Initializing FoamTree with data:', data);
+                        // Make visualization div have dimensions but invisible before FoamTree init
+                        $('#visualization').css({ display: 'block', opacity: 0 });
+
+                        foamtree = new CarrotSearchFoamTree({
+                            id: "visualization",
+                            dataObject: data,
+                            groupColorDecorator: function (opts, params, vars) {
+                                if (params.group.color !== undefined) {
+                                    vars.groupColor = params.group.color;
+                                    vars.labelColor = "auto";
+                                }
+                            },
+                            onGroupHover: onGroupHover
+                        });
+                        // Hide loading indicator and show visualization
+                        console.log('FoamTree initialized successfully, hiding loading indicator');
+                        $('#loading').hide();
+                        $('#visualization').css({ opacity: 1, position: 'static' });
+                    } catch (error) {
+                        console.error('Error initializing FoamTree:', error);
+                        $('#loading').html('<div class="loading-content"><p class="loading-text" style="color: #d32f2f;">Error loading visualization. Check console for details.</p></div>');
+                    }
                 } else {
                     foamtree.set('dataObject', data);
                 }
@@ -82,19 +97,19 @@ $(document).ready(function () {
     }
 
     function startWorker() {
-        if (typeof(Worker) !== "undefined") {
-          if (worker === null) {
-            worker = new Worker('worker.js');
-            worker.postMessage(refreshInterval);
-          }
-          worker.onmessage = function(event) {
-            getResources(resourceType.toLowerCase());
-          };
+        if (typeof (Worker) !== "undefined") {
+            if (worker === null) {
+                worker = new Worker('worker.js');
+                worker.postMessage(refreshInterval);
+            }
+            worker.onmessage = function (event) {
+                getResources(resourceType.toLowerCase());
+            };
         } else {
-          console.log("Sorry! No Web Worker support.");
+            console.log("Sorry! No Web Worker support.");
         }
-      }
-      
+    }
+
     function stopWorker() {
         worker.terminate();
         worker = null;
@@ -102,11 +117,11 @@ $(document).ready(function () {
 
     function getContexts() {
         const url = `${baseUrl}/contexts`;
-        $.get(url, function(data, status) {
-            if(status === 'success') {
-                if(context !== null) {
-                    for(let item of data) {
-                        if(item.context === context) {
+        $.get(url, function (data, status) {
+            if (status === 'success') {
+                if (context !== null) {
+                    for (let item of data) {
+                        if (item.context === context) {
                             item.active = true;
                         } else {
                             item.active = false;
@@ -115,8 +130,8 @@ $(document).ready(function () {
                 }
 
                 var $dropdown = $("#contexts");
-                $.each(data, function() {
-                    if(this.active === false) {
+                $.each(data, function () {
+                    if (this.active === false) {
                         $dropdown.append($("<option />").val(this.context).text(this.context));
                     } else {
                         $dropdown.append($("<option />").attr('selected', 'selected').val(this.context).text(this.context));
@@ -126,7 +141,7 @@ $(document).ready(function () {
         });
     }
 
-    $('#contexts').on('change', function() {
+    $('#contexts').on('change', function () {
         context = this.value;
         sessionStorage.setItem('context', context);
         getResources(resourceType.toLowerCase());
@@ -137,20 +152,20 @@ $(document).ready(function () {
         $(this).toggleClass('active');
     });
 
-    $('#refreshRange').on('change', function(){
+    $('#refreshRange').on('change', function () {
         refreshInterval = this.value;
         $('#refreshRangeValue').text(`${refreshInterval} [s]`);
-        if(worker !== undefined) {
+        if (worker !== undefined) {
             stopWorker();
             startWorker();
         }
     });
 
-    $('#memoryUnit').on('change', function(){
+    $('#memoryUnit').on('change', function () {
         memoryUnit = this.value;
     });
 
-    $('.resources').on('click', function() {
+    $('.resources').on('click', function () {
         resourceType = this.innerText;
         getResources(resourceType.toLowerCase());
     });
