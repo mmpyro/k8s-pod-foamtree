@@ -110,6 +110,13 @@ a[aria-expanded="true"] {
     border-left: 3px solid var(--accent);
 }
 
+#sidebar ul li a.resources.active,
+#sidebar ul li a.vis-layout.active {
+    color: var(--accent);
+    background: rgba(99, 102, 241, 0.1);
+    border-left: 3px solid var(--accent);
+}
+
 /* Sidebar Submenus */
 ul.collapse.list-unstyled {
     background: rgba(0, 0, 0, 0.2);
@@ -188,6 +195,10 @@ ul.collapse.list-unstyled li a {
 .btn-primary-custom:hover {
     background-color: var(--accent-hover);
     color: white;
+}
+
+#refreshButton {
+    margin-bottom: 20px;
 }
 
 /* Content */

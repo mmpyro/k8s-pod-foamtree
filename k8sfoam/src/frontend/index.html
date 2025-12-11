@@ -45,7 +45,7 @@
                     </a>
                     <ul class="collapse list-unstyled show" id="resourcesSubmenu">
                         <li>
-                            <a class="resources" href="#"><i class="fas fa-microchip mr-2"></i> CPU</a>
+                            <a class="resources active" href="#"><i class="fas fa-microchip mr-2"></i> CPU</a>
                         </li>
                         <li>
                             <a class="resources" href="#"><i class="fas fa-memory mr-2"></i> Memory</a>
@@ -75,6 +75,21 @@
                                 <option value="GB">GB</option>
                                 <option value="TB">TB</option>
                             </select>
+                        </li>
+                    </ul>
+                </li>
+                <li>
+                    <a href="#layoutSubmenu" data-toggle="collapse" aria-expanded="false" class="dropdown-toggle">
+                        <i class="fas fa-layer-group mr-2"></i> Layout
+                    </a>
+                    <ul class="collapse list-unstyled" id="layoutSubmenu">
+                        <li>
+                            <a class="vis-layout active" data-layout="squarified" href="#"><i
+                                    class="fas fa-vector-square mr-2"></i> Rectangle</a>
+                        </li>
+                        <li>
+                            <a class="vis-layout" data-layout="relaxed" href="#"><i class="fas fa-shapes mr-2"></i>
+                                Voronoi</a>
                         </li>
                     </ul>
                 </li>

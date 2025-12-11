@@ -18,6 +18,7 @@ $(document).ready(function () {
     let refreshInterval = 180;
     let worker = null;
     let context = sessionStorage.getItem('context');
+    let currentLayout = 'squarified';
 
     function convertMemory(memory, memoryUnit) {
         switch (memoryUnit) {
@@ -76,7 +77,7 @@ $(document).ready(function () {
                         foamtree = new CarrotSearchFoamTree({
                             id: "visualization",
                             dataObject: data,
-                            layout: "squarified",
+                            layout: currentLayout,
                             stacking: "flattened",
                             pixelRatio: window.devicePixelRatio || 1,
                             groupColorDecorator: function (opts, params, vars) {
@@ -184,9 +185,26 @@ $(document).ready(function () {
 
     $('.resources').on('click', function (e) {
         e.preventDefault(); // Prevent default anchor behavior
+
+        // Update active state
+        $('.resources').removeClass('active');
+        $(this).addClass('active');
+
         // trim() to remove whitespace from icon spacing
         resourceType = this.innerText.trim();
         getResources(resourceType.toLowerCase());
+    });
+
+    $('.vis-layout').on('click', function (e) {
+        e.preventDefault();
+
+        $('.vis-layout').removeClass('active');
+        $(this).addClass('active');
+
+        currentLayout = $(this).data('layout');
+        if (foamtree) {
+            foamtree.set('layout', currentLayout);
+        }
     });
 
     $('#refreshButton').on('click', function () {
