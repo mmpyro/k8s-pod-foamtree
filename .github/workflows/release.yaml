@@ -12,6 +12,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -41,12 +45,19 @@ jobs:
       - name: Run unit tests
         run: make unit_tests
 
-      - name: Unit tests report
-        uses: dorny/test-reporter@v1
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
         if: always()
         with:
-          name: unittests
+          name: test-results
           path: test-results.xml
+
+      - name: Unit tests report
+        uses: dorny/test-reporter@v1
+        if: success() || failure()
+        with:
+          name: unittests
+          path: '**/test-results.xml'
           reporter: java-junit
 
       - name: Build the package
