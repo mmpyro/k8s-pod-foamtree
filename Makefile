@@ -1,26 +1,30 @@
 restore:
-	python setup.py install
+	uv pip install -e .
 
 restore_dev:
-	pip install 'k8sfoams[dev]'
+	uv pip install -e '.[dev]'
+
+run:
+	uv run k8sfoams
 
 unit_tests:
-	pytest -v --junit-xml=test-results.xml
+	uv run pytest -v --junit-xml=test-results.xml
 
 static_code_analysis:
-	flake8 ./k8sfoam
+	uv run flake8 ./k8sfoam
 
 check_types:
-	mypy ./k8sfoam
+	uv run mypy ./k8sfoam
 
 bandit:
-	bandit --configfile bandit.yaml -r ./k8sfoam
+	uv run bandit --configfile bandit.yaml -r ./k8sfoam
 
 tests: check_types static_code_analysis bandit unit_tests
 
 build:
-	python ./setup.py sdist bdist_wheel
+	uv build
 
 clean:
-	python setup.py clean --all
-	rm -rf dist *.egg-info
+	rm -rf dist *.egg-info build
+	find . -type d -name __pycache__ -exec rm -rf {} +
+	find . -type f -name '*.pyc' -delete

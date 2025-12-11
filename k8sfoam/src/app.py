@@ -1,3 +1,4 @@
+import argparse
 from flask import Flask, jsonify, request
 from typing import Optional
 from k8sfoam.src.k8s.k8s_client import K8sClient
@@ -42,3 +43,16 @@ def create_app() -> Optional[Flask]:
         return app
     except Exception:
         return None
+
+
+def main():
+    """Main entry point for the k8sfoams console script."""
+    app = create_app()
+
+    if app:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--host', type=str, default='127.0.0.1', required=False, help='Host IP on which server listen')
+        parser.add_argument('--port', type=int, default=8080, required=False, help='Port on which server listen')
+        parser.add_argument('-d', action='store_true', help='Run server in debug mode')
+        args = parser.parse_args()
+        app.run(host=args.host, port=args.port, debug=args.d)

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "k8sfoams"
+version = "1.1.4"
+description = "K8s pod foamtree visualizer"
+readme = "README.md"
+license = { text = "Apache 2.0" }
+authors = [
+    { name = "Michal Marszalek", email = "mmpyro@gmail.com" }
+]
+keywords = ["foamtree", "k8s", "visualization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.9",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.1.0",
+    "kubernetes>=32.0.0",
+    "pydash>=8.0.4",
+    "bitmath>=1.3.3.1",
+    "requests>=2.32.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "flake8>=7.1.1",
+    "mypy>=1.14.1",
+    "mock>=5.1.0",
+    "bandit>=1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mmpyro/k8s-pod-foamtree"
+
+[project.scripts]
+k8sfoams = "k8sfoam.src.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["k8sfoam"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"k8sfoam/src/frontend" = "k8sfoam/src/frontend"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/k8sfoam",
+    "MANIFEST.in",
+]
