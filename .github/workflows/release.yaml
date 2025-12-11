@@ -31,19 +31,10 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: make restore_dev
+        run: make restore_ci
 
-      - name: Run flake
-        run: make static_code_analysis
-
-      - name: Run mypy
-        run: make check_types
-
-      - name: Run bandit
-        run: make bandit
-
-      - name: Run unit tests
-        run: make unit_tests
+      - name: Run tests
+        run: make tests_ci
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -69,5 +60,5 @@ jobs:
           TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
         run: |
-          uv pip install twine
-          uv run twine upload dist/*
+          uv pip install --system twine
+          twine upload dist/*

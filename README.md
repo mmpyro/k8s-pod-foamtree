@@ -81,6 +81,13 @@ make check_types
 make bandit
 ```
 
+### CI/CD targets
+For CI/CD environments (GitHub Actions, etc.), use these targets that work with system Python:
+```bash
+make restore_ci   # Install dependencies with --system flag
+make tests_ci     # Run all tests without uv run prefix
+```
+
 ### Building the package
 ```bash
 make build
