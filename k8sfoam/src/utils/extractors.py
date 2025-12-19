@@ -13,10 +13,8 @@ class ResourcesExtractor():
     def __convert_cpu(self, cpu: str) -> Optional[int]:
         if 'm' in cpu:
             return int(cpu.replace('m', ''))
-        elif 'Ki' in cpu:
-            return int(cpu.replace('Ki', '')) * 1000
         else:
-            return int(cpu) * 1000
+            return int(float(cpu) * 1000)
 
     def __convert_memory(self, memory: str) -> float:
         value = 0
@@ -33,7 +31,7 @@ class ResourcesExtractor():
         elif 'Ei' in memory:
             value = bitmath.EiB(self.__convert_to_int(memory, 'Ei')).kB
         elif 'K' in memory:
-            value = bitmath.KB(self.__convert_to_int(memory, 'K')).kB
+            value = bitmath.kB(self.__convert_to_int(memory, 'K')).kB
         elif 'M' in memory:
             value = bitmath.MB(self.__convert_to_int(memory, 'M')).kB
         elif 'G' in memory:
@@ -44,6 +42,9 @@ class ResourcesExtractor():
             value = bitmath.PB(self.__convert_to_int(memory, 'P')).kB
         elif 'E' in memory:
             value = bitmath.EB(self.__convert_to_int(memory, 'E')).kB
+        else:
+            # Assume bytes if no suffix
+            value = bitmath.Byte(float(memory)).kB
         return float(value)
 
     def extract_pod_requested_resources(self, pod) -> PodResources:
