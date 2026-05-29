@@ -146,7 +146,15 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 }
 
 /* Context list */
-.ctx-list { display: flex; flex-direction: column; gap: 2px; }
+.ctx-list {
+  display: flex; flex-direction: column; gap: 2px;
+  max-height: 172px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.ctx-list::-webkit-scrollbar { width: 6px; }
+.ctx-list::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
+.ctx-list::-webkit-scrollbar-track { background: transparent; }
 .ctx-item {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 10px;
@@ -228,6 +236,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 }
 .footer-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
 .footer-row.dim { color: var(--text-soft); }
+.footer-tail { margin-left: auto; }
 .dot { width: 6px; height: 6px; border-radius: 50%; }
 .dot-ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
 

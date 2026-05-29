@@ -19,19 +19,11 @@ const METRICS = [
   { id: "mem", label: "Memory", icon: "mem" },
 ];
 
-const MOCK_CONTEXTS = [
-  { context: "arn:aws:eks:us-east-1:905418396056:cluster/h2oai-prod", active: true },
-  { context: "arn:aws:eks:us-east-1:905418396056:cluster/h2oai-staging", active: false },
-  { context: "arn:aws:eks:us-west-2:905418396056:cluster/h2oai-dev", active: false },
-  { context: "gke_h2oai-research_us-central1_research-cluster", active: false },
-];
-
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "colorScheme": "spectrum",
   "nodeStyle": "gradient",
   "density": "comfortable",
   "showLabels": true,
-  "layout": "rectangle",
   "accent": "#7c5cff"
 }/*EDITMODE-END*/;
 
@@ -195,6 +187,11 @@ function App() {
     }
   }, [contextIdx, contexts.length]);
 
+  // Keep a stable ref to the latest loadData so the auto-refresh interval
+  // always calls the current closure without re-subscribing each render.
+  const loadDataRef = useRef(loadData);
+  loadDataRef.current = loadData;
+
   const filtered = useMemo(
     () => nodes.filter(n => !query || n.name.toLowerCase().includes(query.toLowerCase())),
     [nodes, query]
@@ -213,13 +210,13 @@ function App() {
     return t;
   }, [nodes]);
 
-  // Refresh tick
+  // Auto-refresh tick — re-fetch live cluster data every refreshInterval seconds.
   useEffect(() => {
     const id = setInterval(() => {
-      setSeed(s => s + 1);
+      if (contexts.length > 0) loadDataRef.current();
     }, refreshInterval * 1000);
     return () => clearInterval(id);
-  }, [refreshInterval]);
+  }, [refreshInterval, contexts.length]);
 
   // Auto-set accent CSS var
   useEffect(() => {
@@ -234,7 +231,6 @@ function App() {
          metric={metric} setMetric={setMetric}
          memUnit={memUnit} setMemUnit={setMemUnit}
          refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
-         layout={tw.layout} setLayout={(v) => setTweak("layout", v)}
          contexts={contexts}
          contextIdx={contextIdx} setContextIdx={setContextIdx}
          doRefresh={loadData} refreshing={refreshing}
@@ -246,7 +242,6 @@ function App() {
         {error && (
           <div className="error-banner">
             <span>Failed to connect to cluster: {error}</span>
-            <button onClick={() => { /* No-op since demo mode removed */ }} disabled>Switch to Demo Mode</button>
           </div>
         )}
 
@@ -317,7 +312,7 @@ function App() {
 
 function Sidebar({
   open, onToggle, metric, setMetric, memUnit, setMemUnit,
-  refreshInterval, setRefreshInterval, layout, setLayout,
+  refreshInterval, setRefreshInterval,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount
 }) {
   return (
@@ -355,17 +350,20 @@ function Sidebar({
       <div className="sidebar-section">
         <div className="section-label">Context</div>
         <div className="ctx-list">
-          {contexts.map((c, i) => (
-            <button key={c.context}
-              className={`ctx-item ${i === contextIdx ? "ctx-on" : ""}`}
-              onClick={() => setContextIdx(i)}>
-              <span className="ctx-dot" style={{
-                background: i === contextIdx ? "var(--accent)" : "var(--line)"
-              }}/>
-              <span className="ctx-name">{c.context.split("/").pop()}</span>
-              <span className="ctx-tail">{c.context.includes("eks") ? "eks" : c.context.includes("gke") ? "gke" : "k8s"}</span>
-            </button>
-          ))}
+          {contexts
+            .map((c, i) => ({ c, i }))
+            .sort((a, b) => (a.i === contextIdx ? -1 : b.i === contextIdx ? 1 : 0))
+            .map(o => (
+              <button key={o.i}
+                className={`ctx-item ${o.i === contextIdx ? "ctx-on" : ""}`}
+                onClick={() => setContextIdx(o.i)}>
+                <span className="ctx-dot" style={{
+                  background: o.i === contextIdx ? "var(--accent)" : "var(--line)"
+                }}/>
+                <span className="ctx-name">{o.c.context.split("/").pop()}</span>
+                <span className="ctx-tail">{o.c.context.includes("eks") ? "eks" : o.c.context.includes("gke") ? "gke" : "k8s"}</span>
+              </button>
+            ))}
         </div>
       </div>
 
@@ -396,12 +394,13 @@ function Sidebar({
 
       <div className="sidebar-footer">
         <div className="footer-row">
-          <span className="dot">Cluster Connected</span>
-          <span>Ready</span>
+          <span className="dot dot-ok"/>
+          <span>Cluster connected</span>
+          <span className="footer-tail">Ready</span>
         </div>
         <div className="footer-row dim">
           <span>{nodeCount} nodes</span>
-          <span>· {timeAgo(lastRefresh)}</span>
+          <span className="footer-tail">· {timeAgo(lastRefresh)}</span>
         </div>
       </div>
     </aside>
@@ -413,7 +412,6 @@ function Sidebar({
 function Header({ metric, totals, query, setQuery, memUnit, contexts, contextIdx, onMenu, onRefresh, refreshing }) {
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
   const memPct = totals.memUsed / (totals.memCap || 1);
-  const memDivisor = memUnit === "TiB" ? 1024 * 1024 : memUnit === "GiB" ? 1024 : 1;
 
   const currentCtx = contexts[contextIdx];
   const contextLabel = currentCtx ? shortContext(currentCtx.context) : "No Context";
@@ -436,7 +434,7 @@ function Header({ metric, totals, query, setQuery, memUnit, contexts, contextIdx
 
       <div className="header-stats">
         <Stat label="CPU" value={`${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)}`} unit="cores" pct={cpuPct}/>
-        <Stat label="Memory" value={`${(totals.memUsed / memDivisor).toFixed(memUnit === "MiB" ? 0 : 1)} / ${(totals.memCap / memDivisor).toFixed(0)}`} unit={memUnit} pct={memPct}/>
+        <Stat label="Memory" value={`${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)}`} unit={memUnit} pct={memPct}/>
         <Stat label="Pods" value={totals.pods} unit={`/ ${totals.nodes * 110} cap`} pct={totals.pods / (totals.nodes * 110 || 1)}/>
       </div>
 
@@ -530,7 +528,6 @@ function TreemapGrid({ nodes, metric, colorScheme, nodeStyle, density, showLabel
 /* ─────────── Focus overlay ─────────── */
 
 function FocusOverlay({ node, onClose, metric, memUnit }) {
-  const memDivisor = memUnit === "TiB" ? 1024 * 1024 : memUnit === "GiB" ? 1024 : 1;
   return (
     <div className="overlay" onClick={onClose}>
       <div className="overlay-card" onClick={e => e.stopPropagation()}>
@@ -554,7 +551,7 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
           </div>
           <div className="ov-stat">
             <div className="ov-label">Memory</div>
-            <div className="ov-val">{(node.memUsed / memDivisor).toFixed(1)} / {(node.memCapacity / memDivisor).toFixed(0)} <span>{memUnit}</span></div>
+            <div className="ov-val">{fmtMem(node.memUsed, memUnit)} / {fmtMem(node.memCapacity, memUnit, true)} <span>{memUnit}</span></div>
             <div className="ov-bar"><div style={{ width: `${(node.memUsed/(node.memCapacity || 1))*100}%`, background: "#a78bfa" }}/></div>
           </div>
           <div className="ov-stat">
@@ -585,7 +582,7 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
                     <span className="pod-row-unit">cores</span>
                   </div>
                   <div className="pod-row-stat">
-                    <span className="pod-row-num">{(mem/memDivisor).toFixed(1)}</span>
+                    <span className="pod-row-num">{fmtMem(mem, memUnit)}</span>
                     <span className="pod-row-unit">{memUnit}</span>
                   </div>
                 </div>
@@ -617,6 +614,21 @@ function MetricIcon({ kind }) {
 }
 
 /* ─────────── Utils ─────────── */
+
+// Format a MiB memory value into the active unit. MiB/GiB keep their original
+// precision (and integer capacity); TiB uses adaptive decimals so a non-zero
+// quantity never renders as a flat "0" (TiB is coarse for node/pod memory).
+function fmtMem(mib, unit, capacity = false) {
+  const div = unit === "TiB" ? 1024 * 1024 : unit === "GiB" ? 1024 : 1;
+  const v = mib / div;
+  if (unit === "MiB") return v.toFixed(0);
+  if (unit === "GiB") return v.toFixed(capacity ? 0 : 1);
+  // TiB: grow decimals (2 → max 6) until the rounded value is non-zero.
+  if (v === 0) return "0";
+  let d = 2;
+  while (d < 6 && Number(v.toFixed(d)) === 0) d++;
+  return v.toFixed(d);
+}
 
 function shortContext(ctx) {
   // turn "arn:aws:eks:us-east-1:905…:cluster/h2oai-prod" → "h2oai-prod · us-east-1"
