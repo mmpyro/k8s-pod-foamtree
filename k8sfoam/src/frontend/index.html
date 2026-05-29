@@ -1,136 +1,23 @@
-<!DOCTYPE html>
-<html>
-
+<!doctype html>
+<html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <title>Kubernetes Resources | FoamTree</title>
-
-    <!-- Bootstrap 4 (Keep for JS dependencies like collapse) -->
-    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.0/css/bootstrap.min.css"
-        integrity="sha384-9gVQ4dYFwwWSjIDZnLEWnxCjeSWFphJiwGPXr1jddIhOegiu1FwO5qRGvFXOdJZ4" crossorigin="anonymous">
-
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.0.13/css/all.css"
-        integrity="sha384-DNOHZ68U8hZfKXOrtjWvjxusGo9WQnrNx2sqG0tfsghAvtVlRW3tvkXWZh58N9jp" crossorigin="anonymous">
-
-    <!-- Custom CSS -->
-    <link rel="stylesheet" href="style.css">
-
-    <!-- Scripts -->
-    <script src="./node_modules/@carrotsearch/foamtree/foamtree.min.js"></script>
-    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.0/umd/popper.min.js"
-        integrity="sha384-cs/chFZiN24E4KMATLdqdvsezGxaGsi4hLGOzlXwp5UZB1LY//20VyM2taTB4QvJ"
-        crossorigin="anonymous"></script>
-    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.1.0/js/bootstrap.min.js"
-        integrity="sha384-uefMccjFJAIv6A+rW+L4AHf99KvxDjWSu1z9VI8SKNVmz4sk7buKt/6v9KI65qnm"
-        crossorigin="anonymous"></script>
-    <script src="./index.js"></script>
+<meta charset="utf-8"/>
+<title>k8sfoams — Cluster Topology</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="styles.css"/>
 </head>
-
 <body>
-    <div class="wrapper">
-        <!-- Sidebar -->
-        <nav id="sidebar">
-            <div class="sidebar-header">
-                <h3>K8s Resources</h3>
-            </div>
+<div id="root"></div>
 
-            <ul class="list-unstyled components">
-                <li class="active">
-                    <a href="#resourcesSubmenu" data-toggle="collapse" aria-expanded="true" class="dropdown-toggle">
-                        <i class="fas fa-chart-pie mr-2"></i> Resources
-                    </a>
-                    <ul class="collapse list-unstyled show" id="resourcesSubmenu">
-                        <li>
-                            <a class="resources active" href="#"><i class="fas fa-microchip mr-2"></i> CPU</a>
-                        </li>
-                        <li>
-                            <a class="resources" href="#"><i class="fas fa-memory mr-2"></i> Memory</a>
-                        </li>
-                        <li class="sidebar-control-group">
-                            <p
-                                style="padding: 0; margin-bottom: 5px; color: var(--text-secondary); text-transform:none;">
-                                Refresh Interval</p>
-                            <input type="range" min="30" max="600" value="180" class="slider" id="refreshRange">
-                            <div
-                                style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                                <span id="refreshRangeValue"
-                                    style="font-size: 0.85rem; color: var(--text-primary);">180s</span>
-                            </div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
-                            <button type="button" class="btn-primary-custom" id="refreshButton">
-                                <i class="fas fa-sync-alt"></i> Refresh
-                            </button>
-                        </li>
-                        <li class="sidebar-control-group">
-                            <p
-                                style="padding: 0; margin-bottom: 5px; color: var(--text-secondary); text-transform:none;">
-                                Memory Unit</p>
-                            <select class="form-control form-control-sm" id="memoryUnit">
-                                <option value="KB">KB</option>
-                                <option selected="selected" value="MB">MB</option>
-                                <option value="GB">GB</option>
-                                <option value="TB">TB</option>
-                            </select>
-                        </li>
-                    </ul>
-                </li>
-                <li>
-                    <a href="#layoutSubmenu" data-toggle="collapse" aria-expanded="false" class="dropdown-toggle">
-                        <i class="fas fa-layer-group mr-2"></i> Layout
-                    </a>
-                    <ul class="collapse list-unstyled" id="layoutSubmenu">
-                        <li>
-                            <a class="vis-layout active" data-layout="squarified" href="#"><i
-                                    class="fas fa-vector-square mr-2"></i> Rectangle</a>
-                        </li>
-                        <li>
-                            <a class="vis-layout" data-layout="relaxed" href="#"><i class="fas fa-shapes mr-2"></i>
-                                Voronoi</a>
-                        </li>
-                    </ul>
-                </li>
-                <li>
-                    <a href="#contextsSubmenu" data-toggle="collapse" aria-expanded="false" class="dropdown-toggle">
-                        <i class="fas fa-cubes mr-2"></i> Contexts
-                    </a>
-                    <ul class="collapse list-unstyled" id="contextsSubmenu">
-                        <li class="sidebar-control-group">
-                            <select class="form-control form-control-sm" id="contexts"></select>
-                        </li>
-                    </ul>
-                </li>
-            </ul>
-        </nav>
-
-        <!-- Page Content -->
-        <div id="content">
-            <nav class="navbar">
-                <button type="button" id="sidebarCollapse">
-                    <span></span>
-                </button>
-
-                <div style="text-align: right;">
-                    <h2 id="k8sTitle">Loading...</h2>
-                    <div id="k8sSelectedItem">Hover over a group to see details</div>
-                </div>
-            </nav>
-
-            <div class="visualization-container">
-                <div id="loading">
-                    <div class="loading-content">
-                        <div class="spinner"></div>
-                        <p class="loading-text">Loading visualization...</p>
-                    </div>
-                </div>
-                <!-- FoamTree will be rendered here -->
-                <div id="visualization"></div>
-            </div>
-        </div>
-    </div>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="treemap.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
 </body>
-
 </html>
