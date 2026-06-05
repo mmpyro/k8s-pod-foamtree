@@ -27,6 +27,12 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "#7c5cff"
 }/*EDITMODE-END*/;
 
+// Backend memory weights are decimal kB (bitmath .kB, 1 kB = 1000 bytes),
+// so MiB = kB * 1000 / 1024^2 — not a plain /1024, which would treat kB as KiB.
+function kbToMib(kb) {
+  return (kb * 1000) / (1024 * 1024);
+}
+
 // Merge separate CPU and Memory data structures from backend into rich unified structures.
 function mergeResources(cpuData, memData) {
   const cpuGroups = cpuData.groups || [];
@@ -70,9 +76,11 @@ function mergeResources(cpuData, memData) {
         const mc = memContsMap.get(cc.label) || { weight: 0 };
         return {
           name: cc.label,
+          // Backend marks init containers with a grey color hint
+          init: !!cc.color,
           cpu: cc.weight || 0,
           // Convert memory from kB to MiB
-          mem: (mc.weight || 0) / 1024
+          mem: kbToMib(mc.weight || 0)
         };
       });
 
@@ -84,14 +92,19 @@ function mergeResources(cpuData, memData) {
 
       pods.push({
         name: cp.label,
-        shortName: cp.label.replace(/^h2oai-/, '').split('-')[0],
+        shortName: cp.label.split('-')[0],
+        // Effective request (what the scheduler reserves) — init containers
+        // run sequentially, so this is max(sum regular, max init), not a sum.
+        cpu: podCpu,
+        // Convert memory from kB to MiB
+        mem: kbToMib(podMem),
         containers
       });
     }
 
     // Convert node capacity from kB to MiB
-    const memCapacity = (mg.weight || 0) / 1024;
-    const convertedMemUsed = memUsed / 1024;
+    const memCapacity = kbToMib(mg.weight || 0);
+    const convertedMemUsed = kbToMib(memUsed);
 
     return {
       id: `node-${idx}`,
@@ -157,7 +170,7 @@ function App() {
     try {
       const currentCtx = contexts[contextIdx];
       const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
-      
+
       const [cpuRes, memRes] = await Promise.all([
         fetch(`/resources/cpu${ctxParam}`).then(r => {
           if (!r.ok) throw new Error(`CPU resources endpoint returned status ${r.status}`);
@@ -168,7 +181,7 @@ function App() {
           return r.json();
         })
       ]);
-      
+
       const merged = mergeResources(cpuRes, memRes);
       setNodes(merged);
       setError(null);
@@ -225,18 +238,18 @@ function App() {
 
   return (
     <div className={`app ${sidebarOpen ? "sidebar-open" : "sidebar-collapsed"}`}>
-       <Sidebar
-         open={sidebarOpen}
-         onToggle={() => setSidebarOpen(s => !s)}
-         metric={metric} setMetric={setMetric}
-         memUnit={memUnit} setMemUnit={setMemUnit}
-         refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
-         contexts={contexts}
-         contextIdx={contextIdx} setContextIdx={setContextIdx}
-         doRefresh={loadData} refreshing={refreshing}
-         lastRefresh={lastRefresh}
-         nodeCount={nodes.length}
-       />
+      <Sidebar
+        open={sidebarOpen}
+        onToggle={() => setSidebarOpen(s => !s)}
+        metric={metric} setMetric={setMetric}
+        memUnit={memUnit} setMemUnit={setMemUnit}
+        refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
+        contexts={contexts}
+        contextIdx={contextIdx} setContextIdx={setContextIdx}
+        doRefresh={loadData} refreshing={refreshing}
+        lastRefresh={lastRefresh}
+        nodeCount={nodes.length}
+      />
 
       <main className="main">
         {error && (
@@ -321,9 +334,9 @@ function Sidebar({
         <div className="brand-mark">
           <svg viewBox="0 0 32 32" width="22" height="22" fill="none">
             <path d="M6 14 L16 6 L26 14 L26 26 L18 26 L18 19 L14 19 L14 26 L6 26 Z"
-              stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" fill="none"/>
-            <circle cx="11" cy="11" r="1.5" fill="currentColor"/>
-            <circle cx="21" cy="11" r="1.5" fill="currentColor"/>
+              stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" fill="none" />
+            <circle cx="11" cy="11" r="1.5" fill="currentColor" />
+            <circle cx="21" cy="11" r="1.5" fill="currentColor" />
           </svg>
         </div>
         <div className="brand-text">
@@ -331,7 +344,7 @@ function Sidebar({
           <div className="brand-sub">cluster topology</div>
         </div>
         <button className="icon-btn brand-collapse" onClick={onToggle} title="Collapse">
-          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M10 4 L6 8 L10 12" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round"/></svg>
+          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M10 4 L6 8 L10 12" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" /></svg>
         </button>
       </div>
 
@@ -341,7 +354,7 @@ function Sidebar({
           {METRICS.map(m => (
             <button key={m.id} className={metric === m.id ? "seg-on" : ""}
               onClick={() => setMetric(m.id)}>
-              <MetricIcon kind={m.icon}/> {m.label}
+              <MetricIcon kind={m.icon} /> {m.label}
             </button>
           ))}
         </div>
@@ -359,7 +372,7 @@ function Sidebar({
                 onClick={() => setContextIdx(o.i)}>
                 <span className="ctx-dot" style={{
                   background: o.i === contextIdx ? "var(--accent)" : "var(--line)"
-                }}/>
+                }} />
                 <span className="ctx-name">{o.c.context.split("/").pop()}</span>
                 <span className="ctx-tail">{o.c.context.includes("eks") ? "eks" : o.c.context.includes("gke") ? "gke" : "k8s"}</span>
               </button>
@@ -373,11 +386,11 @@ function Sidebar({
           <span className="section-value">{refreshInterval}s</span>
         </div>
         <input type="range" min="5" max="600" step="5" value={refreshInterval}
-          onChange={e => setRefreshInterval(+e.target.value)} className="slider"/>
+          onChange={e => setRefreshInterval(+e.target.value)} className="slider" />
         <button className={`btn-primary ${refreshing ? "spinning" : ""}`} onClick={doRefresh}>
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
-              stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+              stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           Refresh now
         </button>
@@ -394,7 +407,7 @@ function Sidebar({
 
       <div className="sidebar-footer">
         <div className="footer-row">
-          <span className="dot dot-ok"/>
+          <span className="dot dot-ok" />
           <span>Cluster connected</span>
           <span className="footer-tail">Ready</span>
         </div>
@@ -419,7 +432,7 @@ function Header({ metric, totals, query, setQuery, memUnit, contexts, contextIdx
   return (
     <header className="header">
       <button className="icon-btn" onClick={onMenu} aria-label="toggle sidebar">
-        <svg viewBox="0 0 20 20" width="16" height="16"><path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>
+        <svg viewBox="0 0 20 20" width="16" height="16"><path d="M3 6h14M3 10h14M3 14h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
       </button>
 
       <div className="header-title">
@@ -433,21 +446,21 @@ function Header({ metric, totals, query, setQuery, memUnit, contexts, contextIdx
       </div>
 
       <div className="header-stats">
-        <Stat label="CPU" value={`${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)}`} unit="cores" pct={cpuPct}/>
-        <Stat label="Memory" value={`${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)}`} unit={memUnit} pct={memPct}/>
-        <Stat label="Pods" value={totals.pods} unit={`/ ${totals.nodes * 110} cap`} pct={totals.pods / (totals.nodes * 110 || 1)}/>
+        <Stat label="CPU" value={`${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)}`} unit="cores" pct={cpuPct} />
+        <Stat label="Memory" value={`${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)}`} unit={memUnit} pct={memPct} />
+        <Stat label="Pods" value={totals.pods} unit={`/ ${totals.nodes * 110} cap`} pct={totals.pods / (totals.nodes * 110 || 1)} />
       </div>
 
       <div className="header-tools">
         <div className="search">
-          <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none"/><path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Filter nodes…"/>
+          <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none" /><path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Filter nodes…" />
           {query && <button className="search-clear" onClick={() => setQuery("")}>×</button>}
         </div>
         <button className={`icon-btn ${refreshing ? "spinning" : ""}`} onClick={onRefresh} title="Refresh">
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
-              stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+              stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
       </div>
@@ -465,7 +478,7 @@ function Stat({ label, value, unit, pct }) {
         <span className="stat-unit">{unit}</span>
       </div>
       <div className="stat-bar">
-        <div className="stat-bar-fill" style={{ width: `${Math.min(100, (pct || 0) * 100)}%`, background: color }}/>
+        <div className="stat-bar-fill" style={{ width: `${Math.min(100, (pct || 0) * 100)}%`, background: color }} />
       </div>
     </div>
   );
@@ -540,24 +553,24 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
             </div>
           </div>
           <button className="icon-btn" onClick={onClose}>
-            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/></svg>
+            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
           </button>
         </div>
         <div className="overlay-stats">
           <div className="ov-stat">
             <div className="ov-label">CPU</div>
             <div className="ov-val">{(node.cpuUsed / 1000).toFixed(2)} / {(node.cpuCapacity / 1000).toFixed(0)} <span>cores</span></div>
-            <div className="ov-bar"><div style={{ width: `${(node.cpuUsed/(node.cpuCapacity || 1))*100}%` }}/></div>
+            <div className="ov-bar"><div style={{ width: `${(node.cpuUsed / (node.cpuCapacity || 1)) * 100}%` }} /></div>
           </div>
           <div className="ov-stat">
             <div className="ov-label">Memory</div>
             <div className="ov-val">{fmtMem(node.memUsed, memUnit)} / {fmtMem(node.memCapacity, memUnit, true)} <span>{memUnit}</span></div>
-            <div className="ov-bar"><div style={{ width: `${(node.memUsed/(node.memCapacity || 1))*100}%`, background: "#a78bfa" }}/></div>
+            <div className="ov-bar"><div style={{ width: `${(node.memUsed / (node.memCapacity || 1)) * 100}%`, background: "#a78bfa" }} /></div>
           </div>
           <div className="ov-stat">
             <div className="ov-label">Pods</div>
             <div className="ov-val">{node.pods.length} <span>scheduled</span></div>
-            <div className="ov-bar"><div style={{ width: `${(node.pods.length/110)*100}%`, background: "#22d3ee" }}/></div>
+            <div className="ov-bar"><div style={{ width: `${(node.pods.length / 110) * 100}%`, background: "#22d3ee" }} /></div>
           </div>
         </div>
         <div className="overlay-pods">
@@ -565,20 +578,22 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
           {node.pods.length === 0 && <div className="empty-state">Node has no scheduled pods.</div>}
           <div className="pod-rows">
             {node.pods.map((p, i) => {
-              const cpu = p.containers.reduce((s, c) => s + c.cpu, 0);
-              const mem = p.containers.reduce((s, c) => s + c.mem, 0);
+              // Effective request from the backend, not a container sum —
+              // init containers don't add on top of regular ones.
+              const cpu = p.cpu;
+              const mem = p.mem;
               return (
                 <div key={i} className="pod-row">
                   <div className="pod-row-name">
                     <code>{p.name}</code>
                     <div className="pod-row-containers">
                       {p.containers.map((c, j) => (
-                        <span key={j} className="container-pill">{c.name}</span>
+                        <span key={j} className={`container-pill${c.init ? " init" : ""}`}>{c.name}</span>
                       ))}
                     </div>
                   </div>
                   <div className="pod-row-stat">
-                    <span className="pod-row-num">{(cpu/1000).toFixed(2)}</span>
+                    <span className="pod-row-num">{(cpu / 1000).toFixed(2)}</span>
                     <span className="pod-row-unit">cores</span>
                   </div>
                   <div className="pod-row-stat">
@@ -600,15 +615,15 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
 function MetricIcon({ kind }) {
   if (kind === "cpu") return (
     <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
-      <rect x="3.5" y="3.5" width="9" height="9" rx="1" stroke="currentColor" strokeWidth="1.3"/>
-      <rect x="5.5" y="5.5" width="5" height="5" stroke="currentColor" strokeWidth="1.3"/>
-      <path d="M6 1.5v2M8 1.5v2M10 1.5v2M6 12.5v2M8 12.5v2M10 12.5v2M1.5 6h2M1.5 8h2M1.5 10h2M12.5 6h2M12.5 8h2M12.5 10h2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+      <rect x="3.5" y="3.5" width="9" height="9" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="5.5" y="5.5" width="5" height="5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M6 1.5v2M8 1.5v2M10 1.5v2M6 12.5v2M8 12.5v2M10 12.5v2M1.5 6h2M1.5 8h2M1.5 10h2M12.5 6h2M12.5 8h2M12.5 10h2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
     </svg>
   );
   return (
     <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
-      <rect x="1.5" y="4.5" width="13" height="7" rx="0.8" stroke="currentColor" strokeWidth="1.3"/>
-      <path d="M4 4.5v7M6.5 4.5v7M9 4.5v7M11.5 4.5v7" stroke="currentColor" strokeWidth="1.1"/>
+      <rect x="1.5" y="4.5" width="13" height="7" rx="0.8" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M4 4.5v7M6.5 4.5v7M9 4.5v7M11.5 4.5v7" stroke="currentColor" strokeWidth="1.1" />
     </svg>
   );
 }
@@ -631,7 +646,6 @@ function fmtMem(mib, unit, capacity = false) {
 }
 
 function shortContext(ctx) {
-  // turn "arn:aws:eks:us-east-1:905…:cluster/h2oai-prod" → "h2oai-prod · us-east-1"
   const last = ctx.split("/").pop();
   const region = ctx.match(/(us|eu|ap)-[a-z]+-\d+/);
   return region ? `${last} · ${region[0]}` : last;
@@ -641,8 +655,8 @@ function timeAgo(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
   if (s < 5) return "just now";
   if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s/60)}m ago`;
-  return `${Math.floor(s/3600)}h ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);

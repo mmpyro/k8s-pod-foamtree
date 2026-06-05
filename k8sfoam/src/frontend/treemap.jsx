@@ -79,10 +79,12 @@ function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, on
   const padding = density === "compact" ? 4 : 6;
   const headerH = density === "compact" ? 26 : 32;
 
-  // Compute pod values + empty space
+  // Compute pod values + empty space. Size each pod by its effective request
+  // (max(sum regular, max init)) — summing containers would double-count
+  // init containers, which run sequentially before the regular ones.
   const podItems = node.pods.map(p => ({
     pod: p,
-    value: p.containers.reduce((s, c) => s + (metric === "cpu" ? c.cpu : c.mem), 0),
+    value: metric === "cpu" ? p.cpu : p.mem,
   }));
   const used = podItems.reduce((s, p) => s + p.value, 0);
   const cap = metric === "cpu" ? node.cpuCapacity : node.memCapacity;
@@ -187,7 +189,11 @@ function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
         <div key={i} className="container-box"
           style={{
             left: it.x, top: it.y, width: Math.max(0, it.w - 1), height: Math.max(0, it.h - 1),
-            background: `hsla(${hue}, 70%, 68%, 0.92)`,
+            // Init containers render desaturated — they explain the effective
+            // request but don't run alongside the regular containers.
+            background: it.container.init
+              ? `hsla(${hue}, 10%, 55%, 0.85)`
+              : `hsla(${hue}, 70%, 68%, 0.92)`,
           }}>
           {showLabels && it.w > 40 && it.h > 18 && (
             <span>{it.container.name}</span>

@@ -16,7 +16,10 @@ class K8sClient():
 
     def get_pod_resources(self) -> Iterator[PodResources]:
         v1_client = client.CoreV1Api()
-        return map(lambda pod: self.__extractor.extract_pod_requested_resources(pod), v1_client.list_pod_for_all_namespaces().items)
+        # Terminated pods (Succeeded/Failed) keep their requests in the API
+        # but no longer reserve node resources, so exclude them.
+        pods = v1_client.list_pod_for_all_namespaces(field_selector='status.phase!=Succeeded,status.phase!=Failed')
+        return map(lambda pod: self.__extractor.extract_pod_requested_resources(pod), pods.items)
 
     def get_contexts(slef) -> List[Dict[str, Any]]:
         contexts, active = config.list_kube_config_contexts()

@@ -614,6 +614,11 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   border-radius: var(--r-pill);
   color: var(--text-dim);
 }
+.container-pill.init {
+  background: transparent;
+  border-style: dashed;
+  color: var(--text-soft);
+}
 .pod-row-stat { text-align: right; }
 .pod-row-num {
   font-family: var(--font-mono);

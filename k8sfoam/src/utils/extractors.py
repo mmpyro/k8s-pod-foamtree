@@ -47,18 +47,31 @@ class ResourcesExtractor():
             value = bitmath.Byte(float(memory)).kB
         return float(value)
 
+    def __extract_container_resources(self, container) -> ContainerResources:
+        requests = container.resources.requests
+        cpu = self.__convert_cpu(requests['cpu']) if self.__requests_contains_key(requests, 'cpu') else 0
+        memory = self.__convert_memory(requests['memory']) if self.__requests_contains_key(requests, 'memory') else 0
+        return ContainerResources(container.name, cpu, memory)
+
     def extract_pod_requested_resources(self, pod) -> PodResources:
         name = pod.metadata.name
         node_name = pod.spec.node_name
-        containers = []
-        for container in pod.spec.containers:
-            requests = container.resources.requests
-            cpu = self.__convert_cpu(requests['cpu']) if self.__requests_contains_key(requests, 'cpu') else 0
-            memory = self.__convert_memory(requests['memory']) if self.__requests_contains_key(requests, 'memory') else 0
-            containers.append(ContainerResources(container.name, cpu, memory))
-        cpu = sum(map(lambda c: c.cpu, containers))
-        memory = sum(map(lambda c: c.memory, containers))
-        return PodResources(name, node_name, cpu, memory, containers)
+
+        # --- Regular containers (run concurrently → sum) ---
+        containers = [self.__extract_container_resources(c) for c in pod.spec.containers]
+        sum_regular_cpu = sum(c.cpu for c in containers)
+        sum_regular_memory = sum(c.memory for c in containers)
+
+        # --- Init containers (run sequentially → max) ---
+        init_containers = [self.__extract_container_resources(c) for c in (pod.spec.init_containers or [])]
+        max_init_cpu = max((c.cpu for c in init_containers), default=0)
+        max_init_memory = max((c.memory for c in init_containers), default=0)
+
+        # --- Effective request (what the scheduler actually reserves) ---
+        effective_cpu = max(sum_regular_cpu, max_init_cpu)
+        effective_memory = max(sum_regular_memory, max_init_memory)
+
+        return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers)
 
     def extract_node_resources(self, node) -> NodeResources:
         cpu = self.__convert_cpu(node.status.capacity['cpu'])

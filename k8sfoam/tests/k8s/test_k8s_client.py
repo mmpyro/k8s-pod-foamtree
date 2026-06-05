@@ -40,6 +40,7 @@ def test_should_return_pod_resources(client, config):
     pod_resources = [*k8s_client.get_pod_resources()]
 
     # Then
+    v1_client.list_pod_for_all_namespaces.assert_called_once_with(field_selector='status.phase!=Succeeded,status.phase!=Failed')
     pod = _.head(pod_resources)
     assert pod.name == 'etcd'
     assert pod.node_name == 'minikube'

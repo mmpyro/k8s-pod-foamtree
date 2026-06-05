@@ -26,7 +26,7 @@ def test_get_k8s_resources(k8s_client, parameter, test_client):
     k8s_client_instance = MagicMock()
     k8s_client_instance.get_node_resources.return_value = [NodeResources('minikube', 2000, float(bitmath.GiB(1).kB))]
     k8s_client_instance.get_pod_resources.return_value = [PodResources('etcd', 'minikube', 150, float(bitmath.MiB(150).kB),
-     [ContainerResources('etcd', 100, float(bitmath.MiB(100).kB)), ContainerResources('side', 50, float(bitmath.MiB(50).kB))])]
+     [ContainerResources('etcd', 100, float(bitmath.MiB(100).kB)), ContainerResources('side', 50, float(bitmath.MiB(50).kB))], [])]
     k8s_client.return_value = k8s_client_instance
 
     # When
@@ -46,7 +46,7 @@ def test_should_return_bad_request(k8s_client, test_client):
     k8s_client_instance = MagicMock()
     k8s_client_instance.get_node_resources.return_value = [NodeResources('minikube', 2000, float(bitmath.GiB(1).kB))]
     k8s_client_instance.get_pod_resources.return_value = [PodResources('etcd', 'minikube', 150, float(bitmath.MiB(150).kB),
-     [ContainerResources('etcd', 100, float(bitmath.MiB(100).kB)), ContainerResources('side', 50, float(bitmath.MiB(50).kB))])]
+     [ContainerResources('etcd', 100, float(bitmath.MiB(100).kB)), ContainerResources('side', 50, float(bitmath.MiB(50).kB))], [])]
     k8s_client.return_value = k8s_client_instance
     resource_type = 'disk'
 
@@ -63,7 +63,7 @@ def test_should_return_internal_server_error(k8s_client, test_client):
     k8s_client_instance = MagicMock()
     k8s_client_instance.get_node_resources.side_effect = Exception('Cannot connect to k8s api')
     k8s_client_instance.get_pod_resources.return_value = [PodResources('etcd', 'minikube', 150, float(bitmath.MiB(150).kB),
-     [ContainerResources('etcd', 100, float(bitmath.MiB(100).kB)), ContainerResources('side', 50, float(bitmath.MiB(50).kB))])]
+     [ContainerResources('etcd', 100, float(bitmath.MiB(100).kB)), ContainerResources('side', 50, float(bitmath.MiB(50).kB))], [])]
     k8s_client.return_value = k8s_client_instance
 
     # When
