@@ -1,13 +1,14 @@
 from unittest.mock import MagicMock
 
 
-def create_pod(name: str, node_name: str, containers=[]) -> MagicMock:
+def create_pod(name: str, node_name: str, containers=[], init_containers=None) -> MagicMock:
     pod = MagicMock()
     metadata = MagicMock()
     metadata.name = name
     spec = MagicMock()
     spec.node_name = node_name
     spec.containers = containers
+    spec.init_containers = init_containers
     pod.metadata = metadata
     pod.spec = spec
     return pod
