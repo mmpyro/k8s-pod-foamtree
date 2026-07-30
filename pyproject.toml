@@ -46,16 +46,10 @@ k8sfoams = "k8sfoam.src.app:main"
 packages = ["k8sfoam"]
 only-include = ["k8sfoam"]
 exclude = [
-    "k8sfoam/src/frontend/node_modules",
-    "k8sfoam/src/frontend/package.json",
-    "k8sfoam/src/frontend/package-lock.json",
     "k8sfoam/tests",
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/k8sfoam",
-]
-exclude = [
-    "k8sfoam/src/frontend/node_modules",
 ]
