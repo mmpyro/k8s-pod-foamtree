@@ -2,6 +2,7 @@
 
 const { useState, useEffect, useMemo, useRef } = React;
 const { NodeCard } = window.k8sTreemap;
+const { Scene3D } = window.k8sCube3D;
 
 // Per-node hue assignment — deterministic from index, evenly spaced around wheel.
 function nodeHue(idx, scheme) {
@@ -17,6 +18,11 @@ function nodeHue(idx, scheme) {
 const METRICS = [
   { id: "cpu", label: "CPU", icon: "cpu" },
   { id: "mem", label: "Memory", icon: "mem" },
+];
+
+const VIEWS = [
+  { id: "2d", label: "2D Map", icon: "rect" },
+  { id: "3d", label: "3D Cubes", icon: "cube" },
 ];
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
@@ -126,6 +132,8 @@ function mergeResources(cpuData, memData) {
 function App() {
   const [tw, setTweak] = useTweaks(TWEAK_DEFAULTS);
 
+  const [view, setView] = useState("2d");
+  const [zoom, setZoom] = useState(0.7);
   const [metric, setMetric] = useState("cpu");
   const [memUnit, setMemUnit] = useState("GiB");
   const [refreshInterval, setRefreshInterval] = useState(60);
@@ -241,6 +249,8 @@ function App() {
       <Sidebar
         open={sidebarOpen}
         onToggle={() => setSidebarOpen(s => !s)}
+        view={view} setView={setView}
+        zoom={zoom} setZoom={setZoom}
         metric={metric} setMetric={setMetric}
         memUnit={memUnit} setMemUnit={setMemUnit}
         refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
@@ -260,6 +270,7 @@ function App() {
 
         <Header
           metric={metric}
+          view={view} setView={setView}
           totals={totals}
           query={query} setQuery={setQuery}
           memUnit={memUnit}
@@ -271,15 +282,26 @@ function App() {
         />
 
         <div className="grid-wrap">
-          <TreemapGrid
-            nodes={filtered}
-            metric={metric}
-            colorScheme={tw.colorScheme}
-            nodeStyle={tw.nodeStyle}
-            density={tw.density}
-            showLabels={tw.showLabels}
-            onFocus={setFocused}
-          />
+          {view === "3d" ? (
+            <Scene3D
+              nodes={filtered}
+              zoom={zoom}
+              hueOf={idx => nodeHue(idx, tw.colorScheme)}
+              memUnit={memUnit}
+              fmtMem={fmtMem}
+              onFocus={setFocused}
+            />
+          ) : (
+            <TreemapGrid
+              nodes={filtered}
+              metric={metric}
+              colorScheme={tw.colorScheme}
+              nodeStyle={tw.nodeStyle}
+              density={tw.density}
+              showLabels={tw.showLabels}
+              onFocus={setFocused}
+            />
+          )}
         </div>
       </main>
 
@@ -324,10 +346,11 @@ function App() {
 /* ─────────── Sidebar ─────────── */
 
 function Sidebar({
-  open, onToggle, metric, setMetric, memUnit, setMemUnit,
+  open, onToggle, view, setView, zoom, setZoom, metric, setMetric, memUnit, setMemUnit,
   refreshInterval, setRefreshInterval,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount
 }) {
+  const is3d = view === "3d";
   return (
     <aside className="sidebar" data-screen-label="sidebar">
       <div className="brand">
@@ -349,15 +372,44 @@ function Sidebar({
       </div>
 
       <div className="sidebar-section">
-        <div className="section-label">Resource</div>
+        <div className="section-label">View</div>
         <div className="seg seg-2">
+          {VIEWS.map(v => (
+            <button key={v.id} className={view === v.id ? "seg-on" : ""}
+              onClick={() => setView(v.id)}>
+              <ViewIcon kind={v.icon} /> {v.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {is3d && (
+        <div className="sidebar-section">
+          <div className="section-label">
+            <span>Zoom</span>
+            <span className="section-value">{Math.round(zoom * 100)}%</span>
+          </div>
+          <input type="range" min="0.4" max="1.6" step="0.05" value={zoom}
+            onChange={e => setZoom(+e.target.value)} className="slider" />
+        </div>
+      )}
+
+      <div className="sidebar-section">
+        <div className="section-label">Resource</div>
+        {/* Cubes plot CPU and Memory on separate axes, so there is nothing for
+            this control to switch between in 3D. */}
+        <div className={`seg seg-2 ${is3d ? "seg-disabled" : ""}`}>
           {METRICS.map(m => (
-            <button key={m.id} className={metric === m.id ? "seg-on" : ""}
-              onClick={() => setMetric(m.id)}>
+            <button key={m.id} className={!is3d && metric === m.id ? "seg-on" : ""}
+              disabled={is3d}
+              onClick={() => !is3d && setMetric(m.id)}>
               <MetricIcon kind={m.icon} /> {m.label}
             </button>
           ))}
         </div>
+        {is3d && (
+          <div className="seg-note">Cubes encode both — footprint is CPU, height is Memory.</div>
+        )}
       </div>
 
       <div className="sidebar-section">
@@ -422,12 +474,15 @@ function Sidebar({
 
 /* ─────────── Header ─────────── */
 
-function Header({ metric, totals, query, setQuery, memUnit, contexts, contextIdx, onMenu, onRefresh, refreshing }) {
+function Header({ metric, view, setView, totals, query, setQuery, memUnit, contexts, contextIdx, onMenu, onRefresh, refreshing }) {
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
   const memPct = totals.memUsed / (totals.memCap || 1);
 
   const currentCtx = contexts[contextIdx];
   const contextLabel = currentCtx ? shortContext(currentCtx.context) : "No Context";
+
+  const is3d = view === "3d";
+  const titleMain = is3d ? "CPU + Memory" : metric === "cpu" ? "CPU" : "Memory";
 
   return (
     <header className="header">
@@ -437,11 +492,11 @@ function Header({ metric, totals, query, setQuery, memUnit, contexts, contextIdx
 
       <div className="header-title">
         <div className="title-row">
-          <span className="title-main">{metric === "cpu" ? "CPU" : "Memory"} Resources</span>
+          <span className="title-main">{titleMain} Resources</span>
           <span className="title-chip">{contextLabel}</span>
         </div>
         <div className="title-sub">
-          {totals.nodes} nodes · {totals.pods} pods · live foam-tree topology
+          {totals.nodes} nodes · {totals.pods} pods · {is3d ? "isometric cube topology" : "live foam-tree topology"}
         </div>
       </div>
 
@@ -452,6 +507,16 @@ function Header({ metric, totals, query, setQuery, memUnit, contexts, contextIdx
       </div>
 
       <div className="header-tools">
+        <div className="view-pill">
+          {VIEWS.map(v => (
+            <button key={v.id}
+              className={view === v.id ? `view-on ${v.id === "3d" ? "view-3d" : ""}` : ""}
+              onClick={() => setView(v.id)}
+              title={v.label}>
+              {v.id.toUpperCase()}
+            </button>
+          ))}
+        </div>
         <div className="search">
           <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none" /><path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Filter nodes…" />
@@ -611,6 +676,25 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
 }
 
 /* ─────────── Icons ─────────── */
+
+// View glyphs, sized to sit alongside MetricIcon in the segmented controls:
+// a quartered rect for the treemap, an isometric cube for the 3D scene.
+function ViewIcon({ kind }) {
+  if (kind === "rect") return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <rect x="1.5" y="1.5" width="13" height="13" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M1.5 8 H14.5 M8 1.5 V14.5" stroke="currentColor" strokeWidth="1.1" />
+    </svg>
+  );
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      {/* top face, then the left and right walls meeting at the near vertex */}
+      <path d="M8 1.6 L14 5 L8 8.4 L2 5 Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M2 5 V11 L8 14.4 V8.4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M14 5 V11 L8 14.4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 function MetricIcon({ kind }) {
   if (kind === "cpu") return (
