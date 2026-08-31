@@ -15,10 +15,31 @@ function nodeHue(idx, scheme) {
   return Math.floor((idx * 137.5) % 360);
 }
 
-const METRICS = [
+// Base metrics — always present.  Extended resources (GPUs, TPUs, etc.) are
+// appended dynamically after the /resources/extended-keys API call resolves.
+const BASE_METRICS = [
   { id: "cpu", label: "CPU", icon: "cpu" },
   { id: "mem", label: "Memory", icon: "mem" },
 ];
+
+// Human-readable labels for well-known extended resource keys.
+const EXTENDED_LABELS = {
+  "nvidia.com/gpu":   "GPU (NVIDIA)",
+  "amd.com/gpu":      "GPU (AMD)",
+  "google.com/tpu":   "TPU (Google)",
+  "ephemeral-storage": "Ephemeral Storage",
+};
+
+function extendedMetricLabel(key) {
+  return EXTENDED_LABELS[key] || key;
+}
+
+function extendedMetricIcon(key) {
+  if (key.includes('gpu')) return 'gpu';
+  if (key.includes('tpu')) return 'tpu';
+  if (key.includes('storage')) return 'storage';
+  return 'ext';
+}
 
 const VIEWS = [
   { id: "2d", label: "2D Map", icon: "rect" },
@@ -40,13 +61,22 @@ function kbToMib(kb) {
 }
 
 // Merge separate CPU and Memory data structures from backend into rich unified structures.
-function mergeResources(cpuData, memData) {
+// `extData` is an optional map of { extKey → foamtree JSON } for extended resources.
+function mergeResources(cpuData, memData, extData = {}) {
   const cpuGroups = cpuData.groups || [];
   const memGroups = memData.groups || [];
 
   const memNodesMap = new Map();
   for (const mg of memGroups) {
     memNodesMap.set(mg.label, mg);
+  }
+
+  // Build per-extended-resource node maps so pod weights are accessible.
+  const extNodeMaps = {};
+  for (const [extKey, extFoam] of Object.entries(extData)) {
+    const m = new Map();
+    for (const ng of (extFoam.groups || [])) m.set(ng.label, ng);
+    extNodeMaps[extKey] = m;
   }
 
   return cpuGroups.map((cg, idx) => {
@@ -61,9 +91,22 @@ function mergeResources(cpuData, memData) {
       memPodsMap.set(mp.label, mp);
     }
 
+    // Build per-extended-key pod maps for this node.
+    const extPodMaps = {};
+    for (const [extKey, nodeMap] of Object.entries(extNodeMaps)) {
+      const nodeEntry = nodeMap.get(cg.label) || { groups: [] };
+      const pm = new Map();
+      for (const pg of (nodeEntry.groups || [])) pm.set(pg.label, pg);
+      extPodMaps[extKey] = pm;
+    }
+
     const pods = [];
     let cpuUsed = 0;
     let memUsed = 0;
+
+    // Extended resource totals per node
+    const extUsed = {};
+    for (const key of Object.keys(extData)) extUsed[key] = 0;
 
     for (const cp of cpuPods) {
       if (cp.label === 'empty') continue;
@@ -96,6 +139,15 @@ function mergeResources(cpuData, memData) {
       cpuUsed += podCpu;
       memUsed += podMem;
 
+      // Collect extended resource values for this pod across all known keys.
+      const podExtended = {};
+      for (const [extKey, podMap] of Object.entries(extPodMaps)) {
+        const extPod = podMap.get(cp.label);
+        const val = extPod ? (extPod.weight || 0) : 0;
+        podExtended[extKey] = val;
+        extUsed[extKey] = (extUsed[extKey] || 0) + val;
+      }
+
       pods.push({
         name: cp.label,
         shortName: cp.label.split('-')[0],
@@ -104,13 +156,21 @@ function mergeResources(cpuData, memData) {
         cpu: podCpu,
         // Convert memory from kB to MiB
         mem: kbToMib(podMem),
-        containers
+        containers,
+        extended: podExtended,
       });
     }
 
     // Convert node capacity from kB to MiB
     const memCapacity = kbToMib(mg.weight || 0);
     const convertedMemUsed = kbToMib(memUsed);
+
+    // Extended capacity for each key — taken from the per-key foamtree node weight.
+    const extCapacity = {};
+    for (const [extKey, nodeMap] of Object.entries(extNodeMaps)) {
+      const nodeEntry = nodeMap.get(cg.label);
+      extCapacity[extKey] = nodeEntry ? (nodeEntry.weight || 0) : 0;
+    }
 
     return {
       id: `node-${idx}`,
@@ -123,6 +183,8 @@ function mergeResources(cpuData, memData) {
       memUsed: convertedMemUsed,
       cpuFree: Math.max(0, (cg.weight || 0) - cpuUsed),
       memFree: Math.max(0, memCapacity - convertedMemUsed),
+      extCapacity,
+      extUsed,
       pods,
       status: "ready"
     };
@@ -146,6 +208,8 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [error, setError] = useState(null);
+  // Extended resource keys discovered in the cluster (e.g. ["nvidia.com/gpu"])
+  const [extendedKeys, setExtendedKeys] = useState([]);
 
   // Load contexts from server
   useEffect(() => {
@@ -172,6 +236,17 @@ function App() {
       });
   }, []);
 
+  // Discover extended resource types (GPUs, TPUs, ephemeral-storage, etc.)
+  // This is fetched once on mount and re-fetched when the context changes.
+  useEffect(() => {
+    const currentCtx = contexts[contextIdx];
+    const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
+    fetch(`/resources/extended-keys${ctxParam}`)
+      .then(res => res.ok ? res.json() : [])
+      .then(keys => setExtendedKeys(Array.isArray(keys) ? keys : []))
+      .catch(() => setExtendedKeys([]));
+  }, [contextIdx, contexts.length]);
+
   // Fetch cluster resource data
   const loadData = async () => {
     setRefreshing(true);
@@ -179,7 +254,16 @@ function App() {
       const currentCtx = contexts[contextIdx];
       const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
 
-      const [cpuRes, memRes] = await Promise.all([
+      // Always fetch CPU + Memory; also fetch all known extended resources in
+      // parallel so pod extended values are ready when the user switches metric.
+      const extFetches = extendedKeys.map(key =>
+        fetch(`/resources/${encodeURIComponent(key)}${ctxParam}`)
+          .then(r => r.ok ? r.json() : { groups: [] })
+          .then(data => [key, data])
+          .catch(() => [key, { groups: [] }])
+      );
+
+      const [cpuRes, memRes, ...extResults] = await Promise.all([
         fetch(`/resources/cpu${ctxParam}`).then(r => {
           if (!r.ok) throw new Error(`CPU resources endpoint returned status ${r.status}`);
           return r.json();
@@ -187,10 +271,12 @@ function App() {
         fetch(`/resources/memory${ctxParam}`).then(r => {
           if (!r.ok) throw new Error(`Memory resources endpoint returned status ${r.status}`);
           return r.json();
-        })
+        }),
+        ...extFetches
       ]);
 
-      const merged = mergeResources(cpuRes, memRes);
+      const extData = Object.fromEntries(extResults);
+      const merged = mergeResources(cpuRes, memRes, extData);
       setNodes(merged);
       setError(null);
       setLastRefresh(Date.now());
@@ -218,18 +304,32 @@ function App() {
     [nodes, query]
   );
 
+  // Dynamic metric list — base metrics + cluster-detected extended resources.
+  const metrics = useMemo(() => [
+    ...BASE_METRICS,
+    ...extendedKeys.map(key => ({
+      id: key,
+      label: extendedMetricLabel(key),
+      icon: extendedMetricIcon(key),
+    }))
+  ], [extendedKeys]);
+
   // Totals
   const totals = useMemo(() => {
-    const t = { cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, pods: 0, nodes: nodes.length };
+    const t = { cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, pods: 0, nodes: nodes.length, extCap: {}, extUsed: {} };
     for (const n of nodes) {
       t.cpuCap += n.cpuCapacity;
       t.cpuUsed += n.cpuUsed;
       t.memCap += n.memCapacity;
       t.memUsed += n.memUsed;
       t.pods += n.pods.length;
+      for (const key of extendedKeys) {
+        t.extCap[key] = (t.extCap[key] || 0) + (n.extCapacity?.[key] || 0);
+        t.extUsed[key] = (t.extUsed[key] || 0) + (n.extUsed?.[key] || 0);
+      }
     }
     return t;
-  }, [nodes]);
+  }, [nodes, extendedKeys]);
 
   // Auto-refresh tick — re-fetch live cluster data every refreshInterval seconds.
   useEffect(() => {
@@ -252,6 +352,7 @@ function App() {
         view={view} setView={setView}
         zoom={zoom} setZoom={setZoom}
         metric={metric} setMetric={setMetric}
+        metrics={metrics}
         memUnit={memUnit} setMemUnit={setMemUnit}
         refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
         contexts={contexts}
@@ -306,7 +407,7 @@ function App() {
       </main>
 
       {focused && (
-        <FocusOverlay node={focused} onClose={() => setFocused(null)} metric={metric} memUnit={memUnit} />
+        <FocusOverlay node={focused} onClose={() => setFocused(null)} metric={metric} memUnit={memUnit} extendedKeys={extendedKeys} />
       )}
 
       <TweaksPanel>
@@ -346,8 +447,8 @@ function App() {
 /* ─────────── Sidebar ─────────── */
 
 function Sidebar({
-  open, onToggle, view, setView, zoom, setZoom, metric, setMetric, memUnit, setMemUnit,
-  refreshInterval, setRefreshInterval,
+  open, onToggle, view, setView, zoom, setZoom, metric, setMetric, metrics,
+  memUnit, setMemUnit, refreshInterval, setRefreshInterval,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount
 }) {
   const is3d = view === "3d";
@@ -398,8 +499,8 @@ function Sidebar({
         <div className="section-label">Resource</div>
         {/* Cubes plot CPU and Memory on separate axes, so there is nothing for
             this control to switch between in 3D. */}
-        <div className={`seg seg-2 ${is3d ? "seg-disabled" : ""}`}>
-          {METRICS.map(m => (
+        <div className={`seg ${metrics.length > 2 ? 'seg-wrap' : 'seg-2'} ${is3d ? "seg-disabled" : ""}`}>
+          {metrics.map(m => (
             <button key={m.id} className={!is3d && metric === m.id ? "seg-on" : ""}
               disabled={is3d}
               onClick={() => !is3d && setMetric(m.id)}>
@@ -605,7 +706,7 @@ function TreemapGrid({ nodes, metric, colorScheme, nodeStyle, density, showLabel
 
 /* ─────────── Focus overlay ─────────── */
 
-function FocusOverlay({ node, onClose, metric, memUnit }) {
+function FocusOverlay({ node, onClose, metric, memUnit, extendedKeys = [] }) {
   return (
     <div className="overlay" onClick={onClose}>
       <div className="overlay-card" onClick={e => e.stopPropagation()}>
@@ -637,6 +738,19 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
             <div className="ov-val">{node.pods.length} <span>scheduled</span></div>
             <div className="ov-bar"><div style={{ width: `${(node.pods.length / 110) * 100}%`, background: "#22d3ee" }} /></div>
           </div>
+          {/* Extended resource stats per node (GPU count, etc.) */}
+          {extendedKeys.map(key => {
+            const cap = node.extCapacity?.[key] || 0;
+            if (cap === 0) return null;
+            const used = node.extUsed?.[key] || 0;
+            return (
+              <div key={key} className="ov-stat">
+                <div className="ov-label">{extendedMetricLabel(key)}</div>
+                <div className="ov-val">{used} / {cap} <span>allocated</span></div>
+                <div className="ov-bar"><div style={{ width: `${(used / (cap || 1)) * 100}%`, background: "#fb923c" }} /></div>
+              </div>
+            );
+          })}
         </div>
         <div className="overlay-pods">
           <div className="ov-section-title">Workloads</div>
@@ -647,6 +761,10 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
               // init containers don't add on top of regular ones.
               const cpu = p.cpu;
               const mem = p.mem;
+              // Collect any non-zero extended resources for this pod.
+              const podExtEntries = extendedKeys
+                .map(key => [key, (p.extended?.[key] || 0)])
+                .filter(([, v]) => v > 0);
               return (
                 <div key={i} className="pod-row">
                   <div className="pod-row-name">
@@ -665,6 +783,12 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
                     <span className="pod-row-num">{fmtMem(mem, memUnit)}</span>
                     <span className="pod-row-unit">{memUnit}</span>
                   </div>
+                  {podExtEntries.map(([key, val]) => (
+                    <div key={key} className="pod-row-stat pod-row-ext" title={key}>
+                      <span className="pod-row-num">{val}</span>
+                      <span className="pod-row-unit">{extendedMetricLabel(key)}</span>
+                    </div>
+                  ))}
                 </div>
               );
             })}
@@ -702,6 +826,36 @@ function MetricIcon({ kind }) {
       <rect x="3.5" y="3.5" width="9" height="9" rx="1" stroke="currentColor" strokeWidth="1.3" />
       <rect x="5.5" y="5.5" width="5" height="5" stroke="currentColor" strokeWidth="1.3" />
       <path d="M6 1.5v2M8 1.5v2M10 1.5v2M6 12.5v2M8 12.5v2M10 12.5v2M1.5 6h2M1.5 8h2M1.5 10h2M12.5 6h2M12.5 8h2M12.5 10h2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+  if (kind === "gpu") return (
+    /* GPU chip: outer rect + inner core + four pins each side */
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <rect x="3" y="3" width="10" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="5" y="5" width="6" height="6" rx="0.5" fill="currentColor" opacity="0.45" />
+      <path d="M5.5 1.5v1.5M8 1.5v1.5M10.5 1.5v1.5M5.5 13v1.5M8 13v1.5M10.5 13v1.5M1.5 5.5H3M1.5 8H3M1.5 10.5H3M13 5.5h1.5M13 8h1.5M13 10.5h1.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+  if (kind === "tpu") return (
+    /* TPU: diamond shape suggesting tensor acceleration */
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <path d="M8 2 L14 8 L8 14 L2 8 Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M8 5 L11 8 L8 11 L5 8 Z" fill="currentColor" opacity="0.4" />
+    </svg>
+  );
+  if (kind === "storage") return (
+    /* Cylinder for storage */
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <ellipse cx="8" cy="4.5" rx="5" ry="2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M3 4.5v7" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M13 4.5v7" stroke="currentColor" strokeWidth="1.2" />
+      <ellipse cx="8" cy="11.5" rx="5" ry="2" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+  /* Generic extended resource fallback — hexagonal */
+  if (kind === "ext") return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <path d="M8 2 L13 5 V11 L8 14 L3 11 V5 Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
     </svg>
   );
   return (

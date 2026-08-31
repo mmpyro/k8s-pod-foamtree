@@ -82,12 +82,17 @@ function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, on
   // Compute pod values + empty space. Size each pod by its effective request
   // (max(sum regular, max init)) — summing containers would double-count
   // init containers, which run sequentially before the regular ones.
+  const isExtended = metric !== "cpu" && metric !== "mem";
   const podItems = node.pods.map(p => ({
     pod: p,
-    value: metric === "cpu" ? p.cpu : p.mem,
+    value: isExtended
+      ? (p.extended?.[metric] || 0)
+      : (metric === "cpu" ? p.cpu : p.mem),
   }));
   const used = podItems.reduce((s, p) => s + p.value, 0);
-  const cap = metric === "cpu" ? node.cpuCapacity : node.memCapacity;
+  const cap = isExtended
+    ? (node.extCapacity?.[metric] || 0)
+    : (metric === "cpu" ? node.cpuCapacity : node.memCapacity);
   const empty = Math.max(0, cap - used);
   const items = [...podItems, { pod: null, value: empty, empty: true }];
 
@@ -155,9 +160,12 @@ function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, on
 }
 
 function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
+  const isExtended = metric !== "cpu" && metric !== "mem";
   const containers = pod.containers.map(c => ({
     container: c,
-    value: metric === "cpu" ? c.cpu : c.mem,
+    value: isExtended
+      ? (c.extended?.[metric] || 0)
+      : (metric === "cpu" ? c.cpu : c.mem),
   }));
   const inset = 2;
   const headerH = rect.h > 28 ? 12 : 0;
@@ -168,6 +176,13 @@ function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
     Math.max(0, rect.w - inset * 2),
     Math.max(0, rect.h - headerH - inset * 2)
   );
+
+  // Show a tiny GPU chip badge when this pod holds any GPU request and the
+  // box is large enough to render it — visible regardless of active metric.
+  const hasGpu = Object.keys(pod.extended || {}).some(k => k.includes('gpu') && pod.extended[k] > 0);
+  const gpuCount = hasGpu
+    ? Object.entries(pod.extended || {}).filter(([k]) => k.includes('gpu')).reduce((s, [, v]) => s + v, 0)
+    : 0;
 
   const podBg = nodeStyle === "solid"
     ? `hsla(${hue}, 65%, 38%, 0.65)`
@@ -200,6 +215,17 @@ function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
           )}
         </div>
       ))}
+      {/* GPU badge — shown whenever the pod holds GPU requests, no matter
+          which metric is currently selected in the sidebar. */}
+      {hasGpu && rect.w > 36 && rect.h > 18 && (
+        <div className="pod-gpu-badge" title={`GPU × ${gpuCount}`}>
+          <svg viewBox="0 0 10 10" width="8" height="8" fill="none">
+            <rect x="1" y="1" width="8" height="8" rx="1" stroke="currentColor" strokeWidth="1.2" />
+            <rect x="2.5" y="2.5" width="5" height="5" fill="currentColor" opacity="0.6" />
+          </svg>
+          {gpuCount > 1 && <span>{gpuCount}</span>}
+        </div>
+      )}
     </div>
   );
 }

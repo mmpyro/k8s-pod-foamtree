@@ -22,6 +22,7 @@ def test_should_extract_pod_resources_with_single_container_pod():
     assert pod_resources.cpu == 100
     assert pod_resources.memory == bitmath.GB(1).kB
     assert pod_resources.init_containers == []
+    assert pod_resources.extended == {}
 
 
 def test_should_extract_pod_resources_with_multi_container_pod():
@@ -76,6 +77,7 @@ def test_should_extract_node_resources():
     # Then
     assert node_resources.name == 'minikube'
     assert node_resources.cpu == 2000
+    assert node_resources.extended == {}
 
 
 # --- Init container tests ---
@@ -167,3 +169,104 @@ def test_effective_memory_when_init_container_dominates():
     result = extractor.extract_pod_requested_resources(pod)
 
     assert result.memory == bitmath.MiB(500).kB
+
+
+# --- Extended resource tests ---
+
+def test_container_gpu_request_is_extracted():
+    # A container requesting 2 NVIDIA GPUs should have the key in its extended dict.
+    extractor = ResourcesExtractor()
+    pod = create_pod('gpu-pod', 'gpu-node',
+                     containers=[create_container('trainer', '4', '8Gi',
+                                                  extended={'nvidia.com/gpu': '2'})])
+
+    result = extractor.extract_pod_requested_resources(pod)
+
+    assert result.extended.get('nvidia.com/gpu') == 2.0
+    assert result.containers[0].extended.get('nvidia.com/gpu') == 2.0
+
+
+def test_pod_gpu_sums_across_regular_containers():
+    # Two containers each requesting 1 GPU → pod effective = 2 GPUs.
+    extractor = ResourcesExtractor()
+    pod = create_pod('multi-gpu', 'gpu-node',
+                     containers=[
+                         create_container('a', '2', '4Gi', extended={'nvidia.com/gpu': '1'}),
+                         create_container('b', '2', '4Gi', extended={'nvidia.com/gpu': '1'}),
+                     ])
+
+    result = extractor.extract_pod_requested_resources(pod)
+
+    assert result.extended.get('nvidia.com/gpu') == 2.0
+
+
+def test_pod_gpu_init_container_dominates():
+    # Init container requests 4 GPUs; regular only 1 → effective = 4.
+    extractor = ResourcesExtractor()
+    pod = create_pod('init-gpu', 'gpu-node',
+                     containers=[create_container('app', '1', '1Gi', extended={'nvidia.com/gpu': '1'})],
+                     init_containers=[create_container('init', '1', '1Gi', extended={'nvidia.com/gpu': '4'})])
+
+    result = extractor.extract_pod_requested_resources(pod)
+
+    assert result.extended.get('nvidia.com/gpu') == 4.0
+
+
+def test_pod_gpu_regular_dominates_over_init():
+    # Regular containers sum to 3 GPUs; init only needs 1 → effective = 3.
+    extractor = ResourcesExtractor()
+    pod = create_pod('reg-gpu', 'gpu-node',
+                     containers=[
+                         create_container('a', '1', '1Gi', extended={'nvidia.com/gpu': '2'}),
+                         create_container('b', '1', '1Gi', extended={'nvidia.com/gpu': '1'}),
+                     ],
+                     init_containers=[create_container('init', '1', '1Gi', extended={'nvidia.com/gpu': '1'})])
+
+    result = extractor.extract_pod_requested_resources(pod)
+
+    assert result.extended.get('nvidia.com/gpu') == 3.0
+
+
+def test_ephemeral_storage_is_converted_to_kb():
+    # 10 GiB of ephemeral-storage should arrive as decimal kB.
+    extractor = ResourcesExtractor()
+    pod = create_pod('storage-pod', 'node',
+                     containers=[create_container('app', '500m', '512Mi',
+                                                  extended={'ephemeral-storage': '10Gi'})])
+
+    result = extractor.extract_pod_requested_resources(pod)
+
+    expected_kb = float(bitmath.GiB(10).kB)
+    assert abs(result.extended.get('ephemeral-storage', 0) - expected_kb) < 1
+
+
+def test_node_gpu_extracted_from_allocatable():
+    # Node with 4 NVIDIA GPUs advertised in allocatable should surface in extended.
+    extractor = ResourcesExtractor()
+    node = create_node('gpu-node', '16', '64Gi', extended={'nvidia.com/gpu': '4'})
+
+    result = extractor.extract_node_resources(node)
+
+    assert result.extended.get('nvidia.com/gpu') == 4.0
+
+
+def test_node_without_extended_resources_has_empty_extended():
+    # Regular CPU/memory-only node should produce an empty extended dict.
+    extractor = ResourcesExtractor()
+    node = create_node('cpu-node', '8', '32Gi')
+
+    result = extractor.extract_node_resources(node)
+
+    assert result.extended == {}
+
+
+def test_pod_without_extended_resources_has_empty_extended():
+    # Regular pod (no GPU / storage requests) should produce an empty extended dict.
+    extractor = ResourcesExtractor()
+    pod = create_pod('normal-pod', 'node',
+                     containers=[create_container('app', '200m', '256Mi')])
+
+    result = extractor.extract_pod_requested_resources(pod)
+
+    assert result.extended == {}
+    assert result.containers[0].extended == {}

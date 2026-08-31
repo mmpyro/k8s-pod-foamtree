@@ -4,6 +4,8 @@ from typing import Optional
 from k8sfoam.src.k8s.k8s_client import K8sClient
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 
+_CORE_RESOURCE_TYPES = frozenset({'cpu', 'memory'})
+
 
 def create_app() -> Optional[Flask]:
     try:
@@ -13,18 +15,36 @@ def create_app() -> Optional[Flask]:
         def healthcheck():
             return jsonify({'status': 'ok'})
 
-        @app.route('/resources/<resource_type>', methods=['GET'])
+        @app.route('/resources/extended-keys', methods=['GET'])
+        def get_extended_resource_keys():
+            """Return sorted list of extended resource types detected in the cluster.
+
+            The frontend fetches this on startup to populate the Resource metric
+            selector with GPU/TPU/storage options only when they actually exist.
+            """
+            try:
+                context = request.args.get('context')
+                k8s_client = K8sClient(context)
+                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
+                return jsonify(mapper.get_extended_resource_keys())
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/resources/<path:resource_type>', methods=['GET'])
         def get_k8s_resources(resource_type: str):
             try:
                 context = request.args.get('context')
                 k8s_client = K8sClient(context)
                 mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
-                if resource_type.lower() == 'memory':
+                rt = resource_type.lower()
+                if rt == 'memory':
                     return jsonify(mapper.transform_memory_resources_to_foamtree())
-                elif resource_type.lower() == 'cpu':
+                elif rt == 'cpu':
                     return jsonify(mapper.transform_cpu_resources_to_foamtree())
                 else:
-                    return f'Resource type: {resource_type} is not supported. Supported types are: [cpu, memory]', 400
+                    # Any other key is treated as an extended resource
+                    # (e.g. "nvidia.com/gpu", "ephemeral-storage").
+                    return jsonify(mapper.transform_extended_resources_to_foamtree(resource_type))
             except Exception as ex:
                 return str(ex), 500
 
