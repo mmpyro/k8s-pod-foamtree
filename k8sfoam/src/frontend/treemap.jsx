@@ -1,6 +1,8 @@
 // Squarified treemap. Pure function: given a rect + items[{value,...}],
 // returns items with x/y/w/h placed.
 
+const { workloadKey } = window.k8sWorkload;
+
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
   if (!sorted.length || w <= 0 || h <= 0) return [];
@@ -61,7 +63,10 @@ function squarify(items, x, y, w, h) {
 }
 
 // Render a node card: header + nested treemap of pods (each pod = treemap of containers).
-function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, onClick }) {
+function NodeCard({
+  node, metric, hue, style: nodeStyle, showLabels, density, onClick,
+  highlight, highlightActive, onPodSelect, onPodHover,
+}) {
   const ref = React.useRef(null);
   const [box, setBox] = React.useState({ w: 0, h: 0 });
 
@@ -147,14 +152,29 @@ function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, on
         }
         return (
           <PodBox key={`pod-${i}`} pod={it.pod} rect={it} hue={hue}
-                  metric={metric} showLabels={showLabels} nodeStyle={nodeStyle} />
+                  metric={metric} showLabels={showLabels} nodeStyle={nodeStyle}
+                  highlight={highlight} highlightActive={highlightActive}
+                  onPodSelect={onPodSelect} onPodHover={onPodHover} />
         );
       })}
     </div>
   );
 }
 
-function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
+function PodBox({
+  pod, rect, hue, metric, showLabels, nodeStyle,
+  highlight, highlightActive, onPodSelect, onPodHover,
+}) {
+  // Workload identity is cheap to derive and only ever needed here, so it is
+  // recomputed rather than cached on the pod — the highlight itself is a plain
+  // class toggle, so a re-render costs nothing beyond this string compare.
+  const wl = workloadKey(pod.name);
+  const cls = ["pod-box"];
+  if (highlight) {
+    cls.push(wl === highlight ? "wl-peer" : "wl-dim");
+    if (!highlightActive) cls.push("wl-preview");
+  }
+
   const containers = pod.containers.map(c => ({
     container: c,
     value: metric === "cpu" ? c.cpu : c.mem,
@@ -176,7 +196,12 @@ function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
     : `hsla(${hue}, 45%, 25%, 0.7)`;
 
   return (
-    <div className="pod-box"
+    <div className={cls.join(" ")}
+      // stopPropagation keeps the node card's own click (the focus overlay)
+      // from firing on top of the workload selection.
+      onClick={e => { e.stopPropagation(); onPodSelect(wl); }}
+      onMouseEnter={() => onPodHover(wl)}
+      onMouseLeave={() => onPodHover(null)}
       style={{
         left: rect.x, top: rect.y, width: rect.w - 2, height: rect.h - 2,
         background: podBg,

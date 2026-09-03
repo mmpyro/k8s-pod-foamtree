@@ -426,6 +426,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   border-radius: 4px;
   border: 1px solid;
   overflow: hidden;
+  transition: opacity .15s, box-shadow .15s;
 }
 .pod-label {
   position: absolute; top: 0; left: 0; right: 0;
@@ -861,7 +862,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   flex-shrink: 0;
   transform-style: preserve-3d;
 }
-.cube-face { position: absolute; left: 0; top: 0; }
+.cube-face { position: absolute; left: 0; top: 0; transition: filter .15s, opacity .15s; }
 .cube-top { transform-origin: center; }
 .cube-s { transform-origin: top; transform: rotateX(90deg); }
 .cube-e { transform-origin: left; transform: rotateY(-90deg); }
@@ -930,4 +931,81 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   color: var(--text-soft);
 }
 
+/* ─────────── Cross-node workload highlighting ─────────── */
 
+/* Class toggles only — the glow and the dim are static rules built off
+   --accent, so selecting a workload never recomputes per-pod styles.
+   Placed last on purpose: the 3D rules have to out-order .plate:hover, which
+   they tie with on specificity. */
+
+/* outline rather than border-color: PodBox sets its border colour inline.
+   z-index 1 lifts a peer over its sibling pods but stays under .node-header
+   (z-index 2), so the glow never bleeds across the node name. */
+.pod-box.wl-peer {
+  outline: 1.5px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: 0 0 12px 2px var(--accent);
+  z-index: 1;
+}
+.pod-box.wl-dim {
+  opacity: .22;
+}
+/* Hover preview — same shape, quieter, so it never reads as a pinned pick. */
+.pod-box.wl-peer.wl-preview {
+  box-shadow: 0 0 7px 1px var(--accent);
+}
+.pod-box.wl-dim.wl-preview {
+  opacity: .55;
+}
+
+/* Cubes: never filter or fade .cube itself. Both properties force
+   transform-style:flat on the element they apply to, which would collapse the
+   extruded faces into a flat top rhombus — the same trap as .plate:hover. */
+.cube.wl-peer .cube-face {
+  filter: brightness(1.4) saturate(1.2) drop-shadow(0 0 7px var(--accent));
+}
+.cube.wl-dim .cube-face {
+  filter: brightness(.45) saturate(.3);
+  opacity: .38;
+}
+/* The cast glow is part of the cube's read, so fade it with the faces. */
+.cube.wl-dim .cube-shadow { opacity: .25; }
+.cube.wl-peer.wl-preview .cube-face {
+  filter: brightness(1.2) drop-shadow(0 0 4px var(--accent));
+}
+.cube.wl-dim.wl-preview .cube-face {
+  filter: brightness(.7) saturate(.6);
+  opacity: .7;
+}
+
+/* Header readout for the pinned workload. */
+.wl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 340px;
+  border-color: var(--accent);
+  color: var(--text);
+  box-shadow: 0 0 12px -4px var(--accent);
+}
+.wl-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wl-chip-meta {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.wl-chip-clear {
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 1px;
+}
+.wl-chip-clear:hover { color: var(--text); }
+
+/* Same deal as .title-chip above — give way before the title does. */
+@media (max-width: 1000px) {
+  .wl-chip { display: none; }
+}
