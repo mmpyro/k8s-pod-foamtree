@@ -98,9 +98,13 @@ function NodeCard({
 
   const innerW = Math.max(0, box.w - padding * 2);
   const innerH = Math.max(0, box.h - headerH - padding);
-  const laid = innerW > 0 && innerH > 0
-    ? squarify(items, padding, headerH, innerW, innerH)
-    : [];
+  // Memoised because a highlight change re-renders every card: `items` is a
+  // pure function of node + metric, so those two plus the box are the whole
+  // input to the layout, and hovering a pod must not redo this math per card.
+  const laid = React.useMemo(
+    () => (innerW > 0 && innerH > 0 ? squarify(items, padding, headerH, innerW, innerH) : []),
+    [node, metric, innerW, innerH, padding, headerH]
+  );
 
   const utilization = used / cap;
   const utilColor = utilization > 0.85 ? "#ef4444" :
@@ -175,19 +179,24 @@ function PodBox({
     if (!highlightActive) cls.push("wl-preview");
   }
 
-  const containers = pod.containers.map(c => ({
-    container: c,
-    value: metric === "cpu" ? c.cpu : c.mem,
-  }));
   const inset = 2;
   const headerH = rect.h > 28 ? 12 : 0;
-  const laid = squarify(
-    containers,
-    inset,
-    headerH + inset,
-    Math.max(0, rect.w - inset * 2),
-    Math.max(0, rect.h - headerH - inset * 2)
-  );
+  // Same reasoning as the card layout: the container rects depend only on the
+  // pod, the metric and the rect handed down, so a highlight-only re-render
+  // reuses them instead of re-squarifying every pod in the cluster.
+  const laid = React.useMemo(() => {
+    const containers = pod.containers.map(c => ({
+      container: c,
+      value: metric === "cpu" ? c.cpu : c.mem,
+    }));
+    return squarify(
+      containers,
+      inset,
+      headerH + inset,
+      Math.max(0, rect.w - inset * 2),
+      Math.max(0, rect.h - headerH - inset * 2)
+    );
+  }, [pod, metric, rect, headerH]);
 
   const podBg = nodeStyle === "solid"
     ? `hsla(${hue}, 65%, 38%, 0.65)`

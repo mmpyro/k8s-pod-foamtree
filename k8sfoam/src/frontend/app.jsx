@@ -213,6 +213,14 @@ function App() {
     }
   }, [contextIdx, contexts.length]);
 
+  // Switching context swaps the whole data set, so a workload pinned in the
+  // previous cluster is meaningless in the new one: it would match nothing and
+  // dim every pod on screen with no pod glowing to explain why.
+  useEffect(() => {
+    setSelectedWorkload(null);
+    setHoveredWorkload(null);
+  }, [contextIdx]);
+
   // Keep a stable ref to the latest loadData so the auto-refresh interval
   // always calls the current closure without re-subscribing each render.
   const loadDataRef = useRef(loadData);
@@ -265,10 +273,18 @@ function App() {
     return () => clearInterval(id);
   }, [refreshInterval, contexts.length]);
 
-  // Escape clears the pinned workload.
+  // React fires no mouseleave when the hovered pod unmounts — typing in the
+  // filter, a refresh dropping the pod or a view switch all do that — so a
+  // stale preview would dim the grid with the cursor over nothing. Drop the
+  // preview whenever the rendered set is replaced; the pin is unaffected.
+  useEffect(() => { setHoveredWorkload(null); }, [filtered, view]);
+
+  // Escape clears the highlight — pin and hover preview alike.
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === "Escape") setSelectedWorkload(null);
+      if (e.key !== "Escape") return;
+      setSelectedWorkload(null);
+      setHoveredWorkload(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
