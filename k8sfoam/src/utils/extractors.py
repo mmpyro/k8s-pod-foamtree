@@ -56,6 +56,12 @@ class ResourcesExtractor():
     def extract_pod_requested_resources(self, pod) -> PodResources:
         name = pod.metadata.name
         node_name = pod.spec.node_name
+        namespace = pod.metadata.namespace
+
+        # Both are None on the API whenever unset — labels normalise to an
+        # empty dict, while QoS stays None because it must never be guessed.
+        labels = pod.metadata.labels or {}
+        qos_class = pod.status.qos_class if pod.status is not None else None
 
         # --- Regular containers (run concurrently → sum) ---
         containers = [self.__extract_container_resources(c) for c in pod.spec.containers]
@@ -71,7 +77,8 @@ class ResourcesExtractor():
         effective_cpu = max(sum_regular_cpu, max_init_cpu)
         effective_memory = max(sum_regular_memory, max_init_memory)
 
-        return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers)
+        return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
+                            namespace, labels, qos_class)
 
     def extract_node_resources(self, node) -> NodeResources:
         cpu = self.__convert_cpu(node.status.capacity['cpu'])

@@ -37,12 +37,12 @@ function utilColor(u) {
 //     plate and every cube reads as a hollow shell.
 //   * no backface-visibility:hidden on the side faces — once rotated they face
 //     away from the camera and get culled, leaving only flat top rhombi.
-function Cube({ pod, hue, onHover, onLeave }) {
+function Cube({ pod, hue, matched, dim, onHover, onLeave }) {
   const { base, height } = cubeDims(pod);
 
   return (
     <div
-      className="cube"
+      className={`cube ${dim ? "is-dim" : ""} ${matched ? "is-match" : ""}`}
       style={{ width: base, height: base }}
       onMouseEnter={e => onHover(pod, e)}
       onMouseMove={e => onHover(pod, e)}
@@ -81,7 +81,7 @@ function Cube({ pod, hue, onHover, onLeave }) {
   );
 }
 
-function Plate({ node, hue, onFocus, onHover, onLeave }) {
+function Plate({ node, match, hue, onFocus, onHover, onLeave }) {
   // No active metric in this view, so the plate reports whichever resource is
   // under more pressure — that is the number that decides schedulability.
   const util = Math.max(
@@ -93,9 +93,15 @@ function Plate({ node, hue, onFocus, onHover, onLeave }) {
   // don't occlude the smaller cubes in front of them.
   const pods = [...node.pods].sort((a, b) => cubeDims(b).base - cubeDims(a).base);
 
+  // Same dim model as the 2D card: a node ruled out by a node: glob dims whole,
+  // otherwise unmatched cubes fade one by one.
+  const queryActive = !!(match && match.active);
+  const plateDim = queryActive && match.dimNodes.has(node.name);
+  const podMatched = pod => queryActive && match.pods.has(pod);
+
   return (
     <div
-      className="plate"
+      className={`plate ${plateDim ? "is-dim" : ""}`}
       onClick={() => onFocus(node)}
       style={{
         background: `hsla(${hue}, 80%, 6%, .92)`,
@@ -119,7 +125,10 @@ function Plate({ node, hue, onFocus, onHover, onLeave }) {
 
       <div className="cube-field">
         {pods.map((p, i) => (
-          <Cube key={`${p.name}-${i}`} pod={p} hue={hue} onHover={onHover} onLeave={onLeave} />
+          <Cube key={`${p.name}-${i}`} pod={p} hue={hue}
+                matched={podMatched(p)}
+                dim={queryActive && !plateDim && !podMatched(p)}
+                onHover={onHover} onLeave={onLeave} />
         ))}
       </div>
     </div>
@@ -181,7 +190,7 @@ function CubeTooltip({ tip, memUnit, fmtMem }) {
   );
 }
 
-function Scene3D({ nodes, zoom, hueOf, memUnit, fmtMem, onFocus }) {
+function Scene3D({ nodes, match, zoom, hueOf, memUnit, fmtMem, onFocus }) {
   const scrollRef = React.useRef(null);
   const [tip, setTip] = React.useState(null);
 
@@ -217,6 +226,7 @@ function Scene3D({ nodes, zoom, hueOf, memUnit, fmtMem, onFocus }) {
               <Plate
                 key={n.id}
                 node={n}
+                match={match}
                 hue={hueOf(idx)}
                 onFocus={onFocus}
                 onHover={onHover}

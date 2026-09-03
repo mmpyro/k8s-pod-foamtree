@@ -36,7 +36,7 @@ Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header
 - **Memory unit**: MiB, GiB (default), or TiB.
 - **Context**: the sidebar lists every context from your kubeconfig, active one first, tagged by provider. **Switching only changes the context inside the k8sfoams web server — your ~/.kube/config file is never modified.**
 - **Refresh**: slider from 5 to 600 seconds, plus a *Refresh now* button.
-- **Filter**: the header search box filters nodes by name.
+- **Filter**: the header query bar highlights matching pods and dims the rest — nothing is removed from the view. Whitespace-separated tokens are ANDed: `ns:kube-system`, `node:worker-*` (glob), `qos:BestEffort`, `has:init-containers`, `app=frontend`, `env!=prod`, and bare text as a pod-name substring. Quote values containing spaces (`app="my app"`). The bar shows a live match count and flags malformed tokens.
 - **Focus**: click a node to open an overlay listing its pods with per-pod CPU/memory and container breakdown.
 
 ## HTTP API

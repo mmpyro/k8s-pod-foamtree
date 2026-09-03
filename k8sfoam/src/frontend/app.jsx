@@ -99,6 +99,12 @@ function mergeResources(cpuData, memData) {
       pods.push({
         name: cp.label,
         shortName: cp.label.split('-')[0],
+        // Selector metadata for the query bar. Absent on an older backend, so
+        // every field falls back to a value that simply never matches.
+        namespace: cp.namespace || "",
+        labels: cp.labels || {},
+        qos: cp.qos || "",
+        hasInit: !!cp.hasInitContainers,
         // Effective request (what the scheduler reserves) — init containers
         // run sequentially, so this is max(sum regular, max init), not a sum.
         cpu: podCpu,
@@ -213,10 +219,26 @@ function App() {
   const loadDataRef = useRef(loadData);
   loadDataRef.current = loadData;
 
-  const filtered = useMemo(
-    () => nodes.filter(n => !query || n.name.toLowerCase().includes(query.toLowerCase())),
-    [nodes, query]
-  );
+  const parsedQuery = useMemo(() => window.k8sQuery.parseQuery(query), [query]);
+
+  // Matched pods are highlighted and unmatched ones dimmed — nodes are never
+  // removed. A malformed query stays inert (and reports itself in the header)
+  // rather than dimming everything on a half-typed token.
+  const match = useMemo(() => {
+    const active = parsedQuery.terms.length > 0 && parsedQuery.errors.length === 0;
+    const pods = new Set();
+    const dimNodes = new Set();
+    let total = 0;
+    for (const n of nodes) {
+      total += n.pods.length;
+      if (!active) continue;
+      if (!window.k8sQuery.nodeMatches(n.name, parsedQuery)) dimNodes.add(n.name);
+      for (const p of n.pods) {
+        if (window.k8sQuery.podMatches(p, parsedQuery, n.name)) pods.add(p);
+      }
+    }
+    return { active, pods, dimNodes, count: active ? pods.size : total, total, errors: parsedQuery.errors };
+  }, [nodes, parsedQuery]);
 
   // Totals
   const totals = useMemo(() => {
@@ -273,6 +295,7 @@ function App() {
           view={view} setView={setView}
           totals={totals}
           query={query} setQuery={setQuery}
+          match={match}
           memUnit={memUnit}
           contexts={contexts}
           contextIdx={contextIdx}
@@ -284,7 +307,8 @@ function App() {
         <div className="grid-wrap">
           {view === "3d" ? (
             <Scene3D
-              nodes={filtered}
+              nodes={nodes}
+              match={match}
               zoom={zoom}
               hueOf={idx => nodeHue(idx, tw.colorScheme)}
               memUnit={memUnit}
@@ -293,7 +317,8 @@ function App() {
             />
           ) : (
             <TreemapGrid
-              nodes={filtered}
+              nodes={nodes}
+              match={match}
               metric={metric}
               colorScheme={tw.colorScheme}
               nodeStyle={tw.nodeStyle}
@@ -474,7 +499,8 @@ function Sidebar({
 
 /* ─────────── Header ─────────── */
 
-function Header({ metric, view, setView, totals, query, setQuery, memUnit, contexts, contextIdx, onMenu, onRefresh, refreshing }) {
+function Header({ metric, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx, onMenu, onRefresh, refreshing }) {
+  const [hintOpen, setHintOpen] = useState(false);
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
   const memPct = totals.memUsed / (totals.memCap || 1);
 
@@ -517,11 +543,8 @@ function Header({ metric, view, setView, totals, query, setQuery, memUnit, conte
             </button>
           ))}
         </div>
-        <div className="search">
-          <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none" /><path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Filter nodes…" />
-          {query && <button className="search-clear" onClick={() => setQuery("")}>×</button>}
-        </div>
+        <QueryBar query={query} setQuery={setQuery} match={match}
+          hintOpen={hintOpen} setHintOpen={setHintOpen} />
         <button className={`icon-btn ${refreshing ? "spinning" : ""}`} onClick={onRefresh} title="Refresh">
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
@@ -530,6 +553,50 @@ function Header({ metric, view, setView, totals, query, setQuery, memUnit, conte
         </button>
       </div>
     </header>
+  );
+}
+
+// Query bar — search input plus live match count, inline token errors and a
+// hint listing the grammar. The grammar itself lives in query.jsx.
+function QueryBar({ query, setQuery, match, hintOpen, setHintOpen }) {
+  const errors = (match && match.errors) || [];
+  const invalid = errors.length > 0;
+  const counting = !!query && !invalid && match;
+
+  return (
+    <div className="query-bar">
+      <div className={`search ${invalid ? "search-invalid" : ""}`}>
+        <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none" /><path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+        <input value={query} onChange={e => setQuery(e.target.value)}
+          onFocus={() => setHintOpen(true)} onBlur={() => setHintOpen(false)}
+          spellCheck="false"
+          placeholder="ns:kube-system app=frontend node:worker-*" />
+        {counting && (
+          <span className={`query-count ${match.count === 0 ? "query-count-none" : ""}`}>
+            {match.count} / {match.total} pods
+          </span>
+        )}
+        {query && <button className="search-clear" onClick={() => setQuery("")}>×</button>}
+      </div>
+
+      {invalid && (
+        <div className="query-pop query-errors">
+          {errors.map((e, i) => (
+            <div key={i} className="query-err"><code>{e.token}</code><span>{e.message}</span></div>
+          ))}
+        </div>
+      )}
+
+      {hintOpen && !invalid && (
+        <div className="query-pop query-hint">
+          <div className="query-hint-title">Filter tokens · combined with AND</div>
+          {window.k8sQuery.TOKEN_HINTS.map((h, i) => (
+            <div key={i} className="query-hint-row"><code>{h.form}</code><span>{h.desc}</span></div>
+          ))}
+          <div className="query-hint-foot">Quote values with spaces: app="my app"</div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -551,7 +618,7 @@ function Stat({ label, value, unit, pct }) {
 
 /* ─────────── Grid ─────────── */
 
-function TreemapGrid({ nodes, metric, colorScheme, nodeStyle, density, showLabels, onFocus }) {
+function TreemapGrid({ nodes, match, metric, colorScheme, nodeStyle, density, showLabels, onFocus }) {
   const containerRef = useRef(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
 
@@ -589,6 +656,7 @@ function TreemapGrid({ nodes, metric, colorScheme, nodeStyle, density, showLabel
             }}>
             <NodeCard
               node={it.node}
+              match={match}
               metric={metric}
               hue={hue}
               style={nodeStyle}

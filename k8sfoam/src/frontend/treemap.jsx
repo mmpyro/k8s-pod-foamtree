@@ -61,7 +61,7 @@ function squarify(items, x, y, w, h) {
 }
 
 // Render a node card: header + nested treemap of pods (each pod = treemap of containers).
-function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, onClick }) {
+function NodeCard({ node, match, metric, hue, style: nodeStyle, showLabels, density, onClick }) {
   const ref = React.useRef(null);
   const [box, setBox] = React.useState({ w: 0, h: 0 });
 
@@ -75,6 +75,12 @@ function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, on
     setBox({ w: el.clientWidth, h: el.clientHeight });
     return () => ro.disconnect();
   }, []);
+
+  // Query dimming. A node ruled out by a node: glob dims as a whole card, so
+  // its pods stay at full strength inside it rather than fading twice.
+  const queryActive = !!(match && match.active);
+  const nodeDim = queryActive && match.dimNodes.has(node.name);
+  const podMatched = pod => queryActive && match.pods.has(pod);
 
   const padding = density === "compact" ? 4 : 6;
   const headerH = density === "compact" ? 26 : 32;
@@ -117,7 +123,7 @@ function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, on
     <div
       ref={ref}
       onClick={onClick}
-      className="node-card"
+      className={`node-card ${nodeDim ? "is-dim" : ""}`}
       style={{
         background: cardBg,
         borderColor,
@@ -147,14 +153,16 @@ function NodeCard({ node, metric, hue, style: nodeStyle, showLabels, density, on
         }
         return (
           <PodBox key={`pod-${i}`} pod={it.pod} rect={it} hue={hue}
-                  metric={metric} showLabels={showLabels} nodeStyle={nodeStyle} />
+                  metric={metric} showLabels={showLabels} nodeStyle={nodeStyle}
+                  matched={podMatched(it.pod)}
+                  dim={queryActive && !nodeDim && !podMatched(it.pod)} />
         );
       })}
     </div>
   );
 }
 
-function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
+function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle, matched, dim }) {
   const containers = pod.containers.map(c => ({
     container: c,
     value: metric === "cpu" ? c.cpu : c.mem,
@@ -176,7 +184,7 @@ function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle }) {
     : `hsla(${hue}, 45%, 25%, 0.7)`;
 
   return (
-    <div className="pod-box"
+    <div className={`pod-box ${dim ? "is-dim" : ""} ${matched ? "is-match" : ""}`}
       style={{
         left: rect.x, top: rect.y, width: rect.w - 2, height: rect.h - 2,
         background: podBg,

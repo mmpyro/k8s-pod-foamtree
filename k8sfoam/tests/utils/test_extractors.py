@@ -167,3 +167,45 @@ def test_effective_memory_when_init_container_dominates():
     result = extractor.extract_pod_requested_resources(pod)
 
     assert result.memory == bitmath.MiB(500).kB
+
+
+# --- Selector metadata tests (namespace / labels / QoS) ---
+
+def test_should_extract_pod_selector_metadata():
+    # Given
+    extractor = ResourcesExtractor()
+    pod = create_pod('etcd', 'master', containers=[create_container('etcd', '100m', '1G')],
+                     namespace='kube-system', labels={'app': 'etcd', 'tier': 'control-plane'},
+                     qos_class='Guaranteed')
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert pod_resources.namespace == 'kube-system'
+    assert pod_resources.labels == {'app': 'etcd', 'tier': 'control-plane'}
+    assert pod_resources.qos_class == 'Guaranteed'
+
+
+def test_should_extract_pod_with_no_labels_as_empty_dict():
+    # Given — pod.metadata.labels is None whenever no label is set
+    extractor = ResourcesExtractor()
+    pod = create_pod('etcd', 'master', containers=[create_container('etcd', '100m', '1G')], labels=None)
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert pod_resources.labels == {}
+
+
+def test_should_extract_pod_with_no_qos_class_as_none():
+    # Given — pod.status.qos_class is None on pods the kubelet has not admitted yet
+    extractor = ResourcesExtractor()
+    pod = create_pod('etcd', 'master', containers=[create_container('etcd', '100m', '1G')], qos_class=None)
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert pod_resources.qos_class is None

@@ -353,6 +353,55 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .search input { width: 160px; font-size: 12px; color: var(--text); }
 .search input::placeholder { color: var(--text-soft); }
 .search-clear { color: var(--text-soft); font-size: 16px; line-height: 1; padding: 0 4px; }
+.search-invalid { border-color: var(--danger); }
+
+/* Query bar — search box plus its match count, error and hint popovers. */
+.query-bar { position: relative; }
+.query-bar .search input { width: 250px; font-family: var(--font-mono); font-size: 11.5px; }
+.query-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.query-count-none { color: var(--warn); }
+
+.query-pop {
+  position: absolute;
+  top: 40px; right: 0;
+  z-index: 40;
+  min-width: 268px;
+  padding: 9px 11px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  box-shadow: 0 14px 34px rgba(0,0,0,.55);
+}
+.query-errors { border-color: var(--danger); }
+.query-err { display: flex; gap: 7px; font-size: 11px; color: #fca5a5; }
+.query-err + .query-err { margin-top: 4px; }
+.query-err code { font-family: var(--font-mono); color: var(--text); flex-shrink: 0; }
+
+/* Hint is advisory only — clicks must reach the input, not this panel. */
+.query-hint { pointer-events: none; }
+.query-hint-title {
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-soft);
+  margin-bottom: 6px;
+}
+.query-hint-row { display: flex; gap: 10px; font-size: 11px; color: var(--text-soft); line-height: 1.7; }
+.query-hint-row code { font-family: var(--font-mono); color: var(--text-dim); width: 132px; flex-shrink: 0; }
+.query-hint-foot {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px;
+  color: var(--text-soft);
+}
 
 /* ─────────── Grid ─────────── */
 
@@ -377,7 +426,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   border: 1px solid;
   overflow: hidden;
   cursor: pointer;
-  transition: transform .15s, box-shadow .2s, filter .2s;
+  transition: transform .15s, box-shadow .2s, filter .2s, opacity .18s;
 }
 .node-card:hover {
   transform: translateY(-1px);
@@ -426,6 +475,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   border-radius: 4px;
   border: 1px solid;
   overflow: hidden;
+  transition: opacity .18s, box-shadow .18s;
 }
 .pod-label {
   position: absolute; top: 0; left: 0; right: 0;
@@ -453,6 +503,15 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .container-box span {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   max-width: 100%;
+}
+
+/* Query dim/highlight. The empty free-space block is never a pod, so it is
+   deliberately left out of both states. */
+.node-card.is-dim { opacity: .32; }
+.pod-box.is-dim { opacity: .16; }
+.pod-box.is-match {
+  z-index: 3;
+  box-shadow: 0 0 0 1.5px var(--accent), 0 0 14px -2px var(--accent);
 }
 
 .pod-empty {
@@ -649,6 +708,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 }
 @media (max-width: 760px) {
   .search input { width: 100px; }
+  .query-bar .search input { width: 130px; }
 }
 
 /* Error Banner */
@@ -797,6 +857,13 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
    and the faces instead — neither is a 3D ancestor of anything. */
 .plate:hover::before { background-color: rgba(255,255,255,.07); }
 .plate:hover .cube-face { filter: brightness(1.3) saturate(1.15); }
+/* Query dimming obeys the same rule: no opacity or filter on .plate itself,
+   only on the leaf faces, the shadow and the billboarded label. */
+.plate.is-dim .cube-face, .plate.is-dim .cube-shadow { opacity: .12; }
+.plate.is-dim .plate-label { opacity: .38; }
+.plate.is-dim::before { background-image: none; }
+.cube.is-dim .cube-face, .cube.is-dim .cube-shadow { opacity: .12; }
+.cube.is-match .cube-face { filter: brightness(1.4) saturate(1.3); }
 /* Tech-grid inlay on the plate surface. */
 .plate::before {
   content: "";
