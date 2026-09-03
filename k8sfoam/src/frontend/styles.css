@@ -353,7 +353,10 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .search input { width: 160px; font-size: 12px; color: var(--text); }
 .search input::placeholder { color: var(--text-soft); }
 .search-clear { color: var(--text-soft); font-size: 16px; line-height: 1; padding: 0 4px; }
-.search-invalid { border-color: var(--danger); }
+/* Doubled class so it outranks .search:focus-within — an invalid token only
+   exists while the input is focused, which is exactly when it must show red. */
+.search.search-invalid,
+.search.search-invalid:focus-within { border-color: var(--danger); }
 
 /* Query bar — search box plus its match count, error and hint popovers. */
 .query-bar { position: relative; }

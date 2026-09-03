@@ -85,7 +85,12 @@ function parseFilter(prefix, value, raw) {
 
 function parseToken(token) {
   const raw = token.text;
-  if (token.quoted) return { term: { kind: "text", value: raw.toLowerCase() } };
+  if (token.quoted) {
+    // An empty literal ("") would substring-match every pod name and glow the
+    // whole cluster — report it like any other malformed token instead.
+    if (!raw) return { error: { token: '""', message: "empty quoted value" } };
+    return { term: { kind: "text", value: raw.toLowerCase() } };
+  }
 
   // "!=" first: it also contains "=", so a later "=" split would mangle it.
   const neq = raw.indexOf("!=");

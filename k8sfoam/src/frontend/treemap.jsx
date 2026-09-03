@@ -88,12 +88,19 @@ function NodeCard({ node, match, metric, hue, style: nodeStyle, showLabels, dens
   // Compute pod values + empty space. Size each pod by its effective request
   // (max(sum regular, max init)) — summing containers would double-count
   // init containers, which run sequentially before the regular ones.
+  const podValue = p => (metric === "cpu" ? p.cpu : p.mem);
+  const cap = metric === "cpu" ? node.cpuCapacity : node.memCapacity;
+  const used = node.pods.reduce((s, p) => s + podValue(p), 0);
+  // A pod requesting nothing on this metric (every BestEffort pod, by
+  // definition) weighs 0 and squarify's `value > 0` guard drops it — so a
+  // matched one would raise the header count while the card drew nothing.
+  // Floor those to a thin sliver so the 2D and 3D views agree on what a query
+  // highlights. Unmatched pods keep their real value, layout untouched.
+  const sliver = cap * 0.002;
   const podItems = node.pods.map(p => ({
     pod: p,
-    value: metric === "cpu" ? p.cpu : p.mem,
+    value: podValue(p) > 0 ? podValue(p) : (podMatched(p) ? sliver : 0),
   }));
-  const used = podItems.reduce((s, p) => s + p.value, 0);
-  const cap = metric === "cpu" ? node.cpuCapacity : node.memCapacity;
   const empty = Math.max(0, cap - used);
   const items = [...podItems, { pod: null, value: empty, empty: true }];
 
