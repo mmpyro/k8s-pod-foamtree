@@ -1,6 +1,8 @@
 // Squarified treemap. Pure function: given a rect + items[{value,...}],
 // returns items with x/y/w/h placed.
 
+const { workloadKey } = window.k8sWorkload;
+
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
   if (!sorted.length || w <= 0 || h <= 0) return [];
@@ -61,7 +63,10 @@ function squarify(items, x, y, w, h) {
 }
 
 // Render a node card: header + nested treemap of pods (each pod = treemap of containers).
-function NodeCard({ node, match, metric, hue, style: nodeStyle, showLabels, density, onClick }) {
+function NodeCard({
+  node, match, metric, hue, style: nodeStyle, showLabels, density, onClick,
+  highlight, highlightActive, onPodSelect, onPodHover,
+}) {
   const ref = React.useRef(null);
   const [box, setBox] = React.useState({ w: 0, h: 0 });
 
@@ -106,9 +111,13 @@ function NodeCard({ node, match, metric, hue, style: nodeStyle, showLabels, dens
 
   const innerW = Math.max(0, box.w - padding * 2);
   const innerH = Math.max(0, box.h - headerH - padding);
-  const laid = innerW > 0 && innerH > 0
-    ? squarify(items, padding, headerH, innerW, innerH)
-    : [];
+  // Memoised because a highlight change re-renders every card: `items` is a
+  // pure function of node + metric, so those two plus the box are the whole
+  // input to the layout, and hovering a pod must not redo this math per card.
+  const laid = React.useMemo(
+    () => (innerW > 0 && innerH > 0 ? squarify(items, padding, headerH, innerW, innerH) : []),
+    [node, metric, innerW, innerH, padding, headerH]
+  );
 
   const utilization = used / cap;
   const utilColor = utilization > 0.85 ? "#ef4444" :
@@ -162,27 +171,49 @@ function NodeCard({ node, match, metric, hue, style: nodeStyle, showLabels, dens
           <PodBox key={`pod-${i}`} pod={it.pod} rect={it} hue={hue}
                   metric={metric} showLabels={showLabels} nodeStyle={nodeStyle}
                   matched={podMatched(it.pod)}
-                  dim={queryActive && !nodeDim && !podMatched(it.pod)} />
+                  dim={queryActive && !nodeDim && !podMatched(it.pod)}
+                  highlight={highlight} highlightActive={highlightActive}
+                  onPodSelect={onPodSelect} onPodHover={onPodHover} />
         );
       })}
     </div>
   );
 }
 
-function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle, matched, dim }) {
-  const containers = pod.containers.map(c => ({
-    container: c,
-    value: metric === "cpu" ? c.cpu : c.mem,
-  }));
+function PodBox({
+  pod, rect, hue, metric, showLabels, nodeStyle, matched, dim,
+  highlight, highlightActive, onPodSelect, onPodHover,
+}) {
+  // Workload identity is cheap to derive and only ever needed here, so it is
+  // recomputed rather than cached on the pod — the highlight itself is a plain
+  // class toggle, so a re-render costs nothing beyond this string compare.
+  const wl = workloadKey(pod.name);
+  const cls = ["pod-box"];
+  if (dim) cls.push("is-dim");
+  if (matched) cls.push("is-match");
+  if (highlight) {
+    cls.push(wl === highlight ? "wl-peer" : "wl-dim");
+    if (!highlightActive) cls.push("wl-preview");
+  }
+
   const inset = 2;
   const headerH = rect.h > 28 ? 12 : 0;
-  const laid = squarify(
-    containers,
-    inset,
-    headerH + inset,
-    Math.max(0, rect.w - inset * 2),
-    Math.max(0, rect.h - headerH - inset * 2)
-  );
+  // Same reasoning as the card layout: the container rects depend only on the
+  // pod, the metric and the rect handed down, so a highlight-only re-render
+  // reuses them instead of re-squarifying every pod in the cluster.
+  const laid = React.useMemo(() => {
+    const containers = pod.containers.map(c => ({
+      container: c,
+      value: metric === "cpu" ? c.cpu : c.mem,
+    }));
+    return squarify(
+      containers,
+      inset,
+      headerH + inset,
+      Math.max(0, rect.w - inset * 2),
+      Math.max(0, rect.h - headerH - inset * 2)
+    );
+  }, [pod, metric, rect, headerH]);
 
   const podBg = nodeStyle === "solid"
     ? `hsla(${hue}, 65%, 38%, 0.65)`
@@ -191,7 +222,12 @@ function PodBox({ pod, rect, hue, metric, showLabels, nodeStyle, matched, dim })
     : `hsla(${hue}, 45%, 25%, 0.7)`;
 
   return (
-    <div className={`pod-box ${dim ? "is-dim" : ""} ${matched ? "is-match" : ""}`}
+    <div className={cls.join(" ")}
+      // stopPropagation keeps the node card's own click (the focus overlay)
+      // from firing on top of the workload selection.
+      onClick={e => { e.stopPropagation(); onPodSelect(wl); }}
+      onMouseEnter={() => onPodHover(wl)}
+      onMouseLeave={() => onPodHover(null)}
       style={{
         left: rect.x, top: rect.y, width: rect.w - 2, height: rect.h - 2,
         background: podBg,

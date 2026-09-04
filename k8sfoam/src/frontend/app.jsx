@@ -3,6 +3,7 @@
 const { useState, useEffect, useMemo, useRef } = React;
 const { NodeCard } = window.k8sTreemap;
 const { Scene3D } = window.k8sCube3D;
+const { workloadKey } = window.k8sWorkload;
 
 // Per-node hue assignment — deterministic from index, evenly spaced around wheel.
 function nodeHue(idx, scheme) {
@@ -149,6 +150,10 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(Date.now());
   const [focused, setFocused] = useState(null);
+  // Cross-node workload highlighting. A click pins a workload; hover only
+  // previews one, so a pinned selection always wins over the pointer.
+  const [selectedWorkload, setSelectedWorkload] = useState(null);
+  const [hoveredWorkload, setHoveredWorkload] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [error, setError] = useState(null);
@@ -214,6 +219,14 @@ function App() {
     }
   }, [contextIdx, contexts.length]);
 
+  // Switching context swaps the whole data set, so a workload pinned in the
+  // previous cluster is meaningless in the new one: it would match nothing and
+  // dim every pod on screen with no pod glowing to explain why.
+  useEffect(() => {
+    setSelectedWorkload(null);
+    setHoveredWorkload(null);
+  }, [contextIdx]);
+
   // Keep a stable ref to the latest loadData so the auto-refresh interval
   // always calls the current closure without re-subscribing each render.
   const loadDataRef = useRef(loadData);
@@ -240,6 +253,27 @@ function App() {
     return { active, pods, dimNodes, count: active ? pods.size : total, total, errors: parsedQuery.errors };
   }, [nodes, parsedQuery]);
 
+  const highlight = selectedWorkload || hoveredWorkload;
+  const highlightActive = !!selectedWorkload;
+
+  const toggleWorkload = (wl) => setSelectedWorkload(prev => (prev === wl ? null : wl));
+
+  // Replica spread of the pinned workload. Counted over every node, ignoring
+  // the query — the point of the readout is the cluster-wide picture.
+  const workloadStats = useMemo(() => {
+    if (!selectedWorkload) return null;
+    const spread = new Set();
+    let replicas = 0;
+    for (const n of nodes) {
+      for (const p of n.pods) {
+        if (workloadKey(p.name) !== selectedWorkload) continue;
+        replicas++;
+        spread.add(n.name);
+      }
+    }
+    return { key: selectedWorkload, replicas, nodes: spread.size };
+  }, [nodes, selectedWorkload]);
+
   // Totals
   const totals = useMemo(() => {
     const t = { cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, pods: 0, nodes: nodes.length };
@@ -260,6 +294,23 @@ function App() {
     }, refreshInterval * 1000);
     return () => clearInterval(id);
   }, [refreshInterval, contexts.length]);
+
+  // React fires no mouseleave when the hovered pod unmounts — a refresh
+  // dropping the pod or a view switch both do that — so a stale preview would
+  // dim the grid with the cursor over nothing. Drop the preview whenever the
+  // rendered set is replaced; the pin is unaffected.
+  useEffect(() => { setHoveredWorkload(null); }, [nodes, view]);
+
+  // Escape clears the highlight — pin and hover preview alike.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      setSelectedWorkload(null);
+      setHoveredWorkload(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Auto-set accent CSS var
   useEffect(() => {
@@ -302,6 +353,8 @@ function App() {
           onMenu={() => setSidebarOpen(s => !s)}
           onRefresh={loadData}
           refreshing={refreshing}
+          workload={workloadStats}
+          onClearWorkload={() => setSelectedWorkload(null)}
         />
 
         <div className="grid-wrap">
@@ -314,6 +367,10 @@ function App() {
               memUnit={memUnit}
               fmtMem={fmtMem}
               onFocus={setFocused}
+              highlight={highlight}
+              highlightActive={highlightActive}
+              onPodSelect={toggleWorkload}
+              onPodHover={setHoveredWorkload}
             />
           ) : (
             <TreemapGrid
@@ -325,6 +382,10 @@ function App() {
               density={tw.density}
               showLabels={tw.showLabels}
               onFocus={setFocused}
+              highlight={highlight}
+              highlightActive={highlightActive}
+              onPodSelect={toggleWorkload}
+              onPodHover={setHoveredWorkload}
             />
           )}
         </div>
@@ -499,7 +560,10 @@ function Sidebar({
 
 /* ─────────── Header ─────────── */
 
-function Header({ metric, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx, onMenu, onRefresh, refreshing }) {
+function Header({
+  metric, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
+  onMenu, onRefresh, refreshing, workload, onClearWorkload,
+}) {
   const [hintOpen, setHintOpen] = useState(false);
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
   const memPct = totals.memUsed / (totals.memCap || 1);
@@ -520,6 +584,16 @@ function Header({ metric, view, setView, totals, query, setQuery, match, memUnit
         <div className="title-row">
           <span className="title-main">{titleMain} Resources</span>
           <span className="title-chip">{contextLabel}</span>
+          {/* Replica spread of the pinned workload — the anti-affinity check. */}
+          {workload && (
+            <span className="title-chip wl-chip" title={workload.key}>
+              <span className="wl-chip-name">{workload.key}</span>
+              <span className="wl-chip-meta">
+                {workload.replicas} replica{workload.replicas === 1 ? "" : "s"} · {workload.nodes} node{workload.nodes === 1 ? "" : "s"}
+              </span>
+              <button className="wl-chip-clear" onClick={onClearWorkload} title="Clear selection (Esc)">×</button>
+            </span>
+          )}
         </div>
         <div className="title-sub">
           {totals.nodes} nodes · {totals.pods} pods · {is3d ? "isometric cube topology" : "live foam-tree topology"}
@@ -618,7 +692,10 @@ function Stat({ label, value, unit, pct }) {
 
 /* ─────────── Grid ─────────── */
 
-function TreemapGrid({ nodes, match, metric, colorScheme, nodeStyle, density, showLabels, onFocus }) {
+function TreemapGrid({
+  nodes, match, metric, colorScheme, nodeStyle, density, showLabels, onFocus,
+  highlight, highlightActive, onPodSelect, onPodHover,
+}) {
   const containerRef = useRef(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
 
@@ -663,6 +740,10 @@ function TreemapGrid({ nodes, match, metric, colorScheme, nodeStyle, density, sh
               density={density}
               showLabels={showLabels}
               onClick={() => onFocus(it.node)}
+              highlight={highlight}
+              highlightActive={highlightActive}
+              onPodSelect={onPodSelect}
+              onPodHover={onPodHover}
             />
           </div>
         );
