@@ -32,12 +32,35 @@ def create_container(name: str, cpu: str, memory: str) -> MagicMock:
     return container
 
 
-def create_node(name: str, cpu: str, memory: str) -> MagicMock:
+def create_taint(key: str, value=None, effect: str = 'NoSchedule') -> MagicMock:
+    taint = MagicMock()
+    taint.key = key
+    taint.value = value
+    taint.effect = effect
+    return taint
+
+
+def create_condition(type: str, status: str) -> MagicMock:
+    condition = MagicMock()
+    condition.type = type
+    condition.status = status
+    return condition
+
+
+def create_node(name: str, cpu: str, memory: str, unschedulable=None, taints=None,
+                conditions=None) -> MagicMock:
     node = MagicMock()
     metadata = MagicMock()
     metadata.name = name
     node.metadata = metadata
     status = MagicMock()
     status.capacity = {'cpu': cpu, 'memory': memory}
+    # A bare MagicMock is truthy and not iterable, so an unset attribute would read
+    # as "cordoned" and blow up on the taint loop. Default to a plain healthy node.
+    status.conditions = conditions if conditions is not None else [create_condition('Ready', 'True')]
     node.status = status
+    spec = MagicMock()
+    spec.unschedulable = unschedulable
+    spec.taints = taints
+    node.spec = spec
     return node

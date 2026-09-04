@@ -3,6 +3,7 @@
 // 2D treemap there is no active metric here — a cube shows both at once.
 
 const { workloadKey } = window.k8sWorkload;
+const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 
 // Plate footprint plus the scene gap, used to keep the scene block near-square.
 const PLATE_W = 250;
@@ -116,9 +117,15 @@ function Plate({ node, match, hue, onFocus, onHover, onLeave, highlight, highlig
   const plateDim = queryActive && match.dimNodes.has(node.name);
   const podMatched = pod => queryActive && match.pods.has(pod);
 
+  // There is no empty-capacity geometry here — free space *is* the bare plate,
+  // so the warning hatch replaces the surface inlay. It has to land on
+  // .plate::before: a filter or a non-unit opacity on .plate itself forces
+  // transform-style:flat and collapses every cube into a rhombus.
+  const warnSev = worstSeverity(node.warnings);
+
   return (
     <div
-      className={`plate ${plateDim ? "is-dim" : ""}`}
+      className={`plate ${plateDim ? "is-dim" : ""} ${warnSev ? `warn-${warnSev}` : ""}`}
       onClick={() => onFocus(node)}
       style={{
         background: `hsla(${hue}, 80%, 6%, .92)`,
@@ -138,6 +145,7 @@ function Plate({ node, match, hue, onFocus, onHover, onLeave, highlight, highlig
         <span className="plate-util" style={{ color: utilColor(util) }}>
           {Math.round(util * 100)}%
         </span>
+        <NodeWarnBadge warnings={node.warnings} />
       </div>
 
       <div className="cube-field">

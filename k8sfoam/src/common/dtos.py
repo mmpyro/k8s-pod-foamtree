@@ -9,4 +9,10 @@ PodResources = namedtuple(
     defaults=('', None, None)
 )
 ContainerResources = namedtuple('ContainerResources', 'name cpu memory')
-NodeResources = namedtuple('NodeResources', 'name cpu memory')
+# unschedulable/taints/conditions back the node health markers (cordon, pressure,
+# taints). Declared last with defaults so existing positional construction keeps working.
+NodeResources = namedtuple(
+    'NodeResources',
+    'name cpu memory unschedulable taints conditions',
+    defaults=(False, None, None)
+)

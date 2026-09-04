@@ -1,7 +1,7 @@
 import bitmath  # type: ignore
 from k8sfoam.src.utils.extractors import ResourcesExtractor
 from pydash import py_ as _  # type: ignore
-from k8sfoam.tests.common.mocks import create_container, create_pod, create_node
+from k8sfoam.tests.common.mocks import create_container, create_pod, create_node, create_taint, create_condition
 from unittest.mock import MagicMock
 
 
@@ -209,3 +209,103 @@ def test_should_extract_pod_with_no_qos_class_as_none():
 
     # Then
     assert pod_resources.qos_class is None
+
+
+# --- Node health tests (cordon / taints / conditions) ---
+
+def test_should_extract_healthy_node_as_schedulable():
+    # Given
+    extractor = ResourcesExtractor()
+    node = create_node('minikube', '2', '8162156Ki')
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.unschedulable is False
+    assert node_resources.taints == []
+    assert node_resources.conditions == {'MemoryPressure': False, 'DiskPressure': False,
+                                         'PIDPressure': False, 'Ready': True}
+
+
+def test_should_extract_cordoned_node():
+    # Given
+    extractor = ResourcesExtractor()
+    node = create_node('minikube', '2', '8162156Ki', unschedulable=True)
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.unschedulable is True
+
+
+def test_should_extract_node_taints():
+    # Given
+    extractor = ResourcesExtractor()
+    taints = [create_taint('nvidia.com/gpu', 'true', 'NoSchedule'),
+              create_taint('spot', None, 'PreferNoSchedule')]
+    node = create_node('gpu-1', '2', '8162156Ki', taints=taints)
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then — PreferNoSchedule is kept; it never marks the node but the detail view lists it
+    assert node_resources.taints == [{'key': 'nvidia.com/gpu', 'value': 'true', 'effect': 'NoSchedule'},
+                                     {'key': 'spot', 'value': None, 'effect': 'PreferNoSchedule'}]
+
+
+def test_should_drop_the_cordon_taint_kubernetes_adds_itself():
+    # Given — cordoning sets both spec.unschedulable and this taint
+    extractor = ResourcesExtractor()
+    taints = [create_taint('node.kubernetes.io/unschedulable', None, 'NoSchedule'),
+              create_taint('gpu-only', None, 'NoSchedule')]
+    node = create_node('minikube', '2', '8162156Ki', unschedulable=True, taints=taints)
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then — reporting it too would mark the node twice for one fact
+    assert node_resources.taints == [{'key': 'gpu-only', 'value': None, 'effect': 'NoSchedule'}]
+
+
+def test_should_extract_pressure_conditions_as_booleans():
+    # Given
+    extractor = ResourcesExtractor()
+    conditions = [create_condition('MemoryPressure', 'True'),
+                  create_condition('DiskPressure', 'False'),
+                  create_condition('PIDPressure', 'True'),
+                  create_condition('Ready', 'True')]
+    node = create_node('minikube', '2', '8162156Ki', conditions=conditions)
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.conditions == {'MemoryPressure': True, 'DiskPressure': False,
+                                         'PIDPressure': True, 'Ready': True}
+
+
+def test_should_extract_unknown_ready_condition_as_not_ready():
+    # Given — 'Unknown' means the API server stopped hearing from the kubelet
+    extractor = ResourcesExtractor()
+    node = create_node('minikube', '2', '8162156Ki', conditions=[create_condition('Ready', 'Unknown')])
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.conditions['Ready'] is False
+
+
+def test_should_extract_node_reporting_no_conditions_as_ready():
+    # Given — absent is not the same as False; never invent an outage
+    extractor = ResourcesExtractor()
+    node = create_node('minikube', '2', '8162156Ki', conditions=[])
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.conditions['Ready'] is True
+    assert node_resources.conditions['MemoryPressure'] is False

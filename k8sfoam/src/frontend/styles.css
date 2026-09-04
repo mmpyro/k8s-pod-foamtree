@@ -535,6 +535,56 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   letter-spacing: -0.01em;
 }
 
+/* Free capacity on a node that refuses pods is not really free. Same 45deg
+   recipe as .pod-empty above, dialled up and tinted by severity so a full node
+   and an unusable one never look alike. */
+.pod-empty.warn-danger, .pod-empty.warn-warn, .pod-empty.warn-info {
+  border-style: solid;
+}
+.pod-empty.warn-danger {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(239,68,68,.10), rgba(239,68,68,.10) 5px,
+    rgba(239,68,68,.28) 5px, rgba(239,68,68,.28) 10px
+  );
+  border-color: rgba(239,68,68,.55);
+  color: rgba(255,255,255,.7);
+}
+.pod-empty.warn-warn {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(245,158,11,.10), rgba(245,158,11,.10) 5px,
+    rgba(245,158,11,.26) 5px, rgba(245,158,11,.26) 10px
+  );
+  border-color: rgba(245,158,11,.5);
+  color: rgba(255,255,255,.7);
+}
+.pod-empty.warn-info {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(96,165,250,.08), rgba(96,165,250,.08) 5px,
+    rgba(96,165,250,.2) 5px, rgba(96,165,250,.2) 10px
+  );
+  border-color: rgba(96,165,250,.45);
+  color: rgba(255,255,255,.65);
+}
+
+/* Node warning badge, shared by the 2D header and the 3D plate label. */
+.node-warn {
+  display: inline-flex; align-items: center; gap: 2px;
+  flex-shrink: 0;
+  line-height: 0;
+}
+.node-warn-count {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+.sev-danger { color: var(--danger); }
+.sev-warn { color: var(--warn); }
+.sev-info { color: var(--info); }
+
 /* ─────────── Overlay ─────────── */
 
 .overlay {
@@ -585,6 +635,40 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .status-ready { background: rgba(16,185,129,.15); color: var(--ok); }
 .status-pressure { background: rgba(245,158,11,.15); color: var(--warn); }
 .status-scheduling-disabled { background: rgba(239,68,68,.15); color: var(--danger); }
+.status-tainted { background: rgba(96,165,250,.15); color: var(--info); }
+
+.overlay-sched {
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.ov-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ov-chips-note { font-size: 11px; color: var(--text-soft); }
+.taint-rows { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.taint-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px;
+}
+.taint-row code {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.taint-effect {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--bg-3);
+  color: var(--text-soft);
+}
+/* PreferNoSchedule is a hint, not a wall — it reads dimmer than the two effects
+   that actually keep pods off the node. */
+.taint-effect.eff-NoSchedule, .taint-effect.eff-NoExecute {
+  background: rgba(96,165,250,.14);
+  color: var(--info);
+}
 
 .overlay-stats {
   display: grid; grid-template-columns: 1fr 1fr 1fr;
@@ -844,6 +928,31 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   pointer-events: none;
 }
 
+/* Sidebar node-health legend. Only mounted when something is wrong. */
+.health-rows { display: flex; flex-direction: column; gap: 6px; }
+.health-row {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.health-swatch {
+  width: 14px; height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  border: 1px solid currentColor;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent, transparent 2px,
+    currentColor 2px, currentColor 4px
+  );
+}
+.health-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.health-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-soft);
+}
+
 .plate {
   position: relative;
   width: 250px;
@@ -879,6 +988,43 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   pointer-events: none;
   transition: background-color .2s;
 }
+
+/* Warning hatch on the plate surface. Free space in 3D is just bare plate, so
+   the hatch replaces the tech-grid inlay. It lives on ::before for the same
+   reason the hover highlight does: a filter or a non-unit opacity on .plate
+   would force transform-style:flat and collapse every cube into a rhombus. */
+/* 0deg, not 45: the whole scene is rotateZ(45deg), so a hatch that is diagonal
+   in plate space would land axis-parallel on screen. This angle is what reads
+   as diagonal to the eye, matching the 2D card. */
+.plate.warn-danger::before {
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(239,68,68,.06), rgba(239,68,68,.06) 6px,
+    rgba(239,68,68,.24) 6px, rgba(239,68,68,.24) 12px
+  );
+  background-size: auto;
+}
+.plate.warn-warn::before {
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(245,158,11,.06), rgba(245,158,11,.06) 6px,
+    rgba(245,158,11,.22) 6px, rgba(245,158,11,.22) 12px
+  );
+  background-size: auto;
+}
+.plate.warn-info::before {
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(96,165,250,.05), rgba(96,165,250,.05) 6px,
+    rgba(96,165,250,.16) 6px, rgba(96,165,250,.16) 12px
+  );
+  background-size: auto;
+}
+
+/* Re-asserted after the hatch rules above: this file resolves same-specificity
+   conflicts by source order, and a plate the query ruled out must drop its
+   whole inlay, warning stripes included. */
+.plate.is-dim::before { background-image: none; }
 
 /* Billboarded back to the camera by inverting the scene rotation.
    Lifted clear of the cubes first: a tall cube at the front of the plate

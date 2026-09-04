@@ -1,5 +1,6 @@
 import bitmath  # type: ignore
 from k8sfoam.src.common.dtos import PodResources, ContainerResources, NodeResources
+from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS, CORDON_TAINT
 from typing import Optional
 
 
@@ -80,7 +81,30 @@ class ResourcesExtractor():
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
                             namespace, labels, qos_class)
 
+    def __extract_node_taints(self, node) -> list:
+        """Every taint on the node, minus the one Kubernetes adds on cordon.
+
+        PreferNoSchedule is kept: it does not mark the node, but the detail view
+        still lists it.
+        """
+        taints = node.spec.taints or [] if node.spec is not None else []
+        return [{'key': t.key, 'value': t.value, 'effect': t.effect}
+                for t in taints if t.key != CORDON_TAINT]
+
+    def __extract_node_conditions(self, node) -> dict:
+        """Scheduling-relevant conditions, flattened to booleans."""
+        conditions = node.status.conditions or [] if node.status is not None else []
+        status_by_type = {c.type: c.status for c in conditions}
+        result = {name: status_by_type.get(name) == 'True' for name in PRESSURE_CONDITIONS}
+        # 'Unknown' means the API server stopped hearing from the kubelet, which
+        # is not ready. A missing Ready key means the node reported no conditions
+        # at all, so default to healthy rather than invent an outage.
+        result['Ready'] = status_by_type.get('Ready', 'True') == 'True'
+        return result
+
     def extract_node_resources(self, node) -> NodeResources:
         cpu = self.__convert_cpu(node.status.capacity['cpu'])
         memory = self.__convert_memory(node.status.capacity['memory'])
-        return NodeResources(node.metadata.name, cpu, memory)
+        unschedulable = bool(node.spec.unschedulable) if node.spec is not None else False
+        return NodeResources(node.metadata.name, cpu, memory, unschedulable,
+                             self.__extract_node_taints(node), self.__extract_node_conditions(node))
