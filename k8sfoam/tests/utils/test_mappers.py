@@ -92,3 +92,83 @@ def test_init_containers_with_zero_resource_not_rendered():
 
     # Then — zero-resource init containers must not pollute the foamtree
     assert init_foam is None
+
+
+# --- Selector metadata carried onto every pod group ---
+
+def test_pod_groups_carry_selector_metadata_in_cpu_foamtree():
+    # Given
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    containers = [ContainerResources('app', 100, float(bitmath.MB(100).kB))]
+    init_containers = [ContainerResources('init-db', 50, float(bitmath.MB(50).kB))]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB), containers, init_containers,
+                         'kube-system', {'app': 'web'}, 'Guaranteed')]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_cpu_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+    pod_foam = _.find(node_foam['groups'], lambda item: item['label'] == 'web')
+
+    # Then — new keys are added, existing ones keep their shape
+    assert pod_foam['weight'] == 100
+    assert pod_foam['namespace'] == 'kube-system'
+    assert pod_foam['labels'] == {'app': 'web'}
+    assert pod_foam['qos'] == 'Guaranteed'
+    assert pod_foam['hasInitContainers'] is True
+    assert len(pod_foam['groups']) == 2
+
+
+def test_pod_groups_carry_selector_metadata_in_memory_foamtree():
+    # Given
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    containers = [ContainerResources('app', 100, float(bitmath.MB(100).kB))]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB), containers, [],
+                         'default', {'env': 'prod'}, 'Burstable')]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_memory_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+    pod_foam = _.find(node_foam['groups'], lambda item: item['label'] == 'web')
+
+    # Then
+    assert pod_foam['namespace'] == 'default'
+    assert pod_foam['labels'] == {'env': 'prod'}
+    assert pod_foam['qos'] == 'Burstable'
+    assert pod_foam['hasInitContainers'] is False
+
+
+def test_pod_groups_with_missing_labels_and_qos_emit_neutral_values():
+    # Given — labels/qos are absent for pods the API reports without them
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    containers = [ContainerResources('app', 100, float(bitmath.MB(100).kB))]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB), containers, [],
+                         'default', None, None)]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_cpu_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+    pod_foam = _.find(node_foam['groups'], lambda item: item['label'] == 'web')
+
+    # Then
+    assert pod_foam['labels'] == {}
+    assert pod_foam['qos'] is None
+
+
+def test_empty_group_keeps_its_shape_and_carries_no_pod_metadata():
+    # Given — the synthetic free-space group must stay exactly as it was
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    containers = [ContainerResources('app', 100, float(bitmath.MB(100).kB))]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB), containers, [],
+                         'default', {'app': 'web'}, 'Burstable')]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_cpu_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+    empty_foam = _.find(node_foam['groups'], lambda item: item['label'] == 'empty')
+
+    # Then
+    assert empty_foam == {'label': 'empty', 'weight': 1900, 'color': '#ffffff'}

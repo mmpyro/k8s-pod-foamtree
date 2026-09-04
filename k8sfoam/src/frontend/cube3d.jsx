@@ -2,6 +2,8 @@
 // the cube's footprint encodes CPU, its height encodes Memory. Unlike the
 // 2D treemap there is no active metric here — a cube shows both at once.
 
+const { workloadKey } = window.k8sWorkload;
+
 // Plate footprint plus the scene gap, used to keep the scene block near-square.
 const PLATE_W = 250;
 const SLOT_W = 310;
@@ -37,13 +39,28 @@ function utilColor(u) {
 //     plate and every cube reads as a hollow shell.
 //   * no backface-visibility:hidden on the side faces — once rotated they face
 //     away from the camera and get culled, leaving only flat top rhombi.
-function Cube({ pod, hue, onHover, onLeave }) {
+function Cube({ pod, hue, matched, dim, onHover, onLeave, highlight, highlightActive, onSelect }) {
   const { base, height } = cubeDims(pod);
+
+  // The highlight classes deliberately target .cube-face rather than .cube:
+  // a filter or a non-unit opacity on .cube would force transform-style:flat
+  // on it and flatten the extruded faces back into a rhombus.
+  const wl = workloadKey(pod.name);
+  const cls = ["cube"];
+  if (dim) cls.push("is-dim");
+  if (matched) cls.push("is-match");
+  if (highlight) {
+    cls.push(wl === highlight ? "wl-peer" : "wl-dim");
+    if (!highlightActive) cls.push("wl-preview");
+  }
 
   return (
     <div
-      className="cube"
+      className={cls.join(" ")}
       style={{ width: base, height: base }}
+      // stopPropagation keeps the plate's own click (the focus overlay) from
+      // firing on top of the workload selection.
+      onClick={e => { e.stopPropagation(); onSelect(wl); }}
       onMouseEnter={e => onHover(pod, e)}
       onMouseMove={e => onHover(pod, e)}
       onMouseLeave={onLeave}
@@ -81,7 +98,7 @@ function Cube({ pod, hue, onHover, onLeave }) {
   );
 }
 
-function Plate({ node, hue, onFocus, onHover, onLeave }) {
+function Plate({ node, match, hue, onFocus, onHover, onLeave, highlight, highlightActive, onSelect }) {
   // No active metric in this view, so the plate reports whichever resource is
   // under more pressure — that is the number that decides schedulability.
   const util = Math.max(
@@ -93,9 +110,15 @@ function Plate({ node, hue, onFocus, onHover, onLeave }) {
   // don't occlude the smaller cubes in front of them.
   const pods = [...node.pods].sort((a, b) => cubeDims(b).base - cubeDims(a).base);
 
+  // Same dim model as the 2D card: a node ruled out by a node: glob dims whole,
+  // otherwise unmatched cubes fade one by one.
+  const queryActive = !!(match && match.active);
+  const plateDim = queryActive && match.dimNodes.has(node.name);
+  const podMatched = pod => queryActive && match.pods.has(pod);
+
   return (
     <div
-      className="plate"
+      className={`plate ${plateDim ? "is-dim" : ""}`}
       onClick={() => onFocus(node)}
       style={{
         background: `hsla(${hue}, 80%, 6%, .92)`,
@@ -119,7 +142,11 @@ function Plate({ node, hue, onFocus, onHover, onLeave }) {
 
       <div className="cube-field">
         {pods.map((p, i) => (
-          <Cube key={`${p.name}-${i}`} pod={p} hue={hue} onHover={onHover} onLeave={onLeave} />
+          <Cube key={`${p.name}-${i}`} pod={p} hue={hue}
+                matched={podMatched(p)}
+                dim={queryActive && !plateDim && !podMatched(p)}
+                onHover={onHover} onLeave={onLeave}
+                highlight={highlight} highlightActive={highlightActive} onSelect={onSelect} />
         ))}
       </div>
     </div>
@@ -181,7 +208,10 @@ function CubeTooltip({ tip, memUnit, fmtMem }) {
   );
 }
 
-function Scene3D({ nodes, zoom, hueOf, memUnit, fmtMem, onFocus }) {
+function Scene3D({
+  nodes, match, zoom, hueOf, memUnit, fmtMem, onFocus,
+  highlight, highlightActive, onPodSelect, onPodHover,
+}) {
   const scrollRef = React.useRef(null);
   const [tip, setTip] = React.useState(null);
 
@@ -199,8 +229,16 @@ function Scene3D({ nodes, zoom, hueOf, memUnit, fmtMem, onFocus }) {
     el.scrollTop = (el.scrollHeight - el.clientHeight) / 2;
   }, [zoom, nodes.length, cols]);
 
-  const onHover = (pod, e) => setTip({ pod, x: e.clientX, y: e.clientY });
-  const onLeave = () => setTip(null);
+  // Hover drives both the tooltip and the peer preview. Re-reporting the same
+  // workload key on every mousemove is a no-op for React's state bail-out.
+  const onHover = (pod, e) => {
+    setTip({ pod, x: e.clientX, y: e.clientY });
+    onPodHover(workloadKey(pod.name));
+  };
+  const onLeave = () => {
+    setTip(null);
+    onPodHover(null);
+  };
 
   return (
     <div className="scene-3d">
@@ -217,10 +255,14 @@ function Scene3D({ nodes, zoom, hueOf, memUnit, fmtMem, onFocus }) {
               <Plate
                 key={n.id}
                 node={n}
+                match={match}
                 hue={hueOf(idx)}
                 onFocus={onFocus}
                 onHover={onHover}
                 onLeave={onLeave}
+                highlight={highlight}
+                highlightActive={highlightActive}
+                onSelect={onPodSelect}
               />
             ))}
           </div>

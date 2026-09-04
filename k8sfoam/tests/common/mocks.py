@@ -1,16 +1,24 @@
 from unittest.mock import MagicMock
 
 
-def create_pod(name: str, node_name: str, containers=[], init_containers=None) -> MagicMock:
+def create_pod(name: str, node_name: str, containers=[], init_containers=None,
+               namespace='default', labels=None, qos_class='Burstable') -> MagicMock:
     pod = MagicMock()
     metadata = MagicMock()
     metadata.name = name
+    metadata.namespace = namespace
+    # labels and qos_class are None on the real API whenever they are unset,
+    # so the mock has to express that instead of an always-truthy MagicMock.
+    metadata.labels = labels
     spec = MagicMock()
     spec.node_name = node_name
     spec.containers = containers
     spec.init_containers = init_containers
+    status = MagicMock()
+    status.qos_class = qos_class
     pod.metadata = metadata
     pod.spec = spec
+    pod.status = status
     return pod
 
 

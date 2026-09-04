@@ -30,13 +30,23 @@ class FoamTreeMapper():
 
         return groups
 
+    def __pod_metadata(self, pod) -> dict:
+        """Selector metadata added to every pod group, consumed by the frontend query bar."""
+        return {
+            'namespace': pod.namespace,
+            'labels': pod.labels or {},
+            'qos': pod.qos_class,
+            'hasInitContainers': len(pod.init_containers) > 0,
+        }
+
     def transform_cpu_resources_to_foamtree(self) -> dict:
         result: dict = {'groups': []}
         for node in self.__nodes:
             foam_pods = []
             all_pods_cpu = 0
             for pod in filter(lambda p: p.node_name == node.name, self.__pods):
-                foam_pods.append({'label': pod.name, 'weight': pod.cpu, 'groups': self.__build_pod_groups(pod, 'cpu')})
+                foam_pods.append({'label': pod.name, 'weight': pod.cpu, 'groups': self.__build_pod_groups(pod, 'cpu'),
+                                  **self.__pod_metadata(pod)})
                 all_pods_cpu += pod.cpu if pod.cpu else 0
             foam_pods.append({'label': 'empty', 'weight': node.cpu - all_pods_cpu, 'color': '#ffffff'})
             foam_node = {'label': node.name, 'weight': node.cpu, 'groups': foam_pods}
@@ -49,7 +59,8 @@ class FoamTreeMapper():
             foam_pods = []
             all_pods_memory = 0
             for pod in filter(lambda p: p.node_name == node.name, self.__pods):
-                foam_pods.append({'label': pod.name, 'weight': pod.memory, 'groups': self.__build_pod_groups(pod, 'memory')})
+                foam_pods.append({'label': pod.name, 'weight': pod.memory, 'groups': self.__build_pod_groups(pod, 'memory'),
+                                  **self.__pod_metadata(pod)})
                 all_pods_memory += pod.memory if pod.memory else 0
             foam_pods.append({'label': 'empty', 'weight': node.memory - all_pods_memory, 'color': '#ffffff'})
             foam_node = {'label': node.name, 'weight': node.memory, 'groups': foam_pods}

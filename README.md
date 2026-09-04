@@ -36,8 +36,108 @@ Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header
 - **Memory unit**: MiB, GiB (default), or TiB.
 - **Context**: the sidebar lists every context from your kubeconfig, active one first, tagged by provider. **Switching only changes the context inside the k8sfoams web server — your ~/.kube/config file is never modified.**
 - **Refresh**: slider from 5 to 600 seconds, plus a *Refresh now* button.
-- **Filter**: the header search box filters nodes by name.
+- **Filter**: the header query bar highlights matching pods and dims the rest — nothing is removed from the view. See [Filtering](#filtering) for the full grammar.
 - **Focus**: click a node to open an overlay listing its pods with per-pod CPU/memory and container breakdown.
+
+## Filtering
+
+The query bar in the header is a **highlighter, not a filter of last resort**: matching pods glow, everything else dims. No pod, node or box ever leaves the layout, so the shape of the cluster stays comparable while you narrow down. Once the query is non-empty and valid, a live counter inside the input reads `N / M pods` (and turns red at `0`).
+
+Type whitespace-separated tokens. **All tokens are ANDed** — a pod must satisfy every one of them:
+
+```
+ns:kube-system qos:Burstable app=frontend
+```
+
+An empty query matches everything. A query that contains a malformed token is **inert**: nothing dims, and the offending tokens are listed under the bar with the reason. Half-typing `ns:` can never blank the view.
+
+### Token reference
+
+| Token | Matches | Notes |
+| --- | --- | --- |
+| `ns:<name>` | pod namespace, exact | case-insensitive (`ns:Kube-System` works) |
+| `node:<glob>` | node the pod is scheduled on | `*` is the only wildcard; anchored (whole name must match); case-insensitive |
+| `qos:<class>` | `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
+| `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
+| `key=value` | pod label equals value | key and value are **case-sensitive** (Kubernetes labels are) |
+| `key!=value` | pod label differs from value | a **missing** label counts as unequal, so it matches too |
+| `text` | pod name contains `text` | case-insensitive substring |
+| `"quoted text"` | pod name contains `quoted text` | quotes force literal text — the grammar is skipped |
+
+### Examples
+
+Every pod named like `nginx`, anywhere:
+
+```
+nginx
+```
+
+Pods in `kube-system` that run init containers:
+
+```
+ns:kube-system has:init-containers
+```
+
+Everything the scheduler can evict first, on the worker pool:
+
+```
+qos:BestEffort node:worker-*
+```
+
+Frontend pods that are **not** in production, named like `api`:
+
+```
+app=frontend env!=prod api
+```
+
+One specific node — globs are anchored, so dots are literal, not wildcards:
+
+```
+node:ip-10-0-1-5.ec2.internal
+```
+
+All nodes in an AZ suffix, plus a namespace:
+
+```
+node:*-eu-west-1a ns:payments
+```
+
+Guaranteed pods carrying a label value with a space:
+
+```
+qos:Guaranteed app="my app"
+```
+
+Match a pod name that *looks* like a filter token — leading quotes make the whole token literal text:
+
+```
+"web:1"
+```
+
+Without the quotes, `web:1` is read as an unknown filter prefix and reported as an error.
+
+### Sharp edges
+
+- **`!=` wins over `=`.** `env!=prod` is one inequality, never `env!` equals `prod`.
+- **A filter prefix must be a bare word before `:`.** `app=ns:x` is a label selector for key `app`, value `ns:x` — not a namespace filter.
+- **Only `node:` can dim a node.** Node plates and boxes stay in the layout either way; pod-level terms dim pods, never their node.
+- **A missing label matches `!=`.** `env!=prod` highlights pods with `env: staging` *and* pods with no `env` label at all — the Kubernetes selector semantics.
+- **Every problem is reported at once.** The parser never stops on the first bad token, so a three-error query lists three errors.
+
+### Errors you can hit
+
+| Query | Message |
+| --- | --- |
+| `ns:` | `ns: needs a value` |
+| `qos:Cheap` | `unknown QoS class — use Guaranteed, Burstable or BestEffort` |
+| `has:sidecars` | `unknown has: field — use init-containers` |
+| `zone:eu` | `unknown filter — use ns:, node:, qos:, has:` |
+| `=frontend` | `label selector needs a key` |
+| `app=` | `label selector needs a value` |
+| `""` | `empty quoted value` |
+| `app="my app` | `unterminated quoted value` |
+
+Focusing the input opens a popover with the same token list; it is replaced by the error list while a token is malformed. The `×` on the right clears the query.
 
 ## HTTP API
 
