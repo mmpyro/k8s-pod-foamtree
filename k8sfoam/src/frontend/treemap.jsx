@@ -2,6 +2,7 @@
 // returns items with x/y/w/h placed.
 
 const { workloadKey } = window.k8sWorkload;
+const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
@@ -119,6 +120,10 @@ function NodeCard({
     [node, metric, innerW, innerH, padding, headerH]
   );
 
+  // Free capacity on a node that refuses pods is not really free, so the idle
+  // foam gets hatched in the worst warning's colour instead of the neutral one.
+  const warnSev = worstSeverity(node.warnings);
+
   const utilization = used / cap;
   const utilColor = utilization > 0.85 ? "#ef4444" :
                     utilization > 0.6 ? "#f59e0b" :
@@ -151,6 +156,7 @@ function NodeCard({
         <div className="node-header-dot" style={{ background: `hsl(${hue} 80% 65%)` }}></div>
         <span className="node-name">{node.name}</span>
         <span className="node-meta">
+          <NodeWarnBadge warnings={node.warnings} />
           <span className="node-util" style={{ color: utilColor }}>{Math.round(utilization * 100)}%</span>
         </span>
       </div>
@@ -159,7 +165,7 @@ function NodeCard({
       {laid.map((it, i) => {
         if (it.empty) {
           return (
-            <div key={`empty-${i}`} className="pod-empty"
+            <div key={`empty-${i}`} className={`pod-empty${warnSev ? ` warn-${warnSev}` : ""}`}
               style={{
                 left: it.x, top: it.y, width: it.w - 2, height: it.h - 2,
               }}>

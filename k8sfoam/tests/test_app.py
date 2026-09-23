@@ -38,6 +38,9 @@ def test_get_k8s_resources(k8s_client, parameter, test_client):
     assert json['groups'][0]['label'] == 'minikube'
     assert len(json['groups'][0]['groups']) == 2
     assert len(json['groups'][0]['groups'][0]['groups']) == 2
+    # Node health rides on the same payload the frontend already fetches
+    assert json['groups'][0]['warnings'] == []
+    assert json['groups'][0]['unschedulable'] is False
 
 
 @patch('k8sfoam.src.app.K8sClient')

@@ -1,4 +1,5 @@
 from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.node_status import node_warnings
 from typing import Iterator
 
 
@@ -39,6 +40,21 @@ class FoamTreeMapper():
             'hasInitContainers': len(pod.init_containers) > 0,
         }
 
+    def __node_metadata(self, node) -> dict:
+        """Health metadata added to every node group, consumed by the frontend markers.
+
+        `warnings` is the render-ready verdict; `taints`/`conditions` are the raw
+        facts the focus overlay spells out.
+        """
+        taints = list(node.taints or [])
+        conditions = dict(node.conditions or {})
+        return {
+            'unschedulable': bool(node.unschedulable),
+            'taints': taints,
+            'conditions': conditions,
+            'warnings': node_warnings(bool(node.unschedulable), taints, conditions),
+        }
+
     def transform_cpu_resources_to_foamtree(self) -> dict:
         result: dict = {'groups': []}
         for node in self.__nodes:
@@ -49,7 +65,7 @@ class FoamTreeMapper():
                                   **self.__pod_metadata(pod)})
                 all_pods_cpu += pod.cpu if pod.cpu else 0
             foam_pods.append({'label': 'empty', 'weight': node.cpu - all_pods_cpu, 'color': '#ffffff'})
-            foam_node = {'label': node.name, 'weight': node.cpu, 'groups': foam_pods}
+            foam_node = {'label': node.name, 'weight': node.cpu, 'groups': foam_pods, **self.__node_metadata(node)}
             result['groups'].append(foam_node)
         return result
 
@@ -63,6 +79,6 @@ class FoamTreeMapper():
                                   **self.__pod_metadata(pod)})
                 all_pods_memory += pod.memory if pod.memory else 0
             foam_pods.append({'label': 'empty', 'weight': node.memory - all_pods_memory, 'color': '#ffffff'})
-            foam_node = {'label': node.name, 'weight': node.memory, 'groups': foam_pods}
+            foam_node = {'label': node.name, 'weight': node.memory, 'groups': foam_pods, **self.__node_metadata(node)}
             result['groups'].append(foam_node)
         return result

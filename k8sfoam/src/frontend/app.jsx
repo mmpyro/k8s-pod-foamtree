@@ -4,6 +4,7 @@ const { useState, useEffect, useMemo, useRef } = React;
 const { NodeCard } = window.k8sTreemap;
 const { Scene3D } = window.k8sCube3D;
 const { workloadKey } = window.k8sWorkload;
+const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 
 // Per-node hue assignment — deterministic from index, evenly spaced around wheel.
 function nodeHue(idx, scheme) {
@@ -131,7 +132,13 @@ function mergeResources(cpuData, memData) {
       cpuFree: Math.max(0, (cg.weight || 0) - cpuUsed),
       memFree: Math.max(0, memCapacity - convertedMemUsed),
       pods,
-      status: "ready"
+      // Node health from the backend. Absent on an older backend, so every
+      // field falls back to what a plainly healthy node would report.
+      warnings: cg.warnings || [],
+      taints: cg.taints || [],
+      conditions: cg.conditions || {},
+      unschedulable: !!cg.unschedulable,
+      status: statusOf(cg.warnings || [])
     };
   });
 }
@@ -312,6 +319,18 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // One row per distinct warning present in the cluster, worst first. Empty on
+  // a healthy cluster, which is what hides the legend entirely.
+  const health = useMemo(() => {
+    const counts = new Map();
+    for (const n of nodes) {
+      for (const w of n.warnings || []) counts.set(w, (counts.get(w) || 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([slug, count]) => ({ slug, count, ...warnInfo(slug) }))
+      .sort((a, b) => WARNING_ORDER.indexOf(a.slug) - WARNING_ORDER.indexOf(b.slug));
+  }, [nodes]);
+
   // Auto-set accent CSS var
   useEffect(() => {
     document.documentElement.style.setProperty("--accent", tw.accent);
@@ -332,6 +351,7 @@ function App() {
         doRefresh={loadData} refreshing={refreshing}
         lastRefresh={lastRefresh}
         nodeCount={nodes.length}
+        health={health}
       />
 
       <main className="main">
@@ -434,7 +454,7 @@ function App() {
 function Sidebar({
   open, onToggle, view, setView, zoom, setZoom, metric, setMetric, memUnit, setMemUnit,
   refreshInterval, setRefreshInterval,
-  contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount
+  contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health
 }) {
   const is3d = view === "3d";
   return (
@@ -542,6 +562,23 @@ function Sidebar({
           ))}
         </div>
       </div>
+
+      {/* Only rendered when something is actually wrong, so a healthy cluster
+          looks exactly as it did before this feature existed. */}
+      {health.length > 0 && (
+        <div className="sidebar-section">
+          <div className="section-label">Node health</div>
+          <div className="health-rows">
+            {health.map(h => (
+              <div key={h.slug} className="health-row">
+                <span className={`health-swatch sev-${h.sev}`} />
+                <span className="health-name">{h.label}</span>
+                <span className="health-count">{h.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="sidebar-footer">
         <div className="footer-row">
@@ -787,6 +824,29 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
             <div className="ov-bar"><div style={{ width: `${(node.pods.length / 110) * 100}%`, background: "#22d3ee" }} /></div>
           </div>
         </div>
+        {(node.warnings.length > 0 || node.taints.length > 0) && (
+          <div className="overlay-sched">
+            <div className="ov-section-title">Scheduling</div>
+            <div className="ov-chips">
+              {node.warnings.map(w => (
+                <span key={w} className={`status-pill status-${warnInfo(w).pill}`}>{warnInfo(w).label}</span>
+              ))}
+              {node.warnings.length === 0 && (
+                <span className="ov-chips-note">Schedulable — the taints below are advisory.</span>
+              )}
+            </div>
+            {node.taints.length > 0 && (
+              <div className="taint-rows">
+                {node.taints.map((t, i) => (
+                  <div key={i} className="taint-row">
+                    <code>{t.key}{t.value ? `=${t.value}` : ""}</code>
+                    <span className={`taint-effect eff-${t.effect}`}>{t.effect}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <div className="overlay-pods">
           <div className="ov-section-title">Workloads</div>
           {node.pods.length === 0 && <div className="empty-state">Node has no scheduled pods.</div>}

@@ -172,3 +172,80 @@ def test_empty_group_keeps_its_shape_and_carries_no_pod_metadata():
 
     # Then
     assert empty_foam == {'label': 'empty', 'weight': 1900, 'color': '#ffffff'}
+
+
+# --- Node health metadata carried onto every node group ---
+
+HEALTHY = {'MemoryPressure': False, 'DiskPressure': False, 'PIDPressure': False, 'Ready': True}
+
+
+def test_node_group_carries_health_metadata_in_cpu_foamtree():
+    # Given — a cordoned node also carrying a blocking taint
+    taints = [{'key': 'gpu-only', 'value': None, 'effect': 'NoSchedule'}]
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB), True, taints,
+                          {**HEALTHY, 'MemoryPressure': True})]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB),
+                         [ContainerResources('app', 100, float(bitmath.MB(100).kB))], [])]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_cpu_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+
+    # Then — existing keys keep their shape, new ones ride alongside
+    assert node_foam['weight'] == 2000
+    assert node_foam['unschedulable'] is True
+    assert node_foam['taints'] == taints
+    assert node_foam['conditions']['MemoryPressure'] is True
+    assert node_foam['warnings'] == ['cordoned', 'memory-pressure', 'tainted']
+
+
+def test_node_group_carries_health_metadata_in_memory_foamtree():
+    # Given — mergeResources reads the CPU payload, but both must stay symmetric
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB), False, [],
+                          {**HEALTHY, 'DiskPressure': True})]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB),
+                         [ContainerResources('app', 100, float(bitmath.MB(100).kB))], [])]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_memory_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+
+    # Then
+    assert node_foam['unschedulable'] is False
+    assert node_foam['warnings'] == ['disk-pressure']
+
+
+def test_healthy_node_group_emits_no_warnings():
+    # Given
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB), False, [], HEALTHY)]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB),
+                         [ContainerResources('app', 100, float(bitmath.MB(100).kB))], [])]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_cpu_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+
+    # Then
+    assert node_foam['warnings'] == []
+    assert node_foam['taints'] == []
+
+
+def test_node_group_built_without_health_metadata_emits_neutral_values():
+    # Given — positional construction from before this feature existed
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    pods = [PodResources('web', 'minikube', 100, float(bitmath.MB(100).kB),
+                         [ContainerResources('app', 100, float(bitmath.MB(100).kB))], [])]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    foamtree = mapper.transform_cpu_resources_to_foamtree()
+    node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+
+    # Then
+    assert node_foam['unschedulable'] is False
+    assert node_foam['taints'] == []
+    assert node_foam['conditions'] == {}
+    assert node_foam['warnings'] == []
