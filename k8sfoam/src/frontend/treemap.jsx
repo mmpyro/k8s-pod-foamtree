@@ -3,6 +3,7 @@
 
 const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
+const { PodAuditBadge } = window.k8sPodAudit;
 
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
@@ -242,6 +243,8 @@ function PodBox({
       {headerH > 0 && showLabels && rect.w > 50 && (
         <div className="pod-label">{pod.shortName}</div>
       )}
+      {/* Too small for a glyph? The sidebar panel and audit: query still reach it. */}
+      {rect.w > 24 && rect.h > 16 && <PodAuditBadge findings={pod.findings} />}
       {laid.map((it, i) => (
         <div key={i} className="container-box"
           style={{

@@ -6,6 +6,7 @@
 //   node:<glob>            node name, "*" matches any run of characters
 //   qos:<class>            Guaranteed | Burstable | BestEffort (case-insensitive)
 //   has:init-containers    pod declares at least one init container
+//   audit:<finding>        pod breaks a best-practice rule (see AUDIT_FIELDS)
 //   key=value              label equality
 //   key!=value             label inequality (a missing label counts as unequal)
 //   <text>                 case-insensitive substring of the pod name
@@ -16,7 +17,9 @@
 
 const QOS_CLASSES = ["guaranteed", "burstable", "besteffort"];
 const HAS_FIELDS = ["init-containers"];
-const FILTER_PREFIXES = ["ns", "node", "qos", "has"];
+// Mirrors the slugs the backend emits in each pod's `findings`.
+const AUDIT_FIELDS = ["missing-requests", "missing-limits", "monolith", "ratio-asymmetry"];
+const FILTER_PREFIXES = ["ns", "node", "qos", "has", "audit"];
 
 // Shown by the query bar's hint popover — kept next to the grammar it documents.
 const TOKEN_HINTS = [
@@ -24,6 +27,7 @@ const TOKEN_HINTS = [
   { form: "node:worker-*", desc: "node name glob" },
   { form: "qos:BestEffort", desc: "QoS class" },
   { form: "has:init-containers", desc: "pods with init containers" },
+  { form: "audit:missing-limits", desc: "pods breaking an audit rule" },
   { form: "app=frontend", desc: "label equals" },
   { form: "env!=prod", desc: "label differs" },
   { form: "nginx", desc: "pod name contains" },
@@ -75,6 +79,13 @@ function parseFilter(prefix, value, raw) {
       return { error: { token: raw, message: "unknown QoS class — use Guaranteed, Burstable or BestEffort" } };
     }
     return { term: { kind: "qos", value: qos } };
+  }
+  if (prefix === "audit") {
+    const finding = value.toLowerCase();
+    if (AUDIT_FIELDS.indexOf(finding) === -1) {
+      return { error: { token: raw, message: `unknown audit: rule — use ${AUDIT_FIELDS.join(", ")}` } };
+    }
+    return { term: { kind: "audit", value: finding } };
   }
   const field = value.toLowerCase();
   if (HAS_FIELDS.indexOf(field) === -1) {
@@ -143,6 +154,7 @@ function termMatchesPod(term, pod, nodeName) {
   if (term.kind === "node") return term.regex.test(nodeName || "");
   if (term.kind === "qos") return String(pod.qos || "").toLowerCase() === term.value;
   if (term.kind === "has") return !!pod.hasInit;
+  if (term.kind === "audit") return (pod.findings || []).indexOf(term.value) !== -1;
   if (term.kind === "label") {
     const value = labelValue(pod, term.key);
     return term.negate ? value !== term.value : value === term.value;

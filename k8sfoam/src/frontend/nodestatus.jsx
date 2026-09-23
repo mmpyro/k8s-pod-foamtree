@@ -69,4 +69,4 @@ function NodeWarnBadge({ warnings, size }) {
   );
 }
 
-window.k8sNodeStatus = { NODE_WARNINGS, WARNING_ORDER, warnInfo, worstSeverity, statusOf, warnTitle, NodeWarnBadge };
+window.k8sNodeStatus = { NODE_WARNINGS, WARNING_ORDER, warnInfo, worstSeverity, statusOf, warnTitle, WarnIcon, NodeWarnBadge };

@@ -22,11 +22,13 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     return pod
 
 
-def create_container(name: str, cpu: str, memory: str) -> MagicMock:
+def create_container(name: str, cpu: str, memory: str, memory_limit=None) -> MagicMock:
     container = MagicMock()
     resources = MagicMock()
     requests = {'cpu': cpu, 'memory': memory}
     resources.requests = requests
+    # The real API reports None when no limit is set at all.
+    resources.limits = {'memory': memory_limit} if memory_limit is not None else None
     container.name = name
     container.resources = resources
     return container

@@ -5,6 +5,7 @@ const { NodeCard } = window.k8sTreemap;
 const { Scene3D } = window.k8sCube3D;
 const { workloadKey } = window.k8sWorkload;
 const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
+const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
 
 // Per-node hue assignment — deterministic from index, evenly spaced around wheel.
 function nodeHue(idx, scheme) {
@@ -107,6 +108,8 @@ function mergeResources(cpuData, memData) {
         labels: cp.labels || {},
         qos: cp.qos || "",
         hasInit: !!cp.hasInitContainers,
+        // Best-practice rule slugs, decided by the backend.
+        findings: cp.findings || [],
         // Effective request (what the scheduler reserves) — init containers
         // run sequentially, so this is max(sum regular, max init), not a sum.
         cpu: podCpu,
@@ -331,6 +334,19 @@ function App() {
       .sort((a, b) => WARNING_ORDER.indexOf(a.slug) - WARNING_ORDER.indexOf(b.slug));
   }, [nodes]);
 
+  // One row per audit rule broken anywhere in the cluster, counted in pods.
+  const audit = useMemo(() => {
+    const counts = new Map();
+    for (const n of nodes) {
+      for (const p of n.pods) {
+        for (const f of p.findings || []) counts.set(f, (counts.get(f) || 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .map(([slug, count]) => ({ slug, count, ...findingInfo(slug) }))
+      .sort((a, b) => FINDING_ORDER.indexOf(a.slug) - FINDING_ORDER.indexOf(b.slug));
+  }, [nodes]);
+
   // Auto-set accent CSS var
   useEffect(() => {
     document.documentElement.style.setProperty("--accent", tw.accent);
@@ -352,6 +368,8 @@ function App() {
         lastRefresh={lastRefresh}
         nodeCount={nodes.length}
         health={health}
+        audit={audit}
+        query={query} setQuery={setQuery}
       />
 
       <main className="main">
@@ -454,7 +472,8 @@ function App() {
 function Sidebar({
   open, onToggle, view, setView, zoom, setZoom, metric, setMetric, memUnit, setMemUnit,
   refreshInterval, setRefreshInterval,
-  contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health
+  contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
+  audit, query, setQuery
 }) {
   const is3d = view === "3d";
   return (
@@ -576,6 +595,29 @@ function Sidebar({
                 <span className="health-count">{h.count}</span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Always shown once data is in: "nothing to fix" is an answer too. A row
+          toggles its audit: query, which reuses the match highlight in 2D and 3D. */}
+      {nodeCount > 0 && (
+        <div className="sidebar-section">
+          <div className="section-label">Audit &amp; Hygiene</div>
+          <div className="health-rows">
+            {audit.length === 0 && <div className="audit-clean">No issues found</div>}
+            {audit.map(a => {
+              const token = `audit:${a.slug}`;
+              const on = query.trim() === token;
+              return (
+                <button key={a.slug} className={`health-row audit-row ${on ? "audit-on" : ""}`}
+                  title={a.why} onClick={() => setQuery(on ? "" : token)}>
+                  <span className={`audit-swatch sev-${a.sev}`} />
+                  <span className="health-name">{a.label}</span>
+                  <span className="health-count">{a.count}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -865,6 +907,16 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
                         <span key={j} className={`container-pill${c.init ? " init" : ""}`}>{c.name}</span>
                       ))}
                     </div>
+                    {p.findings.length > 0 && (
+                      <div className="pod-row-findings">
+                        {p.findings.map(f => (
+                          <span key={f} className={`audit-pill sev-${findingInfo(f).sev}`} title={findingInfo(f).why}>
+                            <PodAuditBadge findings={[f]} size={10} />
+                            {findingInfo(f).label}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="pod-row-stat">
                     <span className="pod-row-num">{(cpu / 1000).toFixed(2)}</span>

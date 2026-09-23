@@ -249,3 +249,19 @@ def test_node_group_built_without_health_metadata_emits_neutral_values():
     assert node_foam['taints'] == []
     assert node_foam['conditions'] == {}
     assert node_foam['warnings'] == []
+
+
+def test_pod_groups_carry_audit_findings_in_both_transforms():
+    # Given — no requests and no limits at all
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    containers = [ContainerResources('app', 0, 0)]
+    pods = [PodResources('bare', 'minikube', 0, 0, containers, [])]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    for foamtree in (mapper.transform_cpu_resources_to_foamtree(), mapper.transform_memory_resources_to_foamtree()):
+        node_foam = _.find(foamtree['groups'], lambda item: item['label'] == 'minikube')
+        pod_foam = _.find(node_foam['groups'], lambda item: item['label'] == 'bare')
+
+        # Then
+        assert pod_foam['findings'] == ['missing-requests', 'missing-limits']
