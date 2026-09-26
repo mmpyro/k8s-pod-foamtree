@@ -309,3 +309,27 @@ def test_should_extract_node_reporting_no_conditions_as_ready():
     # Then
     assert node_resources.conditions['Ready'] is True
     assert node_resources.conditions['MemoryPressure'] is False
+
+
+def test_should_extract_container_memory_limit():
+    # Given
+    extractor = ResourcesExtractor()
+    pod = create_pod('web', 'master', containers=[create_container('web', '100m', '128Mi', memory_limit='256Mi')])
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert _.head(pod_resources.containers).memory_limit == float(bitmath.MiB(256).kB)
+
+
+def test_container_without_limits_has_no_memory_limit():
+    # Given — the API reports limits as None when none are set
+    extractor = ResourcesExtractor()
+    pod = create_pod('web', 'master', containers=[create_container('web', '100m', '128Mi')])
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert _.head(pod_resources.containers).memory_limit is None

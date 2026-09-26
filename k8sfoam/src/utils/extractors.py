@@ -52,7 +52,10 @@ class ResourcesExtractor():
         requests = container.resources.requests
         cpu = self.__convert_cpu(requests['cpu']) if self.__requests_contains_key(requests, 'cpu') else 0
         memory = self.__convert_memory(requests['memory']) if self.__requests_contains_key(requests, 'memory') else 0
-        return ContainerResources(container.name, cpu, memory)
+        # None, not 0: an unset limit means "unbounded", which is exactly what the audit flags.
+        limits = container.resources.limits
+        memory_limit = self.__convert_memory(limits['memory']) if self.__requests_contains_key(limits, 'memory') else None
+        return ContainerResources(container.name, cpu, memory, memory_limit)
 
     def extract_pod_requested_resources(self, pod) -> PodResources:
         name = pod.metadata.name

@@ -4,6 +4,7 @@
 
 const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
+const { PodAuditBadge, findingInfo } = window.k8sPodAudit;
 
 // Plate footprint plus the scene gap, used to keep the scene block near-square.
 const PLATE_W = 250;
@@ -95,6 +96,14 @@ function Cube({ pod, hue, matched, dim, onHover, onLeave, highlight, highlightAc
           boxShadow: `inset 0 0 0 1px hsla(${hue}, 100%, 72%, .55), inset 14px 0 20px -12px hsla(${hue}, 100%, 60%, .55)`,
         }}
       />
+      {/* Floats just above the top face and billboards back toward the camera,
+          like the plate label. The reasons are listed in the cube tooltip. */}
+      {pod.findings.length > 0 && (
+        <div className="cube-audit"
+          style={{ left: base / 2, top: base / 2, transform: `translateZ(${height + 12}px) rotateZ(-45deg) rotateX(-55deg)` }}>
+          <PodAuditBadge findings={pod.findings} size={12} />
+        </div>
+      )}
     </div>
   );
 }
@@ -212,6 +221,13 @@ function CubeTooltip({ tip, memUnit, fmtMem }) {
       <div className="cube-tip-foot">
         {tip.pod.containers.length} container{tip.pod.containers.length === 1 ? "" : "s"}
       </div>
+      {tip.pod.findings.length > 0 && (
+        <div className="cube-tip-audit">
+          {tip.pod.findings.map(f => (
+            <div key={f} className={`sev-${findingInfo(f).sev}`}>{findingInfo(f).label}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
