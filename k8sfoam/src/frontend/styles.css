@@ -888,9 +888,13 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .scene-scroll {
   width: 100%; height: 100%;
   overflow: auto;
-  perspective: 1600px;
 }
+/* Perspective lives here, not on the scroller: Chrome paints and hit-tests
+   perspective on a scrolled container from different origins, so cubes on
+   the back plates drew in one place and took clicks in another — the whole
+   back plate went unclickable. This wrapper never scrolls itself. */
 .scene-wrap {
+  perspective: 1600px;
   display: grid;
   place-items: center;
   min-width: 100%;
@@ -1104,6 +1108,9 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   transform-origin: left bottom;
   text-transform: lowercase;
   white-space: nowrap;
+  /* It floats 84px above the plate, so it sits in front of the cubes behind
+     it on screen and would swallow their clicks. */
+  pointer-events: none;
 }
 .plate-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
 .plate-name {

@@ -4,6 +4,7 @@
 const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 const { PodAuditBadge } = window.k8sPodAudit;
+const { qosHue } = window.k8sQos;
 
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
@@ -66,7 +67,7 @@ function squarify(items, x, y, w, h) {
 
 // Render a node card: header + nested treemap of pods (each pod = treemap of containers).
 function NodeCard({
-  node, match, metric, hue, style: nodeStyle, showLabels, density, onClick,
+  node, match, metric, hue, colorBy, style: nodeStyle, showLabels, density, onClick,
   highlight, highlightActive, onPodSelect, onPodHover,
 }) {
   const ref = React.useRef(null);
@@ -175,7 +176,8 @@ function NodeCard({
           );
         }
         return (
-          <PodBox key={`pod-${i}`} pod={it.pod} rect={it} hue={hue}
+          <PodBox key={`pod-${i}`} pod={it.pod} rect={it}
+                  hue={colorBy === "qos" ? qosHue(it.pod.qos) : hue}
                   metric={metric} showLabels={showLabels} nodeStyle={nodeStyle}
                   matched={podMatched(it.pod)}
                   dim={queryActive && !nodeDim && !podMatched(it.pod)}

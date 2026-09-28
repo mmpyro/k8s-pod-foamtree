@@ -38,6 +38,7 @@ Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header
 ## Controls
 
 - **Memory unit**: MiB, GiB (default), or TiB.
+- **Color by**: *Node* (default) gives each node its own hue; *QoS* colors each pod by its QoS class. See [QoS & eviction risk](#qos--eviction-risk).
 - **Context**: the sidebar lists every context from your kubeconfig, active one first, tagged by provider. **Switching only changes the context inside the k8sfoams web server — your ~/.kube/config file is never modified.**
 - **Refresh**: slider from 5 to 600 seconds, plus a *Refresh now* button.
 - **Filter**: the header query bar highlights matching pods and dims the rest — nothing is removed from the view. See [Filtering](#filtering) for the full grammar.
@@ -78,6 +79,20 @@ Three details are worth knowing:
 - **CPU limits are not required.** Only a missing *memory* limit is flagged. A memory leak without a limit can take the whole node down; a CPU spike without a limit only gets throttled.
 - **Ratio asymmetry ignores small pods.** A sidecar asking for 5% of the CPU and almost no memory has an extreme ratio, but it leaves no meaningful capacity stranded.
 
+## QoS & eviction risk
+
+Under memory pressure the kubelet evicts pods by QoS class. Set **Color by → QoS** in the sidebar to color every pod box (2D) and cube (3D) by its class. Node cards and plates turn a neutral slate, so only the pods carry color.
+
+| Color | Class | Eviction order |
+| --- | --- | --- |
+| red | `BestEffort` | first — no container sets any request or limit |
+| amber | `Burstable` | second — requests are set but lower than limits |
+| green | `Guaranteed` | last — every container's requests equal its limits |
+
+The sidebar's **QoS & Eviction Risk** panel counts pods per class, riskiest first. It is shown in either color mode, and a class with no pods still reads `0`. Click a row to highlight those pods; this sets the query to `qos:<Class>`. Click it again to clear.
+
+The class is read from the pod's `status.qosClass`, which the kubelet sets. It is not recomputed from requests and limits. A pod with no reported class renders neutral and is not counted.
+
 ## Filtering
 
 The query bar in the header is a **highlighter, not a filter of last resort**: matching pods glow, everything else dims. No pod, node or box ever leaves the layout, so the shape of the cluster stays comparable while you narrow down. Once the query is non-empty and valid, a live counter inside the input reads `N / M pods` (and turns red at `0`).
@@ -96,7 +111,7 @@ An empty query matches everything. A query that contains a malformed token is **
 | --- | --- | --- |
 | `ns:<name>` | pod namespace, exact | case-insensitive (`ns:Kube-System` works) |
 | `node:<glob>` | node the pod is scheduled on | `*` is the only wildcard; anchored (whole name must match); case-insensitive |
-| `qos:<class>` | `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
+| `qos:<class>` | [QoS class](#qos--eviction-risk): `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
 | `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
 | `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `monolith`, `ratio-asymmetry` |
 | `key=value` | pod label equals value | key and value are **case-sensitive** (Kubernetes labels are) |

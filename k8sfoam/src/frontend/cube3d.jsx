@@ -5,6 +5,7 @@
 const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 const { PodAuditBadge, findingInfo } = window.k8sPodAudit;
+const { qosHue } = window.k8sQos;
 
 // Plate footprint plus the scene gap, used to keep the scene block near-square.
 const PLATE_W = 250;
@@ -108,7 +109,7 @@ function Cube({ pod, hue, matched, dim, onHover, onLeave, highlight, highlightAc
   );
 }
 
-function Plate({ node, match, hue, onFocus, onHover, onLeave, highlight, highlightActive, onSelect }) {
+function Plate({ node, match, hue, colorBy, onFocus, onHover, onLeave, highlight, highlightActive, onSelect }) {
   // No active metric in this view, so the plate reports whichever resource is
   // under more pressure — that is the number that decides schedulability.
   const util = Math.max(
@@ -159,7 +160,7 @@ function Plate({ node, match, hue, onFocus, onHover, onLeave, highlight, highlig
 
       <div className="cube-field">
         {pods.map((p, i) => (
-          <Cube key={`${p.name}-${i}`} pod={p} hue={hue}
+          <Cube key={`${p.name}-${i}`} pod={p} hue={colorBy === "qos" ? qosHue(p.qos) : hue}
                 matched={podMatched(p)}
                 dim={queryActive && !plateDim && !podMatched(p)}
                 onHover={onHover} onLeave={onLeave}
@@ -172,7 +173,7 @@ function Plate({ node, match, hue, onFocus, onHover, onLeave, highlight, highlig
 
 // Annotated reference cube. Abstract swatches are not enough here — without the
 // brackets there is no way to tell which axis carries which resource.
-function SceneLegend() {
+function SceneLegend({ colorBy }) {
   return (
     <div className="scene-legend">
       <svg viewBox="0 0 168 128" width="150" height="114" fill="none">
@@ -201,7 +202,7 @@ function SceneLegend() {
       <div className="legend-lines">
         <div>Width × depth → CPU request</div>
         <div>Height → Memory request</div>
-        <div className="legend-foot">One cube per pod · color = node</div>
+        <div className="legend-foot">One cube per pod · color = {colorBy === "qos" ? "QoS class" : "node"}</div>
       </div>
     </div>
   );
@@ -220,6 +221,7 @@ function CubeTooltip({ tip, memUnit, fmtMem }) {
       </div>
       <div className="cube-tip-foot">
         {tip.pod.containers.length} container{tip.pod.containers.length === 1 ? "" : "s"}
+        {tip.pod.qos && ` · ${tip.pod.qos}`}
       </div>
       {tip.pod.findings.length > 0 && (
         <div className="cube-tip-audit">
@@ -233,7 +235,7 @@ function CubeTooltip({ tip, memUnit, fmtMem }) {
 }
 
 function Scene3D({
-  nodes, match, zoom, hueOf, memUnit, fmtMem, onFocus,
+  nodes, match, zoom, hueOf, colorBy, memUnit, fmtMem, onFocus,
   highlight, highlightActive, onPodSelect, onPodHover,
 }) {
   const scrollRef = React.useRef(null);
@@ -281,6 +283,7 @@ function Scene3D({
                 node={n}
                 match={match}
                 hue={hueOf(idx)}
+                colorBy={colorBy}
                 onFocus={onFocus}
                 onHover={onHover}
                 onLeave={onLeave}
@@ -293,7 +296,7 @@ function Scene3D({
         </div>
       </div>
 
-      <SceneLegend />
+      <SceneLegend colorBy={colorBy} />
       <CubeTooltip tip={tip} memUnit={memUnit} fmtMem={fmtMem} />
     </div>
   );
