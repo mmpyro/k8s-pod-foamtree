@@ -13,7 +13,7 @@ It visualizes **resource requests** — what the scheduler reserves — not live
 1. Lists nodes (`status.capacity`) and all non-terminated pods. Pods in `Succeeded`/`Failed` are excluded — they still report requests via the API but no longer reserve anything.
 2. Normalizes CPU to millicores and memory with `bitmath`. A pod's **effective request** is `max(sum(regular containers), max(init containers))` — init containers run sequentially, so they are maxed, not summed. This is what the scheduler actually reserves.
 3. Nests the result node → pod → container and adds a synthetic `empty` child per node for free capacity, then serves it as JSON.
-4. A React single-page app (no build step — React and Babel come from a CDN) fetches CPU and memory in parallel, merges them, and renders. The view auto-refreshes every 60 seconds by default.
+4. A React single-page app fetches CPU and memory in parallel, merges them, and renders. esbuild compiles its `.jsx` files and bundles React into one `bundle.js`, which the Python package ships, so no script is loaded from a CDN. The view auto-refreshes every 60 seconds by default.
 
 ## 2D map
 
@@ -197,6 +197,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 ### Install from source
+Building the UI from source also needs [Node.js](https://nodejs.org/) 18 or newer; `make run` and `make build` build it with `make web`. The PyPI package already contains the built UI.
 ```bash
 # Install dependencies and the package in development mode
 make restore_dev
@@ -247,6 +248,13 @@ make unit_tests
 make static_code_analysis
 make check_types
 make bandit
+```
+
+### Frontend
+The UI sources are the `.jsx` files in `k8sfoam/src/frontend`; `main.js` lists them in load order. esbuild compiles them into `bundle.js`, which is gitignored.
+```bash
+make web        # npm ci + one build
+npm run watch   # rebuild on every save while the server runs
 ```
 
 ### CI/CD targets

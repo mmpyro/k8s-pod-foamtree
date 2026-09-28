@@ -7,7 +7,13 @@ restore_dev:
 restore_ci:
 	uv pip install --system -e '.[dev]'
 
-run:
+node_modules: package.json package-lock.json
+	npm ci
+
+web: node_modules
+	npm run build
+
+run: web
 	uv run k8sfoams
 
 unit_tests:
@@ -38,10 +44,10 @@ tests: check_types static_code_analysis bandit unit_tests
 
 tests_ci: check_types_ci static_code_analysis_ci bandit_ci unit_tests_ci
 
-build:
+build: web
 	uv build
 
 clean:
-	rm -rf dist *.egg-info build
+	rm -rf dist *.egg-info build k8sfoam/src/frontend/bundle.js
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name '*.pyc' -delete
