@@ -1,4 +1,5 @@
 import bitmath  # type: ignore
+import pytest
 from k8sfoam.src.utils.extractors import ResourcesExtractor
 from pydash import py_ as _  # type: ignore
 from k8sfoam.tests.common.mocks import create_container, create_pod, create_node, create_taint, create_condition
@@ -333,3 +334,40 @@ def test_container_without_limits_has_no_memory_limit():
 
     # Then
     assert _.head(pod_resources.containers).memory_limit is None
+
+
+# --- Quantity parsing ---
+
+# Every form here is what the API server returns, which rewrites requests into
+# canonical form: 0.1Gi comes back as millibytes, 100k stays 100k.
+@pytest.mark.parametrize('memory, kb', [
+    ('100k', 100.0),                   # lower-case k is the SI kilo
+    ('107374182400m', 107374.1824),    # 0.1Gi: not a whole number of bytes
+    ('1e3', 1.0),                      # exponent form
+    ('128974848', 128974.848),         # plain bytes
+    ('129M', 129000.0),
+])
+def test_should_parse_every_memory_quantity_form(memory, kb):
+    # Given
+    extractor = ResourcesExtractor()
+    pod = create_pod('web', 'master', containers=[create_container('web', '100m', memory, memory_limit=memory)])
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert pod_resources.memory == kb
+    assert _.head(pod_resources.containers).memory_limit == kb
+
+
+@pytest.mark.parametrize('cpu, millicores', [('250m', 250), ('0.5', 500), ('2', 2000), ('1.0005', 1001)])
+def test_should_parse_cpu_to_millicores_rounding_up_like_the_scheduler(cpu, millicores):
+    # Given
+    extractor = ResourcesExtractor()
+    node = create_node('minikube', cpu, '1Gi')
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.cpu == millicores

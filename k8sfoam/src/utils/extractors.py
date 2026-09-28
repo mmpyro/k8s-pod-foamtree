@@ -1,52 +1,20 @@
-import bitmath  # type: ignore
+import math
+from kubernetes.utils import parse_quantity  # type: ignore
 from k8sfoam.src.common.dtos import PodResources, ContainerResources, NodeResources
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS, CORDON_TAINT
-from typing import Optional
 
 
 class ResourcesExtractor():
     def __requests_contains_key(self, requests: dict, key: str) -> bool:
         return requests is not None and key in requests
 
-    def __convert_to_int(self, memory: str, suffix: str) -> int:
-        return int(memory.replace(suffix, ''))
-
-    def __convert_cpu(self, cpu: str) -> Optional[int]:
-        if 'm' in cpu:
-            return int(cpu.replace('m', ''))
-        else:
-            return int(float(cpu) * 1000)
+    def __convert_cpu(self, cpu: str) -> int:
+        # Millicores, rounded up like the scheduler's MilliValue().
+        return math.ceil(parse_quantity(cpu) * 1000)
 
     def __convert_memory(self, memory: str) -> float:
-        value = 0
-        if 'Ki' in memory:
-            value = bitmath.KiB(self.__convert_to_int(memory, 'Ki')).kB
-        elif 'Mi' in memory:
-            value = bitmath.MiB(self.__convert_to_int(memory, 'Mi')).kB
-        elif 'Gi' in memory:
-            value = bitmath.GiB(self.__convert_to_int(memory, 'Gi')).kB
-        elif 'Ti' in memory:
-            value = bitmath.TiB(self.__convert_to_int(memory, 'Ti')).kB
-        elif 'Pi' in memory:
-            value = bitmath.PiB(self.__convert_to_int(memory, 'Pi')).kB
-        elif 'Ei' in memory:
-            value = bitmath.EiB(self.__convert_to_int(memory, 'Ei')).kB
-        elif 'K' in memory:
-            value = bitmath.kB(self.__convert_to_int(memory, 'K')).kB
-        elif 'M' in memory:
-            value = bitmath.MB(self.__convert_to_int(memory, 'M')).kB
-        elif 'G' in memory:
-            value = bitmath.GB(self.__convert_to_int(memory, 'G')).kB
-        elif 'T' in memory:
-            value = bitmath.TB(self.__convert_to_int(memory, 'T')).kB
-        elif 'P' in memory:
-            value = bitmath.PB(self.__convert_to_int(memory, 'P')).kB
-        elif 'E' in memory:
-            value = bitmath.EB(self.__convert_to_int(memory, 'E')).kB
-        else:
-            # Assume bytes if no suffix
-            value = bitmath.Byte(float(memory)).kB
-        return float(value)
+        # Decimal kB (1000 bytes), the unit the frontend expects.
+        return float(parse_quantity(memory) / 1000)
 
     def __extract_container_resources(self, container) -> ContainerResources:
         requests = container.resources.requests
