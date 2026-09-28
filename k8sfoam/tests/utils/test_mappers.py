@@ -265,3 +265,20 @@ def test_pod_groups_carry_audit_findings_in_both_transforms():
 
         # Then
         assert pod_foam['findings'] == ['missing-requests', 'missing-limits']
+
+
+def test_pods_land_on_their_own_node_and_unscheduled_pods_on_none():
+    # Given — pods listed interleaved across nodes, plus one still Pending (no node yet)
+    nodes = [NodeResources('a', 2000, float(bitmath.GB(1).kB)), NodeResources('b', 2000, float(bitmath.GB(1).kB))]
+    app = [ContainerResources('app', 100, float(bitmath.MB(100).kB))]
+    pods = [PodResources('a-1', 'a', 100, float(bitmath.MB(100).kB), app, []),
+            PodResources('b-1', 'b', 100, float(bitmath.MB(100).kB), app, []),
+            PodResources('pending', None, 100, float(bitmath.MB(100).kB), app, []),
+            PodResources('a-2', 'a', 100, float(bitmath.MB(100).kB), app, [])]
+
+    for transform in ('transform_cpu_resources_to_foamtree', 'transform_memory_resources_to_foamtree'):
+        # When
+        foamtree = getattr(FoamTreeMapper(iter(nodes), pods), transform)()
+
+        # Then — list order kept within a node, free space last
+        assert [[p['label'] for p in n['groups']] for n in foamtree['groups']] == [['a-1', 'a-2', 'empty'], ['b-1', 'empty']]
