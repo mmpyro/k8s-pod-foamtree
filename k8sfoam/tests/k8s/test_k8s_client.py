@@ -1,8 +1,14 @@
 import bitmath  # type: ignore
-from k8sfoam.src.k8s.k8s_client import K8sClient
-from unittest.mock import patch, MagicMock
+import pytest
+from k8sfoam.src.k8s.k8s_client import K8sClient, core_v1
+from unittest.mock import patch, MagicMock, call
 from k8sfoam.tests.common.mocks import create_node, create_pod, create_container
 from pydash import py_ as _  # type: ignore
+
+
+@pytest.fixture(autouse=True)
+def fresh_client_cache():
+    core_v1.cache_clear()
 
 
 @patch('k8sfoam.src.k8s.k8s_client.config')
@@ -64,3 +70,30 @@ def test_should_return_k8s_contexts(config):
     assert contexts[0]['active'] is True
     assert contexts[1]['context'] == 'minikube-test'
     assert contexts[1]['active'] is False
+
+
+@patch('k8sfoam.src.k8s.k8s_client.config')
+@patch('k8sfoam.src.k8s.k8s_client.client')
+def test_should_build_one_api_client_per_context(client, config):
+    # Given — every browser refresh asks twice (cpu, then memory)
+    for context in ['prod', 'dev', 'prod', 'dev']:
+        # When
+        [*K8sClient(context).get_node_resources()]
+        [*K8sClient(context).get_pod_resources()]
+
+    # Then — the kubeconfig (and any exec plugin in it) is read once per context
+    assert config.new_client_from_config.call_args_list == [call(context='prod'), call(context='dev')]
+    config.load_kube_config.assert_not_called()
+
+
+@patch('k8sfoam.src.k8s.k8s_client.config')
+def test_listing_contexts_builds_no_api_client(config):
+    # Given
+    config.list_kube_config_contexts.return_value = ([{'name': 'prod'}], {'name': 'prod'})
+
+    # When
+    K8sClient().get_contexts()
+
+    # Then — no credentials are fetched just to fill the context picker
+    config.new_client_from_config.assert_not_called()
+    config.load_kube_config.assert_not_called()
