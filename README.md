@@ -11,7 +11,7 @@ It visualizes **resource requests** — what the scheduler reserves — not live
 ## How it works
 
 1. Lists nodes (`status.capacity`) and all non-terminated pods. Pods in `Succeeded`/`Failed` are excluded — they still report requests via the API but no longer reserve anything.
-2. Parses quantities with the Kubernetes client's `parse_quantity` — CPU to millicores, memory to decimal kB. A pod's **effective request** is `max(sum(regular containers), max(init containers))` — init containers run sequentially, so they are maxed, not summed. This is what the scheduler actually reserves.
+2. Parses quantities with the Kubernetes client's `parse_quantity` — CPU to millicores, memory to decimal kB. A pod's **effective request** is `max(sum(regular containers), max(init containers))` — init containers run sequentially, so they are maxed, not summed. Native sidecars (init containers with `restartPolicy: Always`) keep running, so they count as regular containers and add to every init container started after them. This is what the scheduler actually reserves.
 3. Nests the result node → pod → container and adds a synthetic `empty` child per node for free capacity, then serves it as JSON.
 4. A React single-page app (no build step — React and Babel come from a CDN) fetches CPU and memory in parallel, merges them, and renders. The view auto-refreshes every 60 seconds by default.
 

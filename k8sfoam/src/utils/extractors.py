@@ -37,17 +37,29 @@ class ResourcesExtractor():
 
         # --- Regular containers (run concurrently → sum) ---
         containers = [self.__extract_container_resources(c) for c in pod.spec.containers]
-        sum_regular_cpu = sum(c.cpu for c in containers)
-        sum_regular_memory = sum(c.memory for c in containers)
 
         # --- Init containers (run sequentially → max) ---
-        init_containers = [self.__extract_container_resources(c) for c in (pod.spec.init_containers or [])]
-        max_init_cpu = max((c.cpu for c in init_containers), default=0)
-        max_init_memory = max((c.memory for c in init_containers), default=0)
+        # Native sidecars (restartPolicy: Always) start in order but keep running,
+        # so they join the regular containers and add to every init container
+        # started after them. Same rule as the scheduler's PodRequests.
+        init_containers = []
+        sidecar_cpu = sidecar_memory = max_init_cpu = max_init_memory = 0
+        for spec in pod.spec.init_containers or []:
+            c = self.__extract_container_resources(spec)
+            if spec.restart_policy == 'Always':
+                containers.append(c)
+                sidecar_cpu += c.cpu
+                sidecar_memory += c.memory
+                max_init_cpu = max(max_init_cpu, sidecar_cpu)
+                max_init_memory = max(max_init_memory, sidecar_memory)
+            else:
+                init_containers.append(c)
+                max_init_cpu = max(max_init_cpu, sidecar_cpu + c.cpu)
+                max_init_memory = max(max_init_memory, sidecar_memory + c.memory)
 
         # --- Effective request (what the scheduler actually reserves) ---
-        effective_cpu = max(sum_regular_cpu, max_init_cpu)
-        effective_memory = max(sum_regular_memory, max_init_memory)
+        effective_cpu = max(sum(c.cpu for c in containers), max_init_cpu)
+        effective_memory = max(sum(c.memory for c in containers), max_init_memory)
 
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
                             namespace, labels, qos_class)

@@ -371,3 +371,55 @@ def test_should_parse_cpu_to_millicores_rounding_up_like_the_scheduler(cpu, mill
 
     # Then
     assert node_resources.cpu == millicores
+
+
+# --- Native sidecars (init containers with restartPolicy: Always) ---
+
+def test_sidecar_runs_alongside_the_regular_containers():
+    # Given — the proxy starts before the app and keeps running with it
+    extractor = ResourcesExtractor()
+    pod = create_pod('pod', 'node',
+                     containers=[create_container('app', '100m', '100Mi')],
+                     init_containers=[create_container('proxy', '50m', '50Mi', restart_policy='Always')])
+
+    # When
+    result = extractor.extract_pod_requested_resources(pod)
+
+    # Then — summed like a regular container, and shown and audited as one
+    assert result.cpu == 150
+    assert result.memory == pytest.approx(float(bitmath.MiB(150).kB))
+    assert [c.name for c in result.containers] == ['app', 'proxy']
+    assert result.init_containers == []
+
+
+def test_init_container_after_a_sidecar_runs_next_to_it():
+    # Given — migrate (200m) runs while the proxy (50m) is already up
+    extractor = ResourcesExtractor()
+    pod = create_pod('pod', 'node',
+                     containers=[create_container('app', '100m', '100Mi')],
+                     init_containers=[create_container('proxy', '50m', '50Mi', restart_policy='Always'),
+                                      create_container('migrate', '200m', '10Mi')])
+
+    # When
+    result = extractor.extract_pod_requested_resources(pod)
+
+    # Then — max(app + proxy, proxy + migrate) per resource
+    assert result.cpu == 250
+    assert result.memory == pytest.approx(float(bitmath.MiB(150).kB))
+    assert [c.name for c in result.init_containers] == ['migrate']
+
+
+def test_init_container_before_a_sidecar_runs_alone():
+    # Given — migrate finishes before the proxy starts
+    extractor = ResourcesExtractor()
+    pod = create_pod('pod', 'node',
+                     containers=[create_container('app', '100m', '100Mi')],
+                     init_containers=[create_container('migrate', '200m', '10Mi'),
+                                      create_container('proxy', '50m', '50Mi', restart_policy='Always')])
+
+    # When
+    result = extractor.extract_pod_requested_resources(pod)
+
+    # Then — max(app + proxy, migrate)
+    assert result.cpu == 200
+    assert result.memory == pytest.approx(float(bitmath.MiB(150).kB))
