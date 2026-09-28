@@ -885,48 +885,10 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   overflow: hidden;
   background: radial-gradient(120% 90% at 50% 40%, rgba(20,10,60,.5), transparent 70%);
 }
-.scene-scroll {
-  width: 100%; height: 100%;
-  overflow: auto;
-  perspective: 1600px;
-}
-.scene-wrap {
-  display: grid;
-  place-items: center;
-  min-width: 100%;
-  min-height: 100%;
-  padding: 40px;
-}
-
-.scene {
-  position: relative;
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  justify-content: center;
-  gap: 72px 60px;
-  transform-style: preserve-3d;
-  transform-origin: 50% 50%;
-  transition: transform .25s cubic-bezier(.4,0,.2,1);
-  /* The un-rotated layout box reserves dead space above and below the rotated
-     result; claw it back so the scene sits centred in the viewport. */
-  margin: -16% 0;
-}
-/* Isometric floor grid, radial-masked so it fades out instead of ending on a
-   hard edge. */
-.scene::before {
-  content: "";
-  position: absolute;
-  inset: -18%;
-  transform: translateZ(-2px);
-  background-image:
-    linear-gradient(to right, rgba(124,92,255,.16) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(124,92,255,.16) 1px, transparent 1px);
-  background-size: 62px 62px;
-  -webkit-mask-image: radial-gradient(60% 60% at 50% 50%, #000 30%, transparent 75%);
-  mask-image: radial-gradient(60% 60% at 50% 50%, #000 30%, transparent 75%);
-  pointer-events: none;
-}
+.scene-gl { position: absolute; inset: 0; }
+.scene-gl canvas { display: block; cursor: grab; }
+.scene-gl canvas:active { cursor: grabbing; }
+.scene-nogl { display: grid; place-items: center; padding: 24px; color: var(--text-dim); text-align: center; }
 
 /* Sidebar node-health legend. Only mounted when something is wrong. */
 .health-rows { display: flex; flex-direction: column; gap: 6px; }
@@ -985,16 +947,6 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 }
 .audit-pill .pod-audit { position: static; filter: none; }
 
-/* Audit glyph billboarded above a 3D cube; the cube tooltip owns the hover. */
-.cube-audit {
-  position: absolute;
-  width: 0; height: 0;
-  display: flex; align-items: center; justify-content: center;
-  pointer-events: none;
-}
-.cube-audit .pod-audit { position: static; }
-/* Fade with the faces, so a dimmed cube never keeps a bright glyph. */
-.cube.is-dim .cube-audit, .cube.wl-dim .cube-audit { opacity: .15; }
 .cube-tip-audit {
   margin-top: 6px; padding-top: 6px;
   border-top: 1px solid var(--line);
@@ -1008,141 +960,6 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   line-height: 0;
   z-index: 1;
   filter: drop-shadow(0 1px 1px rgba(0,0,0,.6));
-}
-
-.plate {
-  position: relative;
-  width: 250px;
-  min-height: 120px;
-  padding: 16px 16px 22px;
-  border: 1px solid;
-  border-radius: 4px;
-  transform-style: preserve-3d;
-  cursor: pointer;
-}
-/* The hover highlight must NOT be a filter on .plate itself: a CSS filter
-   forces transform-style:flat on the element it applies to, which collapses
-   every cube on the plate into a flat top rhombus. Light up the surface inlay
-   and the faces instead — neither is a 3D ancestor of anything. */
-.plate:hover::before { background-color: rgba(255,255,255,.07); }
-.plate:hover .cube-face { filter: brightness(1.3) saturate(1.15); }
-/* Query dimming obeys the same rule: no opacity or filter on .plate itself,
-   only on the leaf faces, the shadow and the billboarded label. */
-.plate.is-dim .cube-face, .plate.is-dim .cube-shadow { opacity: .12; }
-.plate.is-dim .plate-label { opacity: .38; }
-.plate.is-dim::before { background-image: none; }
-.cube.is-dim .cube-face, .cube.is-dim .cube-shadow { opacity: .12; }
-.cube.is-match .cube-face { filter: brightness(1.4) saturate(1.3); }
-/* Tech-grid inlay on the plate surface. */
-.plate::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(to right, rgba(255,255,255,.05) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255,255,255,.05) 1px, transparent 1px);
-  background-size: 26px 26px;
-  pointer-events: none;
-  transition: background-color .2s;
-}
-
-/* Warning hatch on the plate surface. Free space in 3D is just bare plate, so
-   the hatch replaces the tech-grid inlay. It lives on ::before for the same
-   reason the hover highlight does: a filter or a non-unit opacity on .plate
-   would force transform-style:flat and collapse every cube into a rhombus. */
-/* 0deg, not 45: the whole scene is rotateZ(45deg), so a hatch that is diagonal
-   in plate space would land axis-parallel on screen. This angle is what reads
-   as diagonal to the eye, matching the 2D card. */
-.plate.warn-danger::before {
-  background-image: repeating-linear-gradient(
-    0deg,
-    rgba(239,68,68,.06), rgba(239,68,68,.06) 6px,
-    rgba(239,68,68,.24) 6px, rgba(239,68,68,.24) 12px
-  );
-  background-size: auto;
-}
-.plate.warn-warn::before {
-  background-image: repeating-linear-gradient(
-    0deg,
-    rgba(245,158,11,.06), rgba(245,158,11,.06) 6px,
-    rgba(245,158,11,.22) 6px, rgba(245,158,11,.22) 12px
-  );
-  background-size: auto;
-}
-.plate.warn-info::before {
-  background-image: repeating-linear-gradient(
-    0deg,
-    rgba(96,165,250,.05), rgba(96,165,250,.05) 6px,
-    rgba(96,165,250,.16) 6px, rgba(96,165,250,.16) 12px
-  );
-  background-size: auto;
-}
-
-/* Re-asserted after the hatch rules above: this file resolves same-specificity
-   conflicts by source order, and a plate the query ruled out must drop its
-   whole inlay, warning stripes included. */
-.plate.is-dim::before { background-image: none; }
-
-/* Billboarded back to the camera by inverting the scene rotation.
-   Lifted clear of the cubes first: a tall cube at the front of the plate
-   projects its top face well up the screen and would otherwise cut straight
-   across the hostname. cubeDims() clamps height at 78px, so 84px always wins.
-   z-index cannot do this job — preserve-3d sorts by depth, not paint order. */
-.plate-label {
-  position: absolute;
-  left: 0;
-  bottom: -6px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 250px;
-  padding: 3px 8px;
-  background: rgba(4,6,12,.92);
-  border: 1px solid;
-  border-radius: 3px;
-  transform: translateZ(84px) rotateZ(-45deg) rotateX(-55deg);
-  transform-origin: left bottom;
-  text-transform: lowercase;
-  white-space: nowrap;
-}
-.plate-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.plate-name {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.plate-util {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  margin-left: auto;
-}
-
-.cube-field {
-  position: relative;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 10px;
-  transform-style: preserve-3d;
-}
-
-.cube {
-  position: relative;
-  flex-shrink: 0;
-  transform-style: preserve-3d;
-}
-.cube-face { position: absolute; left: 0; top: 0; transition: filter .15s, opacity .15s; }
-.cube-top { transform-origin: center; }
-.cube-s { transform-origin: top; transform: rotateX(90deg); }
-.cube-e { transform-origin: left; transform: rotateY(-90deg); }
-.cube-shadow {
-  position: absolute;
-  left: 3px; top: 3px;
-  filter: blur(6px);
-  pointer-events: none;
 }
 
 .scene-legend {
@@ -1206,9 +1023,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 /* ─────────── Cross-node workload highlighting ─────────── */
 
 /* Class toggles only — the glow and the dim are static rules built off
-   --accent, so selecting a workload never recomputes per-pod styles.
-   Placed last on purpose: the 3D rules have to out-order .plate:hover, which
-   they tie with on specificity. */
+   --accent, so selecting a workload never recomputes per-pod styles. */
 
 /* outline rather than border-color: PodBox sets its border colour inline.
    z-index 1 lifts a peer over its sibling pods but stays under .node-header
@@ -1230,26 +1045,6 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   opacity: .55;
 }
 
-/* Cubes: never filter or fade .cube itself. Both properties force
-   transform-style:flat on the element they apply to, which would collapse the
-   extruded faces into a flat top rhombus — the same trap as .plate:hover. */
-.cube.wl-peer .cube-face {
-  filter: brightness(1.4) saturate(1.2) drop-shadow(0 0 7px var(--accent));
-}
-.cube.wl-dim .cube-face {
-  filter: brightness(.45) saturate(.3);
-  opacity: .38;
-}
-/* The cast glow is part of the cube's read, so fade it with the faces. */
-.cube.wl-dim .cube-shadow { opacity: .25; }
-.cube.wl-peer.wl-preview .cube-face {
-  filter: brightness(1.2) drop-shadow(0 0 4px var(--accent));
-}
-.cube.wl-dim.wl-preview .cube-face {
-  filter: brightness(.7) saturate(.6);
-  opacity: .7;
-}
-
 /* Query scope wins over workload state. Both features set opacity, box-shadow
    and filter on the same elements at equal specificity, so without this the
    later block would simply win: a pod the query ruled out would brighten back
@@ -1260,15 +1055,6 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   opacity: .16;
   outline: none;
   box-shadow: none;
-}
-.cube.is-dim.wl-peer .cube-face,
-.cube.is-dim.wl-dim .cube-face {
-  filter: brightness(.45) saturate(.3);
-  opacity: .12;
-}
-.cube.is-dim.wl-peer .cube-shadow,
-.cube.is-dim.wl-dim .cube-shadow {
-  opacity: .12;
 }
 
 /* Header readout for the pinned workload. */

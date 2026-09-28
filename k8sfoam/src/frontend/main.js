@@ -7,5 +7,5 @@ import "./query.jsx";
 import "./workload.jsx";
 import "./tweaks-panel.jsx";
 import "./treemap.jsx";
-import "./cube3d.jsx";
+import "./scene3d.jsx";
 import "./app.jsx";
