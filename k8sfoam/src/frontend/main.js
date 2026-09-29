@@ -3,6 +3,7 @@
 import "./globals.js";
 import "./nodestatus.jsx";
 import "./podaudit.jsx";
+import "./qos.jsx";
 import "./query.jsx";
 import "./workload.jsx";
 import "./tweaks-panel.jsx";

@@ -16,6 +16,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 const { workloadKey } = window.k8sWorkload;
 const { findingInfo } = window.k8sPodAudit;
 const { worstSeverity } = window.k8sNodeStatus;
+const { qosHue } = window.k8sQos;
 
 const PLATE = 160;
 const PLATE_GAP = 28;
@@ -195,7 +196,7 @@ function labelSprite({ name, util, hue, sev }, height) {
 }
 
 function Scene3D({
-  nodes, match, zoom, hueOf, memUnit, fmtMem, onFocus,
+  nodes, match, zoom, hueOf, colorBy, memUnit, fmtMem, onFocus,
   highlight, highlightActive, onPodSelect, onPodHover,
 }) {
   const hostRef = React.useRef(null);
@@ -414,7 +415,8 @@ function Scene3D({
       // states, so compute each combination once, not once per pod.
       const faces = new Map();
       w.cubes.forEach((cube, i) => {
-        const h = hueOf(cube.nodeIdx), f = podFilter(cube, look), key = `${h}|${f}`;
+        const h = colorBy === "qos" ? qosHue(cube.pod.qos) : hueOf(cube.nodeIdx);
+        const f = podFilter(cube, look), key = `${h}|${f}`;
         if (!faces.has(key)) {
           const under = plateSurface(w.bg, h);
           faces.set(key, ["top", "x", "z"].map(face => mix(under, cssFilter(hsl(h, ...FACES[face]), f[0], f[1]), f[2])));
@@ -442,7 +444,7 @@ function Scene3D({
     };
     w.recolor();
     w.render();
-  }, [nodes, hueKey, match, highlight, highlightActive]);
+  }, [nodes, hueKey, colorBy, match, highlight, highlightActive]);
 
   React.useEffect(() => {
     const w = world.current;
@@ -462,7 +464,7 @@ function Scene3D({
   return (
     <div className="scene-3d">
       <div className="scene-gl" ref={hostRef} />
-      <SceneLegend />
+      <SceneLegend colorBy={colorBy} />
       <SceneTooltip tip={tip} memUnit={memUnit} fmtMem={fmtMem} />
     </div>
   );
@@ -470,7 +472,7 @@ function Scene3D({
 
 // Annotated reference cube. Abstract swatches are not enough here — without the
 // brackets there is no way to tell which axis carries which resource.
-function SceneLegend() {
+function SceneLegend({ colorBy }) {
   return (
     <div className="scene-legend">
       <svg viewBox="0 0 168 128" width="150" height="114" fill="none">
@@ -499,7 +501,7 @@ function SceneLegend() {
       <div className="legend-lines">
         <div>Width × depth → CPU request</div>
         <div>Height → Memory request</div>
-        <div className="legend-foot">One cube per pod · color = node · drag to orbit</div>
+        <div className="legend-foot">One cube per pod · color = {colorBy === "qos" ? "QoS class" : "node"} · drag to orbit</div>
       </div>
     </div>
   );
@@ -532,6 +534,7 @@ function SceneTooltip({ tip, memUnit, fmtMem }) {
       </div>
       <div className="cube-tip-foot">
         {p.containers.length} container{p.containers.length === 1 ? "" : "s"}
+        {p.qos && ` · ${p.qos}`}
       </div>
       {p.findings.length > 0 && (
         <div className="cube-tip-audit">

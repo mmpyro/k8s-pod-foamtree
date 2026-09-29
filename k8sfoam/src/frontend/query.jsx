@@ -7,6 +7,7 @@
 //   qos:<class>            Guaranteed | Burstable | BestEffort (case-insensitive)
 //   has:init-containers    pod declares at least one init container
 //   audit:<finding>        pod breaks a best-practice rule (see AUDIT_FIELDS)
+//   health:<warning>       node carries a health warning (see HEALTH_FIELDS)
 //   key=value              label equality
 //   key!=value             label inequality (a missing label counts as unequal)
 //   <text>                 case-insensitive substring of the pod name
@@ -19,7 +20,10 @@ const QOS_CLASSES = ["guaranteed", "burstable", "besteffort"];
 const HAS_FIELDS = ["init-containers"];
 // Mirrors the slugs the backend emits in each pod's `findings`.
 const AUDIT_FIELDS = ["missing-requests", "missing-limits", "monolith", "ratio-asymmetry"];
-const FILTER_PREFIXES = ["ns", "node", "qos", "has", "audit"];
+// Node warning slugs, owned by nodestatus.jsx so the sidebar legend and the
+// grammar can't drift apart.
+const HEALTH_FIELDS = window.k8sNodeStatus.WARNING_ORDER;
+const FILTER_PREFIXES = ["ns", "node", "qos", "has", "audit", "health"];
 
 // Shown by the query bar's hint popover — kept next to the grammar it documents.
 const TOKEN_HINTS = [
@@ -28,6 +32,7 @@ const TOKEN_HINTS = [
   { form: "qos:BestEffort", desc: "QoS class" },
   { form: "has:init-containers", desc: "pods with init containers" },
   { form: "audit:missing-limits", desc: "pods breaking an audit rule" },
+  { form: "health:not-ready", desc: "nodes with a health warning" },
   { form: "app=frontend", desc: "label equals" },
   { form: "env!=prod", desc: "label differs" },
   { form: "nginx", desc: "pod name contains" },
@@ -86,6 +91,13 @@ function parseFilter(prefix, value, raw) {
       return { error: { token: raw, message: `unknown audit: rule — use ${AUDIT_FIELDS.join(", ")}` } };
     }
     return { term: { kind: "audit", value: finding } };
+  }
+  if (prefix === "health") {
+    const warning = value.toLowerCase();
+    if (HEALTH_FIELDS.indexOf(warning) === -1) {
+      return { error: { token: raw, message: `unknown health: warning — use ${HEALTH_FIELDS.join(", ")}` } };
+    }
+    return { term: { kind: "health", value: warning } };
   }
   const field = value.toLowerCase();
   if (HAS_FIELDS.indexOf(field) === -1) {
@@ -149,9 +161,16 @@ function labelValue(pod, key) {
   return Object.prototype.hasOwnProperty.call(labels, key) ? labels[key] : undefined;
 }
 
-function termMatchesPod(term, pod, nodeName) {
+function nodeHasWarning(term, node) {
+  return ((node && node.warnings) || []).indexOf(term.value) !== -1;
+}
+
+function termMatchesPod(term, pod, node) {
+  const nodeName = (node && node.name) || "";
   if (term.kind === "ns") return String(pod.namespace || "").toLowerCase() === term.value;
-  if (term.kind === "node") return term.regex.test(nodeName || "");
+  if (term.kind === "node") return term.regex.test(nodeName);
+  // A node-level fact: every pod on a matching node glows with it.
+  if (term.kind === "health") return nodeHasWarning(term, node);
   if (term.kind === "qos") return String(pod.qos || "").toLowerCase() === term.value;
   if (term.kind === "has") return !!pod.hasInit;
   if (term.kind === "audit") return (pod.findings || []).indexOf(term.value) !== -1;
@@ -164,14 +183,19 @@ function termMatchesPod(term, pod, nodeName) {
 }
 
 // Every term must hold — an empty term list matches everything.
-function podMatches(pod, parsed, nodeName) {
-  return parsed.terms.every(term => termMatchesPod(term, pod, nodeName));
+function podMatches(pod, parsed, node) {
+  return parsed.terms.every(term => termMatchesPod(term, pod, node));
 }
 
-// Node-scoped view of the same query: only node: globs can rule a node out, so
-// a node keeps rendering (dimmed) rather than disappearing.
-function nodeMatches(nodeName, parsed) {
-  return parsed.terms.every(term => term.kind !== "node" || term.regex.test(nodeName || ""));
+// Node-scoped view of the same query: only node: globs and health: warnings
+// can rule a node out, so a node keeps rendering (dimmed) rather than
+// disappearing.
+function nodeMatches(node, parsed) {
+  return parsed.terms.every(term => {
+    if (term.kind === "node") return term.regex.test((node && node.name) || "");
+    if (term.kind === "health") return nodeHasWarning(term, node);
+    return true;
+  });
 }
 
 window.k8sQuery = { parseQuery, podMatches, nodeMatches, tokenize, globToRegExp, TOKEN_HINTS };

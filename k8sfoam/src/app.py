@@ -1,8 +1,16 @@
 import argparse
+from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, jsonify, request
 from typing import Optional
 from k8sfoam.src.k8s.k8s_client import K8sClient
 from k8sfoam.src.utils.mappers import FoamTreeMapper
+
+
+def get_version() -> str:
+    try:
+        return version('k8sfoams')
+    except PackageNotFoundError:
+        return 'unknown'
 
 
 def create_app() -> Optional[Flask]:
@@ -47,12 +55,13 @@ def create_app() -> Optional[Flask]:
 
 def main():
     """Main entry point for the k8sfoams console script."""
-    app = create_app()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host', type=str, default='127.0.0.1', required=False, help='Host IP on which server listen')
+    parser.add_argument('--port', type=int, default=8080, required=False, help='Port on which server listen')
+    parser.add_argument('-d', action='store_true', help='Run server in debug mode')
+    parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
+    args = parser.parse_args()
 
+    app = create_app()
     if app:
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--host', type=str, default='127.0.0.1', required=False, help='Host IP on which server listen')
-        parser.add_argument('--port', type=int, default=8080, required=False, help='Port on which server listen')
-        parser.add_argument('-d', action='store_true', help='Run server in debug mode')
-        args = parser.parse_args()
         app.run(host=args.host, port=args.port, debug=args.d)
