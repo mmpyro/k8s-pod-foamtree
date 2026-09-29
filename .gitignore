@@ -135,3 +135,7 @@ record.txt
 
 # Unit test report
 test-results.xml
+
+# Frontend build (make web)
+node_modules/
+k8sfoam/src/frontend/bundle.js

@@ -1,0 +1,15 @@
+{
+  "name": "k8sfoams-frontend",
+  "private": true,
+  "description": "Builds k8sfoam/src/frontend/bundle.js, which the Python package serves.",
+  "scripts": {
+    "build": "esbuild k8sfoam/src/frontend/main.js --bundle --minify --target=es2020 --log-level=warning --outfile=k8sfoam/src/frontend/bundle.js",
+    "watch": "npm run build -- --watch"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "three": "0.186.1"
+  }
+}

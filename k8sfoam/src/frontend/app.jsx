@@ -2,7 +2,7 @@
 
 const { useState, useEffect, useMemo, useRef } = React;
 const { NodeCard } = window.k8sTreemap;
-const { Scene3D } = window.k8sCube3D;
+const { Scene3D } = window.k8sScene3D;
 const { workloadKey } = window.k8sWorkload;
 const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
