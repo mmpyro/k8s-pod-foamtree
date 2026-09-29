@@ -7,8 +7,10 @@
 // on demand (camera move, data or style change), never in an idle loop.
 //
 // Colours are the CSS scene's, unchanged: unlit faces coloured like its cube
-// faces, its plate and label styling, its warning hatch, and its CSS filter
-// values for dim / match / workload states, applied here in the same sRGB math.
+// faces with their lit edges and inset glow, the cubes' cast haze and top-face
+// halo, its plate and label styling with their glows, its warning hatch, and
+// its CSS filter values for dim / match / workload states, applied here in the
+// same sRGB math.
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -84,6 +86,158 @@ function podFilter(cube, look) {
 const plateSurface = (bg, h) => mix(bg, hsl(h, 80, 6), 0.92);
 const FACES = { top: [96, 58], x: [88, 24], z: [88, 15] }; // CSS .cube-top / -e / -s
 
+// The CSS faces' box-shadows: a 1px inset edge in a lighter tint of the hue
+// on every face, and a soft inset glow on the two sides. Values are
+// [saturation, lightness, alpha] of the hsla() colours in the CSS scene.
+const EDGES = { top: [100, 78, 0.95], x: [100, 72, 0.55], z: [100, 72, 0.42] };
+// Alphas are below the CSS values: the CSS glows were clipped by 3D sorting
+// in ways a WebGL scene does not reproduce, so at full strength they flood it.
+const SIDE_GLOW = [100, 60, 0.3];
+const GLOW = { cubeShadow: 0.16, halo: 0.3, plateOuter: 0.08, plateInset: 0.04, rim: 0.35 };
+
+// The CSS blur lengths, in its px, turned into Gaussian sigmas in world units.
+// A box-shadow blur radius is two sigmas; a blur() filter length is one.
+const SIGMA = {
+  cubeShadow: 6 * CSS_PX,   // .cube-shadow { filter: blur(6px) }
+  topGlow: 8 * CSS_PX,      // cube-top box-shadow 0 0 16px
+  sideGlow: 10 * CSS_PX,    // cube-s/-e inset ... 20px -12px
+  plateGlow: 17 * CSS_PX,   // plate box-shadow 0 0 34px
+  plateInset: 23 * CSS_PX,  // plate box-shadow inset 0 0 46px
+};
+
+// Unlit cube faces coloured per instance in sRGB, which is where CSS mixes
+// colours: written straight to the output, no linear round trip. FACE picks
+// the face kind: 0 top, 1 the ±x (east) sides, 2 the ±z (south) sides.
+const FACE_VERT = `
+attribute vec3 aBase;
+attribute vec3 aEdge;
+attribute vec3 aGlow;
+varying vec3 vBase;
+varying vec3 vEdge;
+varying vec3 vGlow;
+varying vec2 vUv;
+varying vec2 vSize;
+void main() {
+  vBase = aBase; vEdge = aEdge; vGlow = aGlow;
+  vec3 s = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));
+  // Face-local coordinates in world units: (x, z) on top, (across, up) on a side.
+#if FACE == 0
+  vUv = (position.xz + 0.5) * s.xz; vSize = s.xz;
+#elif FACE == 1
+  vUv = vec2((position.z + 0.5) * s.z, position.y * s.y); vSize = s.zy;
+#else
+  vUv = vec2((position.x + 0.5) * s.x, position.y * s.y); vSize = s.xy;
+#endif
+  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+}`;
+const FACE_FRAG = `
+uniform float edgeAlpha;
+uniform float glowAlpha;
+uniform float glowSigma;
+varying vec3 vBase;
+varying vec3 vEdge;
+varying vec3 vGlow;
+varying vec2 vUv;
+varying vec2 vSize;
+void main() {
+  // Distance to the nearest face edge, in screen pixels: a 1px line at any zoom.
+  vec2 px = min(vUv, vSize - vUv) / max(fwidth(vUv), vec2(1e-4));
+  float edge = 1.0 - smoothstep(0.5, 1.5, min(px.x, px.y));
+  vec3 c = vBase;
+#if FACE != 0
+  // The inset glow sits on the cube's top edge on the south face and on its
+  // foot on the east face, where the CSS faces' rotations put it.
+#if FACE == 2
+  float d = vSize.y - vUv.y;
+#else
+  float d = vUv.y;
+#endif
+  c = mix(c, vGlow, glowAlpha * exp(-d * d / (2.0 * glowSigma * glowSigma)));
+#endif
+  c = mix(c, vEdge, edgeAlpha * edge);
+  gl_FragColor = vec4(c, 1.0);
+}`;
+
+function faceMaterial(kind) {
+  return new THREE.ShaderMaterial({
+    defines: { FACE: { top: 0, x: 1, z: 2 }[kind] },
+    uniforms: {
+      edgeAlpha: { value: EDGES[kind][2] },
+      glowAlpha: { value: kind === "top" ? 0 : SIDE_GLOW[2] },
+      glowSigma: { value: SIGMA.sideGlow },
+    },
+    vertexShader: FACE_VERT,
+    fragmentShader: FACE_FRAG,
+  });
+}
+
+// Soft glow quads — the CSS box-shadows and the blurred cube shadow. Each
+// instance is a flat square whose scale is the lit box plus three sigmas of
+// falloff on every side; aColor is the sRGB glow colour already multiplied by
+// its alpha. Blending keeps the brighter of glow and what is already drawn,
+// per channel, and leaves the canvas alpha alone: a glow lights the dark plate
+// and page but never stacks with its neighbours' or washes out a lit face,
+// which additive blending did wherever cubes stand close together.
+// MODE 0 lights the whole box, 1 only outside it (a shadow the element hides
+// in CSS), 2 only inside it from the edges in (an inset shadow).
+const GLOW_VERT = `
+attribute vec3 aColor;
+uniform float pad;
+varying vec3 vColor;
+varying vec2 vP;
+varying float vHalf;
+void main() {
+  vColor = aColor;
+  float s = length(instanceMatrix[0].xyz);
+  vP = position.xz * s;
+  vHalf = s * 0.5 - pad;
+  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+}`;
+const GLOW_FRAG = `
+uniform float sigma;
+varying vec3 vColor;
+varying vec2 vP;
+varying float vHalf;
+void main() {
+  vec2 q = abs(vP) - vHalf;
+#if MODE == 2
+  float d = -max(q.x, q.y);
+#else
+  float d = length(max(q, 0.0));
+#if MODE == 1
+  if (d <= 0.0) discard;
+#endif
+#endif
+  float a = exp(-d * d / (2.0 * sigma * sigma));
+  gl_FragColor = vec4(vColor * a, 0.0);
+}`;
+
+function glowMaterial(mode, sigma) {
+  return new THREE.ShaderMaterial({
+    defines: { MODE: mode },
+    uniforms: { sigma: { value: sigma }, pad: { value: mode === 2 ? 0 : sigma * 3 } },
+    vertexShader: GLOW_VERT,
+    fragmentShader: GLOW_FRAG,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.MaxEquation,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneFactor,
+    blendSrcAlpha: THREE.ZeroFactor,
+    blendDstAlpha: THREE.OneFactor,
+  });
+}
+
+// A per-instance sRGB colour attribute (three's instanceColor is linear).
+function colorAttr(geometry, name, count) {
+  const a = new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3);
+  geometry.setAttribute(name, a);
+  return a;
+}
+const setRGB = (attr, i, rgb) => attr.setXYZ(i, rgb[0], rgb[1], rgb[2]);
+const scaled = (rgb, k) => rgb.map(v => v * k);
+
 function webglAvailable() {
   try {
     const c = document.createElement("canvas");
@@ -154,16 +308,22 @@ function labelSprite({ name, util, hue, sev }, height) {
   const utilW = measure.measureText(utilText).width;
   const markW = sev ? px * 0.6 : 0;
   const dotW = px * 0.5 + pad * 0.6;
+  // The chip sits inside a margin that holds its CSS box-shadow glow.
+  const chipW = Math.ceil(pad + dotW + nameW + pad + utilW + (sev ? pad * 0.6 + markW : 0) + pad);
+  const chipH = px + 26, glow = 36;
   const c = document.createElement("canvas");
-  c.width = Math.ceil(pad + dotW + nameW + pad + utilW + (sev ? pad * 0.6 + markW : 0) + pad);
-  c.height = px + 26;
+  c.width = chipW + glow * 2;
+  c.height = chipH + glow * 2;
   const g = c.getContext("2d"), mid = c.height / 2;
+  g.shadowColor = `hsla(${hue}, 100%, 50%, .12)`;
+  g.shadowBlur = glow;
   g.fillStyle = "rgba(4,6,12,.92)";
-  g.fillRect(0, 0, c.width, c.height);
+  g.fillRect(glow, glow, chipW, chipH);
+  g.shadowColor = "transparent";
   g.strokeStyle = `hsla(${hue}, 100%, 62%, .4)`;
   g.lineWidth = 3;
-  g.strokeRect(1.5, 1.5, c.width - 3, c.height - 3);
-  let x = pad;
+  g.strokeRect(glow + 1.5, glow + 1.5, chipW - 3, chipH - 3);
+  let x = glow + pad;
   g.textBaseline = "middle";
   g.fillStyle = `hsl(${hue} 90% 62%)`;
   g.beginPath();
@@ -190,14 +350,15 @@ function labelSprite({ name, util, hue, sev }, height) {
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
-  s.scale.set((c.width / c.height) * height, height, 1);
+  const unit = height / chipH;
+  s.scale.set(c.width * unit, c.height * unit, 1);
   s.renderOrder = 10;
   return s;
 }
 
 function Scene3D({
   nodes, match, zoom, hueOf, colorBy, memUnit, fmtMem, onFocus,
-  highlight, highlightActive, onPodSelect, onPodHover,
+  highlight, highlightActive, onPodSelect, onPodHover, captureRef,
 }) {
   const hostRef = React.useRef(null);
   const world = React.useRef(null);
@@ -305,9 +466,32 @@ function Scene3D({
     el.addEventListener("pointerdown", onDown);
     el.addEventListener("pointerup", onUp);
 
+    // PNG capture at `scale`× the screen resolution. The drawing buffer is
+    // not preserved, so the frame is copied out in the same task it was
+    // rendered in, onto the page background (the renderer is transparent).
+    const capture = scale => {
+      const dpr = window.devicePixelRatio;
+      renderer.setPixelRatio(dpr * scale);
+      resize();
+      renderer.render(scene, cam);
+      const src = renderer.domElement;
+      const out = document.createElement("canvas");
+      out.width = src.width;
+      out.height = src.height;
+      const g = out.getContext("2d");
+      g.fillStyle = token("--bg", "#07080c");
+      g.fillRect(0, 0, out.width, out.height);
+      g.drawImage(src, 0, 0);
+      renderer.setPixelRatio(dpr);
+      resize();
+      return out;
+    };
+    if (captureRef) captureRef.current = capture;
+
     world.current = w;
     resize();
     return () => {
+      if (captureRef && captureRef.current === capture) captureRef.current = null;
       ro.disconnect();
       cancelAnimationFrame(frame);
       cancelAnimationFrame(hoverFrame);
@@ -331,17 +515,31 @@ function Scene3D({
     w.dispose && w.dispose();
     const n = Math.max(1, next.cubes.length), np = Math.max(1, next.plates.length);
     const unlit = () => new THREE.MeshBasicMaterial();
-    const top = new THREE.InstancedMesh(boxFaces([2]), unlit(), n);
-    const x = new THREE.InstancedMesh(boxFaces([0, 1]), unlit(), n);
-    const z = new THREE.InstancedMesh(boxFaces([4, 5]), unlit(), n);
+    const top = new THREE.InstancedMesh(boxFaces([2]), faceMaterial("top"), n);
+    const x = new THREE.InstancedMesh(boxFaces([0, 1]), faceMaterial("x"), n);
+    const z = new THREE.InstancedMesh(boxFaces([4, 5]), faceMaterial("z"), n);
+    for (const mesh of [top, x, z]) {
+      mesh.userData.attrs = ["aBase", "aEdge", "aGlow"].map(name => colorAttr(mesh.geometry, name, n));
+    }
     const rims = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), unlit(), np);
     const plates = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), unlit(), np);
     const flat = () => new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
     const overlay = map => new THREE.MeshBasicMaterial({ map, transparent: true, depthWrite: false });
     const grids = new THREE.InstancedMesh(flat(), overlay(w.grid), np);
     const hatches = new THREE.InstancedMesh(flat(), overlay(w.hatch), np);
-    for (const mesh of [top, x, z]) mesh.count = next.cubes.length;
-    for (const mesh of [rims, plates, grids, hatches]) mesh.count = next.plates.length;
+    const glowMesh = (mode, sigma, count) => {
+      const mesh = new THREE.InstancedMesh(flat(), glowMaterial(mode, sigma), count);
+      mesh.userData.color = colorAttr(mesh.geometry, "aColor", count);
+      return mesh;
+    };
+    // The coloured haze each cube casts on its plate, the halo around its top
+    // face, and the plate's outer and inset glow.
+    const shadows = glowMesh(0, SIGMA.cubeShadow, n);
+    const halos = glowMesh(1, SIGMA.topGlow, n);
+    const plateGlows = glowMesh(0, SIGMA.plateGlow, np);
+    const plateInsets = glowMesh(2, SIGMA.plateInset, np);
+    for (const mesh of [top, x, z, shadows, halos]) mesh.count = next.cubes.length;
+    for (const mesh of [rims, plates, grids, hatches, plateGlows, plateInsets]) mesh.count = next.plates.length;
     const m = new THREE.Matrix4();
     next.plates.forEach((p, i) => {
       // The 1px CSS border as a slightly larger, lower slab around the plate.
@@ -349,14 +547,26 @@ function Scene3D({
       rims.setMatrixAt(i, m);
       m.makeScale(PLATE, 2, PLATE).setPosition(p.x, -1, p.z);
       plates.setMatrixAt(i, m);
+      const g = PLATE + SIGMA.plateGlow * 6;
+      m.makeScale(g, 1, g).setPosition(p.x, -2.2, p.z);
+      plateGlows.setMatrixAt(i, m);
+      m.makeScale(PLATE, 1, PLATE).setPosition(p.x, 0.12, p.z);
+      plateInsets.setMatrixAt(i, m);
     });
     next.cubes.forEach((c, i) => {
       m.makeScale(c.w, c.h, c.w).setPosition(c.x, 0, c.z);
       top.setMatrixAt(i, m);
       x.setMatrixAt(i, m);
       z.setMatrixAt(i, m);
+      // .cube-shadow sits 3px down-right of the cube in the CSS plate plane.
+      const sh = c.w + SIGMA.cubeShadow * 6;
+      m.makeScale(sh, 1, sh).setPosition(c.x + 3 * CSS_PX, 0.2, c.z + 3 * CSS_PX);
+      shadows.setMatrixAt(i, m);
+      const ha = c.w + SIGMA.topGlow * 6;
+      m.makeScale(ha, 1, ha).setPosition(c.x, c.h + 0.05, c.z);
+      halos.setMatrixAt(i, m);
     });
-    root.add(rims, plates, grids, hatches, z, x, top);
+    root.add(plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos);
 
     const labels = next.plates.map(p => {
       const util = Math.max(p.node.cpuUsed / (p.node.cpuCapacity || 1), p.node.memUsed / (p.node.memCapacity || 1));
@@ -370,9 +580,12 @@ function Scene3D({
     if (labels.length) root.add(...labels);
     root.position.set(-next.center.x, 0, -next.center.z);
 
-    Object.assign(w, { cubes: next.cubes, plates: next.plates, labels, meshes: { top, x, z, rims, plates, grids, hatches } });
+    Object.assign(w, {
+      cubes: next.cubes, plates: next.plates, labels,
+      meshes: { top, x, z, rims, plates, grids, hatches, shadows, halos, plateGlows, plateInsets },
+    });
     w.dispose = () => {
-      const meshes = [rims, plates, grids, hatches, z, x, top];
+      const meshes = [plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos];
       root.remove(...meshes, ...labels);
       for (const o of meshes) { o.geometry.dispose(); o.material.dispose(); o.dispose(); }
       for (const s of labels) { s.material.map.dispose(); s.material.dispose(); }
@@ -414,22 +627,37 @@ function Scene3D({
       // A pod's colours depend only on its node hue and one of six filter
       // states, so compute each combination once, not once per pod.
       const faces = new Map();
+      const faceMeshes = [w.meshes.top, w.meshes.x, w.meshes.z];
       w.cubes.forEach((cube, i) => {
         const h = colorBy === "qos" ? qosHue(cube.pod.qos) : hueOf(cube.nodeIdx);
         const f = podFilter(cube, look), key = `${h}|${f}`;
         if (!faces.has(key)) {
+          // Every layer of a face goes through the same filter, then fades
+          // over the plate, as the whole CSS face element did.
           const under = plateSurface(w.bg, h);
-          faces.set(key, ["top", "x", "z"].map(face => mix(under, cssFilter(hsl(h, ...FACES[face]), f[0], f[1]), f[2])));
+          const look1 = (sat, light) => mix(under, cssFilter(hsl(h, sat, light), f[0], f[1]), f[2]);
+          const glow = (sat, light, alpha) => scaled(cssFilter(hsl(h, sat, light), f[0], f[1]), alpha * f[2]);
+          faces.set(key, {
+            faces: ["top", "x", "z"].map(face => [
+              look1(...FACES[face]),
+              look1(EDGES[face][0], EDGES[face][1]),
+              look1(SIDE_GLOW[0], SIDE_GLOW[1]),
+            ]),
+            shadow: glow(100, 50, GLOW.cubeShadow),
+            halo: glow(100, 60, GLOW.halo),
+          });
         }
-        const [t, fx, fz] = faces.get(key);
-        set(w.meshes.top, i, t);
-        set(w.meshes.x, i, fx);
-        set(w.meshes.z, i, fz);
+        const c = faces.get(key);
+        faceMeshes.forEach((mesh, k) => mesh.userData.attrs.forEach((attr, j) => setRGB(attr, i, c.faces[k][j])));
+        setRGB(w.meshes.shadows.userData.color, i, c.shadow);
+        setRGB(w.meshes.halos.userData.color, i, c.halo);
       });
       w.plates.forEach((p, i) => {
         const h = hueOf(p.idx), dim = look.plateDim(p.node), sev = worstSeverity(p.node.warnings);
         set(w.meshes.plates, i, plateSurface(w.bg, h));
-        set(w.meshes.rims, i, mix(w.bg, hsl(h, 100, 62), 0.5));
+        setRGB(w.meshes.plateGlows.userData.color, i, scaled(hsl(h, 100, 50), GLOW.plateOuter));
+        setRGB(w.meshes.plateInsets.userData.color, i, scaled(hsl(h, 100, 55), dim ? 0 : GLOW.plateInset));
+        set(w.meshes.rims, i, mix(w.bg, hsl(h, 100, 62), GLOW.rim));
         // A plate the query ruled out drops its inlay, warning hatch included.
         m.makeScale(dim ? 0 : PLATE, 1, dim ? 0 : PLATE).setPosition(p.x, 0.05, p.z);
         w.meshes.grids.setMatrixAt(i, m);
@@ -439,7 +667,11 @@ function Scene3D({
         set(w.meshes.hatches, i, sev ? sevColor[sev] : [0, 0, 0]);
         w.labels[i].material.opacity = dim ? 0.38 : 1;
       });
-      for (const mesh of Object.values(w.meshes)) if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      for (const mesh of Object.values(w.meshes)) {
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        for (const attr of mesh.userData.attrs || []) attr.needsUpdate = true;
+        if (mesh.userData.color) mesh.userData.color.needsUpdate = true;
+      }
       w.meshes.grids.instanceMatrix.needsUpdate = w.meshes.hatches.instanceMatrix.needsUpdate = true;
     };
     w.recolor();

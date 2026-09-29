@@ -1,7 +1,7 @@
 # k8s-pod-foamtree
 
 <p align="center">
-  <img src="logo.png" alt="k8sfoams logo">
+  <img src="images/logo.png" alt="k8sfoams logo">
 </p>
 
 **k8sfoams** is a local, read-only dashboard that answers one question: *where is my cluster's requested CPU and memory actually going, and how much room is left on each node?*
@@ -17,13 +17,13 @@ It visualizes **resource requests** — what the scheduler reserves — not live
 
 ## 2D map
 
-![k8sfoams 2D treemap view](k8s-foam-tree.png)
+![k8sfoams 2D treemap view](images/k8s-foam-tree.png)
 
 A squarified treemap. Each node is a square box, each pod is a foam inside it. A pod with more than one container is split into sub-foams. The empty foam is unused (free) capacity on that node. Pick **CPU** or **Memory** with the Resource control.
 
 ## 3D cubes
 
-![k8sfoams 3D cube view](k8s-foam-tree-3d.png)
+![k8sfoams 3D cube view](images/k8s-foam-tree-3d.png)
 
 An isometric view: one plate per node, one cube per pod. A cube encodes both resources at once:
 
@@ -196,6 +196,19 @@ Without the quotes, `web:1` is read as an unknown filter prefix and reported as 
 | `app="my app` | `unterminated quoted value` |
 
 Focusing the input opens a popover with the same token list; it is replaced by the error list while a token is malformed. The `×` on the right clears the query.
+
+## Export
+
+The download button in the header, next to *Refresh*, saves what you are looking at — for capacity-planning decks, Slack updates and incident reports. Everything is built in the browser; nothing extra is fetched from the cluster.
+
+| Item | 2D map | 3D cubes | Contents |
+| --- | --- | --- | --- |
+| **PNG image** | ✓ | ✓ | The current view at 2× resolution. |
+| **SVG image** | ✓ | — | The 2D map as real vectors (cards, pods, containers, labels). The 3D view is WebGL, so it has no SVG form. |
+| **JSON report** | ✓ | ✓ | Every node and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. |
+| **CSV report** | ✓ | ✓ | One row per pod: `context,node,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. |
+
+Images keep the current metric, colours, tweaks, query dimming and pinned workload, and carry a title band with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HHmm.<ext>`. Web fonts are not embedded, so exported images fall back to system fonts.
 
 ## HTTP API
 
