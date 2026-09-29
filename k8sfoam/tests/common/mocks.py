@@ -22,8 +22,10 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     return pod
 
 
-def create_container(name: str, cpu: str, memory: str, memory_limit=None) -> MagicMock:
+def create_container(name: str, cpu: str, memory: str, memory_limit=None, restart_policy=None) -> MagicMock:
     container = MagicMock()
+    # 'Always' on an init container makes it a native sidecar; None everywhere else.
+    container.restart_policy = restart_policy
     resources = MagicMock()
     requests = {'cpu': cpu, 'memory': memory}
     resources.requests = requests

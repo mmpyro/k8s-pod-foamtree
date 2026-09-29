@@ -36,7 +36,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "#7c5cff"
 }/*EDITMODE-END*/;
 
-// Backend memory weights are decimal kB (bitmath .kB, 1 kB = 1000 bytes),
+// Backend memory weights are decimal kB (1 kB = 1000 bytes),
 // so MiB = kB * 1000 / 1024^2 — not a plain /1024, which would treat kB as KiB.
 function kbToMib(kb) {
   return (kb * 1000) / (1024 * 1024);
