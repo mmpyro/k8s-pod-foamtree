@@ -65,34 +65,27 @@ function squarify(items, x, y, w, h) {
   return out;
 }
 
-// Render a node card: header + nested treemap of pods (each pod = treemap of containers).
-function NodeCard({
-  node, match, metric, hue, colorBy, style: nodeStyle, showLabels, density, onClick,
-  highlight, highlightActive, onPodSelect, onPodHover,
-}) {
-  const ref = React.useRef(null);
-  const [box, setBox] = React.useState({ w: 0, h: 0 });
+// Card chrome sizes per density. Shared with the SVG exporter so an exported
+// map is laid out exactly like the one on screen.
+function cardMetrics(density) {
+  return density === "compact" ? { padding: 4, headerH: 26 } : { padding: 6, headerH: 32 };
+}
 
-  React.useLayoutEffect(() => {
-    if (!ref.current) return;
-    const el = ref.current;
-    const ro = new ResizeObserver(() => {
-      setBox({ w: el.clientWidth, h: el.clientHeight });
-    });
-    ro.observe(el);
-    setBox({ w: el.clientWidth, h: el.clientHeight });
-    return () => ro.disconnect();
-  }, []);
-
-  // Query dimming. A node ruled out by a node: glob dims as a whole card, so
-  // its pods stay at full strength inside it rather than fading twice.
+// Query dimming. A node ruled out by a node: glob dims as a whole card, so
+// its pods stay at full strength inside it rather than fading twice.
+function queryState(node, match) {
   const queryActive = !!(match && match.active);
-  const nodeDim = queryActive && match.dimNodes.has(node.name);
-  const podMatched = pod => queryActive && match.pods.has(pod);
+  return {
+    queryActive,
+    nodeDim: queryActive && match.dimNodes.has(node.name),
+    podMatched: pod => queryActive && match.pods.has(pod),
+  };
+}
 
-  const padding = density === "compact" ? 4 : 6;
-  const headerH = density === "compact" ? 26 : 32;
-
+// Everything about a node card that does not depend on the pixel box:
+// pod weights, free capacity, utilisation and the worst warning.
+function cardStats(node, metric, match) {
+  const { podMatched } = queryState(node, match);
   // Compute pod values + empty space. Size each pod by its effective request
   // (max(sum regular, max init)) — summing containers would double-count
   // init containers, which run sequentially before the regular ones.
@@ -112,35 +105,112 @@ function NodeCard({
   const empty = Math.max(0, cap - used);
   const items = [...podItems, { pod: null, value: empty, empty: true }];
 
-  const innerW = Math.max(0, box.w - padding * 2);
-  const innerH = Math.max(0, box.h - headerH - padding);
-  // Memoised because a highlight change re-renders every card: `items` is a
-  // pure function of node + metric, so those two plus the box are the whole
-  // input to the layout, and hovering a pod must not redo this math per card.
-  const laid = React.useMemo(
-    () => (innerW > 0 && innerH > 0 ? squarify(items, padding, headerH, innerW, innerH) : []),
-    [node, metric, innerW, innerH, padding, headerH]
-  );
-
-  // Free capacity on a node that refuses pods is not really free, so the idle
-  // foam gets hatched in the worst warning's colour instead of the neutral one.
-  const warnSev = worstSeverity(node.warnings);
-
   const utilization = used / cap;
   const utilColor = utilization > 0.85 ? "#ef4444" :
                     utilization > 0.6 ? "#f59e0b" :
                     utilization > 0.3 ? "#10b981" : "#3b82f6";
 
-  // Card style depending on tweak — hsl for max renderer compat.
-  const cardBg = nodeStyle === "solid"
-    ? `hsl(${hue} 55% 24%)`
-    : nodeStyle === "gradient"
-    ? `linear-gradient(135deg, hsl(${hue} 60% 22%) 0%, hsl(${hue} 50% 12%) 100%)`
-    : `hsl(${hue} 20% 12%)`;
+  // Free capacity on a node that refuses pods is not really free, so the idle
+  // foam gets hatched in the worst warning's colour instead of the neutral one.
+  const warnSev = worstSeverity(node.warnings);
+  return { items, cap, used, empty, utilization, utilColor, warnSev };
+}
 
-  const borderColor = nodeStyle === "outlined"
+// Pod and idle rects inside a card of the given outer size.
+function cardLayout(items, w, h, density) {
+  const { padding, headerH } = cardMetrics(density);
+  const innerW = Math.max(0, w - padding * 2);
+  const innerH = Math.max(0, h - headerH - padding);
+  return innerW > 0 && innerH > 0 ? squarify(items, padding, headerH, innerW, innerH) : [];
+}
+
+// Container rects inside a pod rect.
+const POD_INSET = 2;
+function podHeaderH(rect) {
+  return rect.h > 28 ? 12 : 0;
+}
+function podLayout(pod, metric, rect) {
+  const headerH = podHeaderH(rect);
+  const containers = pod.containers.map(c => ({
+    container: c,
+    value: metric === "cpu" ? c.cpu : c.mem,
+  }));
+  return squarify(
+    containers,
+    POD_INSET,
+    headerH + POD_INSET,
+    Math.max(0, rect.w - POD_INSET * 2),
+    Math.max(0, rect.h - headerH - POD_INSET * 2)
+  );
+}
+
+// Card style depending on tweak — hsl for max renderer compat. The gradient
+// comes back as its two stops so the SVG exporter can build it too.
+function cardColors(hue, nodeStyle) {
+  const gradient = nodeStyle === "gradient"
+    ? [`hsl(${hue} 60% 22%)`, `hsl(${hue} 50% 12%)`]
+    : null;
+  const fill = nodeStyle === "solid"
+    ? `hsl(${hue} 55% 24%)`
+    : `hsl(${hue} 20% 12%)`;
+  const border = nodeStyle === "outlined"
     ? `hsl(${hue} 70% 55%)`
     : `hsla(${hue}, 40%, 45%, 0.4)`;
+  return {
+    gradient, fill, border,
+    borderWidth: nodeStyle === "outlined" ? 1.5 : 1,
+    css: gradient ? `linear-gradient(135deg, ${gradient[0]} 0%, ${gradient[1]} 100%)` : fill,
+    dot: `hsl(${hue} 80% 65%)`,
+  };
+}
+
+function podColors(hue, nodeStyle) {
+  const fill = nodeStyle === "solid"
+    ? `hsla(${hue}, 65%, 38%, 0.65)`
+    : nodeStyle === "gradient"
+    ? `hsla(${hue}, 55%, 32%, 0.9)`
+    : `hsla(${hue}, 45%, 25%, 0.7)`;
+  return { fill, border: `hsla(${hue}, 60%, 55%, 0.5)` };
+}
+
+// Init containers render desaturated — they explain the effective request
+// but don't run alongside the regular containers.
+function containerColor(hue, init) {
+  return init ? `hsla(${hue}, 10%, 55%, 0.85)` : `hsla(${hue}, 70%, 68%, 0.92)`;
+}
+
+// Render a node card: header + nested treemap of pods (each pod = treemap of containers).
+function NodeCard({
+  node, match, metric, hue, colorBy, style: nodeStyle, showLabels, density, onClick,
+  highlight, highlightActive, onPodSelect, onPodHover,
+}) {
+  const ref = React.useRef(null);
+  const [box, setBox] = React.useState({ w: 0, h: 0 });
+
+  React.useLayoutEffect(() => {
+    if (!ref.current) return;
+    const el = ref.current;
+    const ro = new ResizeObserver(() => {
+      setBox({ w: el.clientWidth, h: el.clientHeight });
+    });
+    ro.observe(el);
+    setBox({ w: el.clientWidth, h: el.clientHeight });
+    return () => ro.disconnect();
+  }, []);
+
+  const { queryActive, nodeDim, podMatched } = queryState(node, match);
+  const { headerH } = cardMetrics(density);
+  const { items, cap, empty, utilization, utilColor, warnSev } = cardStats(node, metric, match);
+
+  // Memoised because a highlight change re-renders every card: `items` is a
+  // pure function of node + metric, so those two plus the box are the whole
+  // input to the layout, and hovering a pod must not redo this math per card.
+  const laid = React.useMemo(
+    () => cardLayout(items, box.w, box.h, density),
+    [node, metric, box.w, box.h, density]
+  );
+
+  const colors = cardColors(hue, nodeStyle);
 
   return (
     <div
@@ -148,14 +218,14 @@ function NodeCard({
       onClick={onClick}
       className={`node-card ${nodeDim ? "is-dim" : ""}`}
       style={{
-        background: cardBg,
-        borderColor,
-        borderWidth: nodeStyle === "outlined" ? 1.5 : 1,
+        background: colors.css,
+        borderColor: colors.border,
+        borderWidth: colors.borderWidth,
       }}
     >
       {/* Header */}
       <div className="node-header" style={{ height: headerH }}>
-        <div className="node-header-dot" style={{ background: `hsl(${hue} 80% 65%)` }}></div>
+        <div className="node-header-dot" style={{ background: colors.dot }}></div>
         <span className="node-name">{node.name}</span>
         <span className="node-meta">
           <NodeWarnBadge warnings={node.warnings} />
@@ -205,30 +275,13 @@ function PodBox({
     if (!highlightActive) cls.push("wl-preview");
   }
 
-  const inset = 2;
-  const headerH = rect.h > 28 ? 12 : 0;
+  const headerH = podHeaderH(rect);
   // Same reasoning as the card layout: the container rects depend only on the
   // pod, the metric and the rect handed down, so a highlight-only re-render
   // reuses them instead of re-squarifying every pod in the cluster.
-  const laid = React.useMemo(() => {
-    const containers = pod.containers.map(c => ({
-      container: c,
-      value: metric === "cpu" ? c.cpu : c.mem,
-    }));
-    return squarify(
-      containers,
-      inset,
-      headerH + inset,
-      Math.max(0, rect.w - inset * 2),
-      Math.max(0, rect.h - headerH - inset * 2)
-    );
-  }, [pod, metric, rect, headerH]);
+  const laid = React.useMemo(() => podLayout(pod, metric, rect), [pod, metric, rect]);
 
-  const podBg = nodeStyle === "solid"
-    ? `hsla(${hue}, 65%, 38%, 0.65)`
-    : nodeStyle === "gradient"
-    ? `hsla(${hue}, 55%, 32%, 0.9)`
-    : `hsla(${hue}, 45%, 25%, 0.7)`;
+  const colors = podColors(hue, nodeStyle);
 
   return (
     <div className={cls.join(" ")}
@@ -239,8 +292,8 @@ function PodBox({
       onMouseLeave={() => onPodHover(null)}
       style={{
         left: rect.x, top: rect.y, width: rect.w - 2, height: rect.h - 2,
-        background: podBg,
-        borderColor: `hsla(${hue}, 60%, 55%, 0.5)`,
+        background: colors.fill,
+        borderColor: colors.border,
       }}>
       {headerH > 0 && showLabels && rect.w > 50 && (
         <div className="pod-label">{pod.shortName}</div>
@@ -251,11 +304,7 @@ function PodBox({
         <div key={i} className="container-box"
           style={{
             left: it.x, top: it.y, width: Math.max(0, it.w - 1), height: Math.max(0, it.h - 1),
-            // Init containers render desaturated — they explain the effective
-            // request but don't run alongside the regular containers.
-            background: it.container.init
-              ? `hsla(${hue}, 10%, 55%, 0.85)`
-              : `hsla(${hue}, 70%, 68%, 0.92)`,
+            background: containerColor(hue, it.container.init),
           }}>
           {showLabels && it.w > 40 && it.h > 18 && (
             <span>{it.container.name}</span>
@@ -266,4 +315,8 @@ function PodBox({
   );
 }
 
-window.k8sTreemap = { squarify, NodeCard, PodBox };
+window.k8sTreemap = {
+  squarify, NodeCard, PodBox,
+  cardMetrics, queryState, cardStats, cardLayout, podHeaderH, podLayout,
+  cardColors, podColors, containerColor,
+};

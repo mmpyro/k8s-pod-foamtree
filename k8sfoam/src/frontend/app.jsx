@@ -174,6 +174,9 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [error, setError] = useState(null);
+  const [exportError, setExportError] = useState(null);
+  const gridWrapRef = useRef(null);
+  const captureRef = useRef(null);
 
   // Load contexts from server
   useEffect(() => {
@@ -367,6 +370,59 @@ function App() {
   // In QoS mode node chrome goes neutral, so only the pods carry colour.
   const hueOf = idx => (colorBy === "qos" ? NEUTRAL_HUE : nodeHue(idx, tw.colorScheme));
 
+  // Image and report downloads. Images show what is on screen — current view,
+  // metric, colours, query and pinned workload; reports carry every pod.
+  const onExport = async (kind) => {
+    const k = window.k8sExport;
+    const ctx = contexts[contextIdx] ? contexts[contextIdx].context : "";
+    try {
+      setExportError(null);
+      if (kind === "json") {
+        const body = k.reportJson({ nodes, totals, context: ctx, metric, query, match });
+        k.download(new Blob([body], { type: "application/json" }), k.fileName(ctx, "report", "json"));
+        return;
+      }
+      if (kind === "csv") {
+        const body = k.toCsv(k.podRows(nodes, match, ctx));
+        k.download(new Blob([body], { type: "text/csv" }), k.fileName(ctx, "report", "csv"));
+        return;
+      }
+      if (view === "3d") {
+        if (!captureRef.current) throw new Error("3D view is not ready");
+        const blob = await k.canvasBlob(captureRef.current(2));
+        k.download(blob, k.fileName(ctx, "3d", "png"));
+        return;
+      }
+      const grid = gridWrapRef.current && gridWrapRef.current.querySelector(".grid");
+      const r = grid ? grid.getBoundingClientRect() : { width: 1600, height: 1000 };
+      const memPct = Math.round((totals.memUsed / (totals.memCap || 1)) * 100);
+      const cpuPct = Math.round((totals.cpuUsed / (totals.cpuCap || 1)) * 100);
+      const svg = k.treemapSvg({
+        nodes, match, metric, hueOf, colorBy,
+        nodeStyle: tw.nodeStyle, density: tw.density, showLabels: tw.showLabels,
+        pinned: selectedWorkload,
+        width: r.width, height: r.height,
+        meta: {
+          title: `${metric === "cpu" ? "CPU" : "Memory"} Resources · ${ctx ? shortContext(ctx) : "cluster"}`,
+          subtitle: `${totals.nodes} nodes · ${totals.pods} pods` +
+            `${match.active ? ` · query: ${query.trim()} (${match.count} matched)` : ""}` +
+            `${colorBy === "qos" ? " · color = QoS class" : ""}`,
+          stats: `CPU ${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)} cores (${cpuPct}%)` +
+            ` · Memory ${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)} ${memUnit} (${memPct}%)`,
+          stamp: `k8sfoams · ${new Date(lastRefresh).toLocaleString()}`,
+        },
+      });
+      if (kind === "svg") {
+        k.download(new Blob([svg], { type: "image/svg+xml" }), k.fileName(ctx, "2d", "svg"));
+      } else {
+        k.download(await k.svgToPng(svg, 2), k.fileName(ctx, "2d", "png"));
+      }
+    } catch (err) {
+      console.error("Export failed:", err);
+      setExportError(err.message || String(err));
+    }
+  };
+
   // Auto-set accent CSS var
   useEffect(() => {
     document.documentElement.style.setProperty("--accent", tw.accent);
@@ -400,6 +456,11 @@ function App() {
             <span>Failed to connect to cluster: {error}</span>
           </div>
         )}
+        {exportError && (
+          <div className="error-banner">
+            <span>Export failed: {exportError}</span>
+          </div>
+        )}
 
         <Header
           metric={metric}
@@ -415,9 +476,11 @@ function App() {
           refreshing={refreshing}
           workload={workloadStats}
           onClearWorkload={() => setSelectedWorkload(null)}
+          onExport={onExport}
+          canExport={nodes.length > 0}
         />
 
-        <div className="grid-wrap">
+        <div className="grid-wrap" ref={gridWrapRef}>
           {view === "3d" ? (
             <Scene3D
               nodes={nodes}
@@ -432,6 +495,7 @@ function App() {
               highlightActive={highlightActive}
               onPodSelect={toggleWorkload}
               onPodHover={setHoveredWorkload}
+              captureRef={captureRef}
             />
           ) : (
             <TreemapGrid
@@ -705,7 +769,7 @@ function Sidebar({
 
 function Header({
   metric, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
-  onMenu, onRefresh, refreshing, workload, onClearWorkload,
+  onMenu, onRefresh, refreshing, workload, onClearWorkload, onExport, canExport,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
@@ -762,6 +826,7 @@ function Header({
         </div>
         <QueryBar query={query} setQuery={setQuery} match={match}
           hintOpen={hintOpen} setHintOpen={setHintOpen} />
+        <ExportMenu is3d={is3d} disabled={!canExport} onExport={onExport} />
         <button className={`icon-btn ${refreshing ? "spinning" : ""}`} onClick={onRefresh} title="Refresh">
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
@@ -770,6 +835,59 @@ function Header({
         </button>
       </div>
     </header>
+  );
+}
+
+const EXPORTS = [
+  { id: "png", label: "PNG image", hint: "2× resolution" },
+  { id: "svg", label: "SVG image", hint: "vector, 2D only", only2d: true },
+  { id: "json", label: "JSON report", hint: "nodes, pods, containers" },
+  { id: "csv", label: "CSV report", hint: "one row per pod" },
+];
+
+// Download menu next to Refresh. Images capture the current view; reports
+// are the same in both views.
+function ExportMenu({ is3d, disabled, onExport }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = e => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="export-menu" ref={ref}>
+      <button className={`icon-btn ${open ? "icon-btn-on" : ""}`} disabled={disabled}
+        onClick={() => setOpen(o => !o)} title="Export" aria-haspopup="menu" aria-expanded={open}>
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+          <path d="M8 2.5 V10 M4.5 6.5 L8 10 L11.5 6.5 M3 13.5 H13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="query-pop export-pop" role="menu">
+          <div className="query-hint-title">Export {is3d ? "3D view" : "2D map"}</div>
+          {EXPORTS.map(x => {
+            const off = x.only2d && is3d;
+            return (
+              <button key={x.id} role="menuitem" className="export-item" disabled={off}
+                title={off ? "The 3D view is WebGL; switch to 2D for vector SVG" : undefined}
+                onClick={() => { setOpen(false); onExport(x.id); }}>
+                <span>{x.label}</span>
+                <span className="export-hint">{off ? "2D only" : x.hint}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 

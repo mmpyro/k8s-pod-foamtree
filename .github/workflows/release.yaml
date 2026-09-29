@@ -25,6 +25,42 @@ jobs:
         with:
           python-version: '3.10'
 
+      # Fails fast, before tests and build, when pyproject.toml's version is not
+      # greater than the newest release on PyPI — PyPI refuses to re-upload a
+      # version, so an unbumped merge would only fail at the very last step.
+      - name: Validate version bump
+        id: version
+        run: |
+          python -m pip install --quiet packaging
+          python - <<'EOF'
+          import json, os, re, sys, urllib.error, urllib.request
+          from packaging.version import Version
+
+          text = open("pyproject.toml", encoding="utf-8").read()
+          project = text.split("[project]", 1)[1].split("\n[", 1)[0]
+          name = re.search(r'^name\s*=\s*"([^"]+)"', project, re.M).group(1)
+          local = Version(re.search(r'^version\s*=\s*"([^"]+)"', project, re.M).group(1))
+
+          try:
+              with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/json", timeout=30) as r:
+                  releases = json.load(r)["releases"]
+              published = max((Version(v) for v in releases), default=None)
+          except urllib.error.HTTPError as e:
+              if e.code != 404:
+                  raise
+              published = None  # never published yet
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"name={name}\nversion={local}\n")
+
+          if published is not None and local <= published:
+              print(f"::error file=pyproject.toml,title=Version not bumped::"
+                    f"{name} {local} is not greater than {published}, the latest on PyPI. "
+                    f"Bump [project].version in pyproject.toml.")
+              sys.exit(1)
+          print(f"{name}: {published or 'unpublished'} -> {local}")
+          EOF
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -68,3 +104,27 @@ jobs:
         run: |
           uv pip install --system twine
           twine upload dist/*
+
+      - name: Release summary
+        if: github.ref_name == 'main' && success()
+        env:
+          NAME: ${{ steps.version.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## 📦 Published \`${NAME} ${VERSION}\` to PyPI
+
+          Package page: https://pypi.org/project/${NAME}/${VERSION}/
+
+          Install this exact version:
+
+          \`\`\`bash
+          pip install ${NAME}==${VERSION}
+          \`\`\`
+
+          or with uv:
+
+          \`\`\`bash
+          uv pip install ${NAME}==${VERSION}
+          \`\`\`
+          EOF
