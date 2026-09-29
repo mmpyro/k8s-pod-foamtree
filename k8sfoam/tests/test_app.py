@@ -107,3 +107,40 @@ def test_should_return_contexts_when_get_contexts(k8s_client, test_client):
     assert json[0]['active'] is True
     assert json[1]['context'] == 'minikube-test'
     assert json[1]['active'] is False
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_should_serve_a_vendor_prefixed_extended_resource(k8s_client, test_client):
+    # Given
+    k8s_client_instance = MagicMock()
+    k8s_client_instance.get_node_resources.return_value = [
+        NodeResources('gpu', 2000, float(bitmath.GiB(1).kB), extended={'nvidia.com/gpu': 4})]
+    k8s_client_instance.get_pod_resources.return_value = [PodResources('train', 'gpu', 150, float(bitmath.MiB(150).kB),
+     [ContainerResources('train', 150, float(bitmath.MiB(150).kB), extended={'nvidia.com/gpu': 1})], [],
+     extended={'nvidia.com/gpu': 1})]
+    k8s_client.return_value = k8s_client_instance
+
+    # When
+    response = test_client.get('/resources/nvidia.com/gpu')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['groups'][0]['weight'] == 4
+    assert response.json['groups'][0]['groups'][0]['weight'] == 1
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_should_reject_an_extended_resource_no_node_allocates(k8s_client, test_client):
+    # Given
+    k8s_client_instance = MagicMock()
+    k8s_client_instance.get_node_resources.return_value = [
+        NodeResources('minikube', 2000, float(bitmath.GiB(1).kB), extended={'hugepages-2Mi': 0})]
+    k8s_client_instance.get_pod_resources.return_value = []
+    k8s_client.return_value = k8s_client_instance
+
+    # When
+    response = test_client.get('/resources/hugepages-2Mi')
+
+    # Then
+    assert response.status_code == 400
+    assert b'[cpu, memory]' in response.data

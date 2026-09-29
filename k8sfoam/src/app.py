@@ -21,18 +21,20 @@ def create_app() -> Optional[Flask]:
         def healthcheck():
             return jsonify({'status': 'ok'})
 
-        @app.route('/resources/<resource_type>', methods=['GET'])
+        # path: extended resource names carry a vendor prefix (nvidia.com/gpu).
+        @app.route('/resources/<path:resource_type>', methods=['GET'])
         def get_k8s_resources(resource_type: str):
             try:
                 context = request.args.get('context')
                 k8s_client = K8sClient(context)
                 mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
-                if resource_type.lower() == 'memory':
-                    return jsonify(mapper.transform_memory_resources_to_foamtree())
-                elif resource_type.lower() == 'cpu':
-                    return jsonify(mapper.transform_cpu_resources_to_foamtree())
-                else:
-                    return f'Resource type: {resource_type} is not supported. Supported types are: [cpu, memory]', 400
+                # cpu/memory keep their case-insensitive match; extended names are case-sensitive in Kubernetes.
+                resource = resource_type.lower() if resource_type.lower() in ('cpu', 'memory') else resource_type
+                supported = mapper.available_resources()
+                if resource not in supported:
+                    return (f'Resource type: {resource_type} is not supported. '
+                            f'Supported types are: [{", ".join(supported)}]'), 400
+                return jsonify(mapper.transform(resource))
             except Exception as ex:
                 return str(ex), 500
 

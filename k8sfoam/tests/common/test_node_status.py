@@ -1,4 +1,6 @@
-from k8sfoam.src.common.node_status import node_warnings
+import pytest
+from k8sfoam.src.common.dtos import NodeResources
+from k8sfoam.src.common.node_status import node_warnings, stranded_devices
 
 
 def taint(key: str, effect: str = 'NoSchedule') -> dict:
@@ -95,3 +97,25 @@ def test_every_reason_is_reported_worst_first():
 
     # Then
     assert warnings == ['cordoned', 'not-ready', 'memory-pressure', 'disk-pressure', 'tainted']
+
+
+@pytest.mark.parametrize("used, expected", [
+    ({'cpu': 7200, 'nvidia.com/gpu': 1}, True),    # exactly 90% CPU, GPUs free
+    ({'cpu': 7199, 'nvidia.com/gpu': 1}, False),   # just under the edge
+    ({'memory': 900, 'nvidia.com/gpu': 3}, True),  # memory full, 1 GPU free
+    ({'cpu': 8000, 'nvidia.com/gpu': 4}, False),   # every GPU in use: nothing stranded
+])
+def test_stranded_devices(used, expected):
+    # Given
+    node = NodeResources('gpu', 8000, 1000, extended={'nvidia.com/gpu': 4, 'ephemeral-storage': 5000})
+
+    # When / Then
+    assert stranded_devices(node, used) is expected
+
+
+def test_node_without_devices_is_never_stranded():
+    # Given — ephemeral storage is not a device
+    node = NodeResources('plain', 8000, 1000, extended={'ephemeral-storage': 5000})
+
+    # When / Then
+    assert stranded_devices(node, {'cpu': 8000}) is False

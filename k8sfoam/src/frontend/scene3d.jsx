@@ -19,6 +19,26 @@ const { workloadKey } = window.k8sWorkload;
 const { findingInfo } = window.k8sPodAudit;
 const { worstSeverity } = window.k8sNodeStatus;
 const { qosHue } = window.k8sQos;
+const { resourceMeta, metricValue, nodeCap, nodeUsed, fmtValue, unitOf } = window.k8sResources;
+
+const isExtended = metric => !!metric && metric !== "cpu" && metric !== "mem";
+
+// Cubes always plot CPU × Memory, so an extended resource is shown as a scope:
+// pods requesting it stay lit and everything else dims, through the same
+// filter path the query uses. A live query still narrows the lit set.
+function extendedScope(match, nodes, metric) {
+  if (!isExtended(metric)) return match;
+  const queryActive = !!(match && match.active);
+  const pods = new Set();
+  const dimNodes = new Set(queryActive ? match.dimNodes : []);
+  for (const n of nodes) {
+    if (nodeCap(n, metric) <= 0) dimNodes.add(n.name);
+    for (const p of n.pods) {
+      if (metricValue(p, metric) > 0 && (!queryActive || match.pods.has(p))) pods.add(p);
+    }
+  }
+  return { ...match, active: true, pods, dimNodes };
+}
 
 const PLATE = 160;
 const PLATE_GAP = 28;
@@ -298,10 +318,10 @@ function patternTexture(draw, repeat) {
 
 // The CSS plate-label: dark chip, hue border and dot, dim lowercase name,
 // utilisation in its traffic-light colour, a severity mark when unhealthy.
-function labelSprite({ name, util, hue, sev }, height) {
+function labelSprite({ name, util, hue, sev, text }, height) {
   const px = 44, pad = 18, measure = document.createElement("canvas").getContext("2d");
   const font = weight => `${weight} ${px}px ${token("--font-mono", "ui-monospace, monospace")}`;
-  const utilText = `${Math.round(util * 100)}%`;
+  const utilText = text || `${Math.round(util * 100)}%`;
   measure.font = font(400);
   const nameW = measure.measureText(name).width;
   measure.font = font(600);
@@ -357,9 +377,11 @@ function labelSprite({ name, util, hue, sev }, height) {
 }
 
 function Scene3D({
-  nodes, match, zoom, hueOf, colorBy, memUnit, fmtMem, onFocus,
+  nodes, match, zoom, hueOf, colorBy, memUnit, fmtMem, metric, onFocus,
   highlight, highlightActive, onPodSelect, onPodHover, captureRef,
 }) {
+  const scope = React.useMemo(() => extendedScope(match, nodes, metric), [match, nodes, metric]);
+  const ext = isExtended(metric) ? metric : null;
   const hostRef = React.useRef(null);
   const world = React.useRef(null);
   const [tip, setTip] = React.useState(null);
@@ -569,9 +591,17 @@ function Scene3D({
     root.add(plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos);
 
     const labels = next.plates.map(p => {
-      const util = Math.max(p.node.cpuUsed / (p.node.cpuCapacity || 1), p.node.memUsed / (p.node.memCapacity || 1));
+      // With an extended resource selected, a plate that has it reports its own
+      // used/allocatable (e.g. 3/4 GPU) instead of the CPU/Memory peak.
+      const cap = ext ? nodeCap(p.node, ext) : 0;
+      const util = cap > 0
+        ? nodeUsed(p.node, ext) / cap
+        : Math.max(p.node.cpuUsed / (p.node.cpuCapacity || 1), p.node.memUsed / (p.node.memCapacity || 1));
+      const text = cap > 0
+        ? `${fmtValue(nodeUsed(p.node, ext), ext, memUnit)}/${fmtValue(cap, ext, memUnit, true)} ${unitOf(ext, memUnit)}`
+        : null;
       const s = labelSprite({
-        name: p.node.name.replace(/\.ec2\.internal$/, "").toLowerCase(), util,
+        name: p.node.name.replace(/\.ec2\.internal$/, "").toLowerCase(), util, text,
         hue: hueOf(p.idx), sev: worstSeverity(p.node.warnings),
       }, 11);
       s.position.set(p.x, 6, p.z - PLATE / 2 - 10);
@@ -605,17 +635,18 @@ function Scene3D({
     }
     w.recolor && w.recolor();
     w.render();
-  }, [nodes, hueKey]);
+    // metric/memUnit feed the plate labels, which are baked into sprites here.
+  }, [nodes, hueKey, ext, memUnit]);
 
   // Colour-only updates (query, workload highlight) never touch geometry.
   React.useEffect(() => {
     const w = world.current;
     if (!w) return;
-    const queryActive = !!(match && match.active);
+    const queryActive = !!(scope && scope.active);
     const look = {
       highlight, queryActive, pinned: highlightActive,
-      matched: c => match.pods.has(c.pod),
-      plateDim: n => queryActive && match.dimNodes.has(n.name),
+      matched: c => scope.pods.has(c.pod),
+      plateDim: n => queryActive && scope.dimNodes.has(n.name),
     };
     const sevColor = {
       danger: hex(token("--danger", "#ef4444")), warn: hex(token("--warn", "#f59e0b")), info: hex(token("--info", "#60a5fa")),
@@ -676,7 +707,7 @@ function Scene3D({
     };
     w.recolor();
     w.render();
-  }, [nodes, hueKey, colorBy, match, highlight, highlightActive]);
+  }, [nodes, hueKey, colorBy, scope, highlight, highlightActive]);
 
   React.useEffect(() => {
     const w = world.current;
@@ -696,7 +727,7 @@ function Scene3D({
   return (
     <div className="scene-3d">
       <div className="scene-gl" ref={hostRef} />
-      <SceneLegend colorBy={colorBy} />
+      <SceneLegend colorBy={colorBy} ext={ext} />
       <SceneTooltip tip={tip} memUnit={memUnit} fmtMem={fmtMem} />
     </div>
   );
@@ -704,7 +735,7 @@ function Scene3D({
 
 // Annotated reference cube. Abstract swatches are not enough here — without the
 // brackets there is no way to tell which axis carries which resource.
-function SceneLegend({ colorBy }) {
+function SceneLegend({ colorBy, ext }) {
   return (
     <div className="scene-legend">
       <svg viewBox="0 0 168 128" width="150" height="114" fill="none">
@@ -733,6 +764,7 @@ function SceneLegend({ colorBy }) {
       <div className="legend-lines">
         <div>Width × depth → CPU request</div>
         <div>Height → Memory request</div>
+        {ext && <div>Lit cubes → request {resourceMeta(ext).label}</div>}
         <div className="legend-foot">One cube per pod · color = {colorBy === "qos" ? "QoS class" : "node"} · drag to orbit</div>
       </div>
     </div>
@@ -750,6 +782,11 @@ function SceneTooltip({ tip, memUnit, fmtMem }) {
         <div className="cube-tip-name">{n.name}</div>
         <div className="cube-tip-row"><span>{(n.cpuUsed / 1000).toFixed(1)} / {(n.cpuCapacity / 1000).toFixed(0)}</span> cores</div>
         <div className="cube-tip-row"><span>{fmtMem(n.memUsed, memUnit)} / {fmtMem(n.memCapacity, memUnit, true)}</span> {memUnit}</div>
+        {Object.entries(n.extCap || {}).filter(([, cap]) => cap > 0).map(([name, cap]) => (
+          <div key={name} className="cube-tip-row">
+            <span>{fmtValue(nodeUsed(n, name), name, memUnit)} / {fmtValue(cap, name, memUnit, true)}</span> {unitOf(name, memUnit)}
+          </div>
+        ))}
         <div className="cube-tip-foot">{n.pods.length} pods · click for details</div>
       </div>
     );
@@ -764,6 +801,11 @@ function SceneTooltip({ tip, memUnit, fmtMem }) {
       <div className="cube-tip-row">
         <span>{fmtMem(p.mem, memUnit)}</span> {memUnit}
       </div>
+      {Object.entries(p.ext || {}).map(([name, v]) => (
+        <div key={name} className="cube-tip-row">
+          <span>{fmtValue(v, name, memUnit)}</span> {unitOf(name, memUnit)}
+        </div>
+      ))}
       <div className="cube-tip-foot">
         {p.containers.length} container{p.containers.length === 1 ? "" : "s"}
         {p.qos && ` · ${p.qos}`}
