@@ -1,52 +1,20 @@
-import bitmath  # type: ignore
+import math
+from kubernetes.utils import parse_quantity  # type: ignore
 from k8sfoam.src.common.dtos import PodResources, ContainerResources, NodeResources
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS, CORDON_TAINT
-from typing import Optional
 
 
 class ResourcesExtractor():
     def __requests_contains_key(self, requests: dict, key: str) -> bool:
         return requests is not None and key in requests
 
-    def __convert_to_int(self, memory: str, suffix: str) -> int:
-        return int(memory.replace(suffix, ''))
-
-    def __convert_cpu(self, cpu: str) -> Optional[int]:
-        if 'm' in cpu:
-            return int(cpu.replace('m', ''))
-        else:
-            return int(float(cpu) * 1000)
+    def __convert_cpu(self, cpu: str) -> int:
+        # Millicores, rounded up like the scheduler's MilliValue().
+        return math.ceil(parse_quantity(cpu) * 1000)
 
     def __convert_memory(self, memory: str) -> float:
-        value = 0
-        if 'Ki' in memory:
-            value = bitmath.KiB(self.__convert_to_int(memory, 'Ki')).kB
-        elif 'Mi' in memory:
-            value = bitmath.MiB(self.__convert_to_int(memory, 'Mi')).kB
-        elif 'Gi' in memory:
-            value = bitmath.GiB(self.__convert_to_int(memory, 'Gi')).kB
-        elif 'Ti' in memory:
-            value = bitmath.TiB(self.__convert_to_int(memory, 'Ti')).kB
-        elif 'Pi' in memory:
-            value = bitmath.PiB(self.__convert_to_int(memory, 'Pi')).kB
-        elif 'Ei' in memory:
-            value = bitmath.EiB(self.__convert_to_int(memory, 'Ei')).kB
-        elif 'K' in memory:
-            value = bitmath.kB(self.__convert_to_int(memory, 'K')).kB
-        elif 'M' in memory:
-            value = bitmath.MB(self.__convert_to_int(memory, 'M')).kB
-        elif 'G' in memory:
-            value = bitmath.GB(self.__convert_to_int(memory, 'G')).kB
-        elif 'T' in memory:
-            value = bitmath.TB(self.__convert_to_int(memory, 'T')).kB
-        elif 'P' in memory:
-            value = bitmath.PB(self.__convert_to_int(memory, 'P')).kB
-        elif 'E' in memory:
-            value = bitmath.EB(self.__convert_to_int(memory, 'E')).kB
-        else:
-            # Assume bytes if no suffix
-            value = bitmath.Byte(float(memory)).kB
-        return float(value)
+        # Decimal kB (1000 bytes), the unit the frontend expects.
+        return float(parse_quantity(memory) / 1000)
 
     def __extract_container_resources(self, container) -> ContainerResources:
         requests = container.resources.requests
@@ -69,17 +37,29 @@ class ResourcesExtractor():
 
         # --- Regular containers (run concurrently → sum) ---
         containers = [self.__extract_container_resources(c) for c in pod.spec.containers]
-        sum_regular_cpu = sum(c.cpu for c in containers)
-        sum_regular_memory = sum(c.memory for c in containers)
 
         # --- Init containers (run sequentially → max) ---
-        init_containers = [self.__extract_container_resources(c) for c in (pod.spec.init_containers or [])]
-        max_init_cpu = max((c.cpu for c in init_containers), default=0)
-        max_init_memory = max((c.memory for c in init_containers), default=0)
+        # Native sidecars (restartPolicy: Always) start in order but keep running,
+        # so they join the regular containers and add to every init container
+        # started after them. Same rule as the scheduler's PodRequests.
+        init_containers = []
+        sidecar_cpu = sidecar_memory = max_init_cpu = max_init_memory = 0
+        for spec in pod.spec.init_containers or []:
+            c = self.__extract_container_resources(spec)
+            if spec.restart_policy == 'Always':
+                containers.append(c)
+                sidecar_cpu += c.cpu
+                sidecar_memory += c.memory
+                max_init_cpu = max(max_init_cpu, sidecar_cpu)
+                max_init_memory = max(max_init_memory, sidecar_memory)
+            else:
+                init_containers.append(c)
+                max_init_cpu = max(max_init_cpu, sidecar_cpu + c.cpu)
+                max_init_memory = max(max_init_memory, sidecar_memory + c.memory)
 
         # --- Effective request (what the scheduler actually reserves) ---
-        effective_cpu = max(sum_regular_cpu, max_init_cpu)
-        effective_memory = max(sum_regular_memory, max_init_memory)
+        effective_cpu = max(sum(c.cpu for c in containers), max_init_cpu)
+        effective_memory = max(sum(c.memory for c in containers), max_init_memory)
 
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
                             namespace, labels, qos_class)

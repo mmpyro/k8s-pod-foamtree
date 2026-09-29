@@ -1,3 +1,4 @@
+from collections import defaultdict
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.common.node_status import node_warnings
 from k8sfoam.src.common.pod_audit import pod_findings
@@ -7,7 +8,10 @@ from typing import Iterator
 class FoamTreeMapper():
     def __init__(self, node_resources: Iterator[NodeResources], pod_resources: list[PodResources]):
         self.__nodes = node_resources
-        self.__pods = pod_resources
+        # Grouped once: scanning every pod for every node was O(nodes x pods).
+        self.__pods_by_node: dict = defaultdict(list)
+        for pod in pod_resources:
+            self.__pods_by_node[pod.node_name].append(pod)
 
     def __build_pod_groups(self, pod, resource_attr: str) -> list:
         """Build FoamTree child groups for a single pod."""
@@ -62,7 +66,7 @@ class FoamTreeMapper():
         for node in self.__nodes:
             foam_pods = []
             all_pods_cpu = 0
-            for pod in filter(lambda p: p.node_name == node.name, self.__pods):
+            for pod in self.__pods_by_node.get(node.name, []):
                 foam_pods.append({'label': pod.name, 'weight': pod.cpu, 'groups': self.__build_pod_groups(pod, 'cpu'),
                                   **self.__pod_metadata(pod, node)})
                 all_pods_cpu += pod.cpu if pod.cpu else 0
@@ -76,7 +80,7 @@ class FoamTreeMapper():
         for node in self.__nodes:
             foam_pods = []
             all_pods_memory = 0
-            for pod in filter(lambda p: p.node_name == node.name, self.__pods):
+            for pod in self.__pods_by_node.get(node.name, []):
                 foam_pods.append({'label': pod.name, 'weight': pod.memory, 'groups': self.__build_pod_groups(pod, 'memory'),
                                   **self.__pod_metadata(pod, node)})
                 all_pods_memory += pod.memory if pod.memory else 0

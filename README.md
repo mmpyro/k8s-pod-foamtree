@@ -11,9 +11,9 @@ It visualizes **resource requests** — what the scheduler reserves — not live
 ## How it works
 
 1. Lists nodes (`status.capacity`) and all non-terminated pods. Pods in `Succeeded`/`Failed` are excluded — they still report requests via the API but no longer reserve anything.
-2. Normalizes CPU to millicores and memory with `bitmath`. A pod's **effective request** is `max(sum(regular containers), max(init containers))` — init containers run sequentially, so they are maxed, not summed. This is what the scheduler actually reserves.
+2. Parses quantities with the Kubernetes client's `parse_quantity` — CPU to millicores, memory to decimal kB. A pod's **effective request** is `max(sum(regular containers), max(init containers))` — init containers run sequentially, so they are maxed, not summed. Native sidecars (init containers with `restartPolicy: Always`) keep running, so they count as regular containers and add to every init container started after them. This is what the scheduler actually reserves.
 3. Nests the result node → pod → container and adds a synthetic `empty` child per node for free capacity, then serves it as JSON.
-4. A React single-page app (no build step — React and Babel come from a CDN) fetches CPU and memory in parallel, merges them, and renders. The view auto-refreshes every 60 seconds by default.
+4. A React single-page app fetches CPU and memory in parallel, merges them, and renders. esbuild compiles its `.jsx` files and bundles React into one `bundle.js`, which the Python package ships, so no script is loaded from a CDN. The view auto-refreshes every 60 seconds by default.
 
 ## 2D map
 
@@ -33,7 +33,7 @@ An isometric view: one plate per node, one cube per pod. A cube encodes both res
 
 Both dimensions are square-root scaled, so a 10× larger pod is not 10× wider. Because a cube already shows both resources, the CPU/Memory picker is disabled in 3D and a **Zoom** slider takes its place.
 
-Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header. It is client-side state — no flag, no restart. The scene is pure CSS 3D, not WebGL, so it needs no GPU support.
+Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header. It is client-side state — no flag, no restart. The scene is drawn with WebGL (three.js), so it stays smooth with thousands of pods: drag to orbit, scroll or use the slider to zoom, hover a cube for its pod, click a plate for its node. Where WebGL is turned off the 3D view says so, and the 2D map shows the same data.
 
 ## Controls
 
@@ -59,6 +59,8 @@ Two rules are worth knowing:
 
 - **`PreferNoSchedule` never marks a node.** It is a soft hint the scheduler is free to ignore, so it is listed in the focus overlay but does not stripe.
 - **The cordon taint is folded into `cordoned`.** Kubernetes adds `node.kubernetes.io/unschedulable:NoSchedule` itself when you cordon; reporting it as a taint too would mark the same node twice for one fact, so it is dropped from the taint list.
+
+The sidebar's **Node health** panel counts nodes per warning. Click a row to highlight those nodes and their pods in 2D and 3D; every other node dims. This sets the query to `health:<warning>`; click the row again to clear it.
 
 Click a node to open the focus overlay: a **Scheduling** section spells out every reason and lists each taint as `key=value` with its effect. Worst reason wins the header pill — a cordoned node under memory pressure reads as `SCHEDULING-DISABLED`, because that is what actually keeps pods off it.
 
@@ -114,6 +116,7 @@ An empty query matches everything. A query that contains a malformed token is **
 | `qos:<class>` | [QoS class](#qos--eviction-risk): `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
 | `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
 | `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `monolith`, `ratio-asymmetry` |
+| `health:<warning>` | nodes carrying a health warning, and every pod on them | `cordoned`, `not-ready`, `memory-pressure`, `disk-pressure`, `pid-pressure`, `tainted` |
 | `key=value` | pod label equals value | key and value are **case-sensitive** (Kubernetes labels are) |
 | `key!=value` | pod label differs from value | a **missing** label counts as unequal, so it matches too |
 | `text` | pod name contains `text` | case-insensitive substring |
@@ -175,7 +178,7 @@ Without the quotes, `web:1` is read as an unknown filter prefix and reported as 
 
 - **`!=` wins over `=`.** `env!=prod` is one inequality, never `env!` equals `prod`.
 - **A filter prefix must be a bare word before `:`.** `app=ns:x` is a label selector for key `app`, value `ns:x` — not a namespace filter.
-- **Only `node:` can dim a node.** Node plates and boxes stay in the layout either way; pod-level terms dim pods, never their node.
+- **Only `node:` and `health:` can dim a node.** Node plates and boxes stay in the layout either way; pod-level terms dim pods, never their node.
 - **A missing label matches `!=`.** `env!=prod` highlights pods with `env: staging` *and* pods with no `env` label at all — the Kubernetes selector semantics.
 - **Every problem is reported at once.** The parser never stops on the first bad token, so a three-error query lists three errors.
 
@@ -212,6 +215,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 ### Install from source
+Building the UI from source also needs [Node.js](https://nodejs.org/) 18 or newer; `make run` and `make build` build it with `make web`. The PyPI package already contains the built UI.
 ```bash
 # Install dependencies and the package in development mode
 make restore_dev
@@ -262,6 +266,13 @@ make unit_tests
 make static_code_analysis
 make check_types
 make bandit
+```
+
+### Frontend
+The UI sources are the `.jsx` files in `k8sfoam/src/frontend`; `main.js` lists them in load order. esbuild compiles them into `bundle.js`, which is gitignored.
+```bash
+make web        # npm ci + one build
+npm run watch   # rebuild on every save while the server runs
 ```
 
 ### CI/CD targets

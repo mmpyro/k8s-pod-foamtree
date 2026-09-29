@@ -2,7 +2,7 @@
 
 const { useState, useEffect, useMemo, useRef } = React;
 const { NodeCard } = window.k8sTreemap;
-const { Scene3D } = window.k8sCube3D;
+const { Scene3D } = window.k8sScene3D;
 const { workloadKey } = window.k8sWorkload;
 const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
@@ -42,7 +42,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "#7c5cff"
 }/*EDITMODE-END*/;
 
-// Backend memory weights are decimal kB (bitmath .kB, 1 kB = 1000 bytes),
+// Backend memory weights are decimal kB (1 kB = 1000 bytes),
 // so MiB = kB * 1000 / 1024^2 — not a plain /1024, which would treat kB as KiB.
 function kbToMib(kb) {
   return (kb * 1000) / (1024 * 1024);
@@ -262,9 +262,9 @@ function App() {
     for (const n of nodes) {
       total += n.pods.length;
       if (!active) continue;
-      if (!window.k8sQuery.nodeMatches(n.name, parsedQuery)) dimNodes.add(n.name);
+      if (!window.k8sQuery.nodeMatches(n, parsedQuery)) dimNodes.add(n.name);
       for (const p of n.pods) {
-        if (window.k8sQuery.podMatches(p, parsedQuery, n.name)) pods.add(p);
+        if (window.k8sQuery.podMatches(p, parsedQuery, n)) pods.add(p);
       }
     }
     return { active, pods, dimNodes, count: active ? pods.size : total, total, errors: parsedQuery.errors };
@@ -619,18 +619,24 @@ function Sidebar({
       </div>
 
       {/* Only rendered when something is actually wrong, so a healthy cluster
-          looks exactly as it did before this feature existed. */}
+          looks exactly as it did before this feature existed. A row toggles its
+          health: query, which lights the affected nodes and dims the rest. */}
       {health.length > 0 && (
         <div className="sidebar-section">
           <div className="section-label">Node health</div>
           <div className="health-rows">
-            {health.map(h => (
-              <div key={h.slug} className="health-row">
-                <span className={`health-swatch sev-${h.sev}`} />
-                <span className="health-name">{h.label}</span>
-                <span className="health-count">{h.count}</span>
-              </div>
-            ))}
+            {health.map(h => {
+              const token = `health:${h.slug}`;
+              const on = query.trim() === token;
+              return (
+                <button key={h.slug} className={`health-row audit-row ${on ? "audit-on" : ""}`}
+                  onClick={() => setQuery(on ? "" : token)}>
+                  <span className={`health-swatch sev-${h.sev}`} />
+                  <span className="health-name">{h.label}</span>
+                  <span className="health-count">{h.count}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
