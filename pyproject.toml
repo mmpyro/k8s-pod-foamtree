@@ -42,6 +42,10 @@ Homepage = "https://github.com/mmpyro/k8s-pod-foamtree"
 [project.scripts]
 k8sfoams = "k8sfoam.src.app:main"
 
+[tool.hatch.build]
+# Built by `make web` and gitignored, which hatch would otherwise leave out.
+artifacts = ["k8sfoam/src/frontend/bundle.js"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["k8sfoam"]
 only-include = ["k8sfoam"]

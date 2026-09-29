@@ -57,7 +57,7 @@ function WarnIcon({ size = 11 }) {
   );
 }
 
-// The badge shared by the 2D header and the billboarded 3D plate label.
+// The badge on the 2D node header; the 3D plate label draws its own mark.
 function NodeWarnBadge({ warnings, size }) {
   const sev = worstSeverity(warnings);
   if (!sev) return null;
