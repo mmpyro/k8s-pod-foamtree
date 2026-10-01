@@ -39,6 +39,7 @@ Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header
 
 - **Memory unit**: MiB, GiB (default), or TiB.
 - **Color by**: *Node* (default) gives each node its own hue; *QoS* colors each pod by its QoS class. See [QoS & eviction risk](#qos--eviction-risk).
+- **Group by**: *None* (default), *Zone*, *Region*, *Pool*, *Type* (instance type) or *Capacity* (spot / on-demand). See [Topology](#topology).
 - **Context**: the sidebar lists every context from your kubeconfig, active one first, tagged by provider. **Switching only changes the context inside the k8sfoams web server — your ~/.kube/config file is never modified.**
 - **Refresh**: slider from 5 to 600 seconds, plus a *Refresh now* button.
 - **Filter**: the header query bar highlights matching pods and dims the rest — nothing is removed from the view. See [Filtering](#filtering) for the full grammar.
@@ -63,6 +64,22 @@ Two rules are worth knowing:
 The sidebar's **Node health** panel counts nodes per warning. Click a row to highlight those nodes and their pods in 2D and 3D; every other node dims. This sets the query to `health:<warning>`; click the row again to clear it.
 
 Click a node to open the focus overlay: a **Scheduling** section spells out every reason and lists each taint as `key=value` with its effect. Worst reason wins the header pill — a cordoned node under memory pressure reads as `SCHEDULING-DISABLED`, because that is what actually keeps pods off it.
+
+## Topology
+
+Set **Group by** in the sidebar to box nodes by where they run. In 2D each group is a dashed box sized by its share of cluster capacity, with its nodes squarified inside it. In 3D each group is a floor under its plates. Either way the box header shows the group's node count and utilisation. Use it to spot zones that are running hot, pools that are nearly empty, or a workload sitting entirely on spot capacity.
+
+| Mode | Read from (first label present wins) |
+| --- | --- |
+| Zone | `topology.kubernetes.io/zone`, `failure-domain.beta.kubernetes.io/zone` |
+| Region | `topology.kubernetes.io/region`, `failure-domain.beta.kubernetes.io/region` |
+| Pool | `karpenter.sh/nodepool`, `eks.amazonaws.com/nodegroup`, `cloud.google.com/gke-nodepool`, `kubernetes.azure.com/agentpool`, `agentpool` |
+| Type | `node.kubernetes.io/instance-type`, `beta.kubernetes.io/instance-type` |
+| Capacity | `karpenter.sh/capacity-type`, `eks.amazonaws.com/capacityType`, `cloud.google.com/gke-spot=true`, `kubernetes.azure.com/scalesetpriority=spot` — folded to `spot` / `on-demand` |
+
+Nodes without the label share one last group, e.g. *no zone label*, so a local minikube or kind cluster shows a single box. GKE and AKS only label spot nodes, so their unlabelled nodes land in *unknown capacity* instead of being guessed on-demand.
+
+While grouping is on, the sidebar's **Topology** panel lists each group with its CPU %, Memory % and node count. Click a row to highlight that group in 2D and 3D; every other node dims. This sets the query to `zone:<name>` (or `region:`, `pool:`, `type:`, `capacity:`); click the row again to clear it.
 
 ## Audit & hygiene
 
@@ -117,6 +134,8 @@ An empty query matches everything. A query that contains a malformed token is **
 | `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
 | `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `monolith`, `ratio-asymmetry` |
 | `health:<warning>` | nodes carrying a health warning, and every pod on them | `cordoned`, `not-ready`, `memory-pressure`, `disk-pressure`, `pid-pressure`, `tainted` |
+| `zone:<glob>` `region:<glob>` `pool:<glob>` `type:<glob>` | nodes with that [topology](#topology) label, and every pod on them | globs like `node:` (`zone:us-east-1*`); a node without the label never matches |
+| `capacity:<type>` | spot or on-demand nodes, and every pod on them | `spot`, `on-demand`; case-insensitive |
 | `key=value` | pod label equals value | key and value are **case-sensitive** (Kubernetes labels are) |
 | `key!=value` | pod label differs from value | a **missing** label counts as unequal, so it matches too |
 | `text` | pod name contains `text` | case-insensitive substring |
@@ -178,7 +197,7 @@ Without the quotes, `web:1` is read as an unknown filter prefix and reported as 
 
 - **`!=` wins over `=`.** `env!=prod` is one inequality, never `env!` equals `prod`.
 - **A filter prefix must be a bare word before `:`.** `app=ns:x` is a label selector for key `app`, value `ns:x` — not a namespace filter.
-- **Only `node:` and `health:` can dim a node.** Node plates and boxes stay in the layout either way; pod-level terms dim pods, never their node.
+- **Only `node:`, `health:` and the topology tokens can dim a node.** Node plates and boxes stay in the layout either way; pod-level terms dim pods, never their node.
 - **A missing label matches `!=`.** `env!=prod` highlights pods with `env: staging` *and* pods with no `env` label at all — the Kubernetes selector semantics.
 - **Every problem is reported at once.** The parser never stops on the first bad token, so a three-error query lists three errors.
 
@@ -189,7 +208,8 @@ Without the quotes, `web:1` is read as an unknown filter prefix and reported as 
 | `ns:` | `ns: needs a value` |
 | `qos:Cheap` | `unknown QoS class — use Guaranteed, Burstable or BestEffort` |
 | `has:sidecars` | `unknown has: field — use init-containers` |
-| `zone:eu` | `unknown filter — use ns:, node:, qos:, has:` |
+| `capacity:reserved` | `unknown capacity type — use spot or on-demand` |
+| `rack:r1` | `unknown filter — use ns:, node:, qos:, has:, …` |
 | `=frontend` | `label selector needs a key` |
 | `app=` | `label selector needs a value` |
 | `""` | `empty quoted value` |
@@ -205,10 +225,10 @@ The download button in the header, next to *Refresh*, saves what you are looking
 | --- | --- | --- | --- |
 | **PNG image** | ✓ | ✓ | The current view at 2× resolution. |
 | **SVG image** | ✓ | — | The 2D map as real vectors (cards, pods, containers, labels). The 3D view is WebGL, so it has no SVG form. |
-| **JSON report** | ✓ | ✓ | Every node and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. |
-| **CSV report** | ✓ | ✓ | One row per pod: `context,node,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. |
+| **JSON report** | ✓ | ✓ | Every node (with its topology) and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. |
+| **CSV report** | ✓ | ✓ | One row per pod: `context,node,zone,region,node_pool,instance_type,capacity_type,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. |
 
-Images keep the current metric, colours, tweaks, query dimming and pinned workload, and carry a title band with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HHmm.<ext>`. Web fonts are not embedded, so exported images fall back to system fonts.
+Images keep the current metric, colours, grouping, tweaks, query dimming and pinned workload, and carry a title band with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HHmm.<ext>`. Web fonts are not embedded, so exported images fall back to system fonts.
 
 ## HTTP API
 

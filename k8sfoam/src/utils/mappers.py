@@ -1,6 +1,7 @@
 from collections import defaultdict
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.common.node_status import node_warnings
+from k8sfoam.src.common.node_topology import node_topology
 from k8sfoam.src.common.pod_audit import pod_findings
 from typing import Iterator
 
@@ -50,7 +51,7 @@ class FoamTreeMapper():
         """Health metadata added to every node group, consumed by the frontend markers.
 
         `warnings` is the render-ready verdict; `taints`/`conditions` are the raw
-        facts the focus overlay spells out.
+        facts the focus overlay spells out; `topology` drives the zone / pool grouping.
         """
         taints = list(node.taints or [])
         conditions = dict(node.conditions or {})
@@ -59,6 +60,7 @@ class FoamTreeMapper():
             'taints': taints,
             'conditions': conditions,
             'warnings': node_warnings(bool(node.unschedulable), taints, conditions),
+            'topology': node_topology(node.labels),
         }
 
     def transform_cpu_resources_to_foamtree(self) -> dict:

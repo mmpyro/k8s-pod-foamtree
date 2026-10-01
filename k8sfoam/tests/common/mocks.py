@@ -52,10 +52,12 @@ def create_condition(type: str, status: str) -> MagicMock:
 
 
 def create_node(name: str, cpu: str, memory: str, unschedulable=None, taints=None,
-                conditions=None) -> MagicMock:
+                conditions=None, labels=None) -> MagicMock:
     node = MagicMock()
     metadata = MagicMock()
     metadata.name = name
+    # None on the real API when the node has no labels, like a pod.
+    metadata.labels = labels
     node.metadata = metadata
     status = MagicMock()
     status.capacity = {'cpu': cpu, 'memory': memory}

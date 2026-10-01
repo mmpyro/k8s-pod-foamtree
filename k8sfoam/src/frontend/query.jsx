@@ -8,6 +8,8 @@
 //   has:init-containers    pod declares at least one init container
 //   audit:<finding>        pod breaks a best-practice rule (see AUDIT_FIELDS)
 //   health:<warning>       node carries a health warning (see HEALTH_FIELDS)
+//   zone:/region:/pool:/type:<glob>  node topology label (see TOPOLOGY_FIELDS)
+//   capacity:<type>        spot | on-demand
 //   key=value              label equality
 //   key!=value             label inequality (a missing label counts as unequal)
 //   <text>                 case-insensitive substring of the pod name
@@ -23,7 +25,12 @@ const AUDIT_FIELDS = ["missing-requests", "missing-limits", "monolith", "ratio-a
 // Node warning slugs, owned by nodestatus.jsx so the sidebar legend and the
 // grammar can't drift apart.
 const HEALTH_FIELDS = window.k8sNodeStatus.WARNING_ORDER;
-const FILTER_PREFIXES = ["ns", "node", "qos", "has", "audit", "health"];
+// Topology prefix → node.topology field. Globs, like node:, so zone:us-east-1*
+// selects a whole region's zones.
+const TOPOLOGY_FIELDS = { zone: "zone", region: "region", pool: "nodePool", type: "instanceType" };
+// Mirrors the values the backend normalises capacity types to.
+const CAPACITY_TYPES = ["spot", "on-demand"];
+const FILTER_PREFIXES = ["ns", "node", "qos", "has", "audit", "health", ...Object.keys(TOPOLOGY_FIELDS), "capacity"];
 
 // Shown by the query bar's hint popover — kept next to the grammar it documents.
 const TOKEN_HINTS = [
@@ -33,6 +40,8 @@ const TOKEN_HINTS = [
   { form: "has:init-containers", desc: "pods with init containers" },
   { form: "audit:missing-limits", desc: "pods breaking an audit rule" },
   { form: "health:not-ready", desc: "nodes with a health warning" },
+  { form: "zone:us-east-1a", desc: "nodes in a zone (also region:, pool:, type:)" },
+  { form: "capacity:spot", desc: "spot or on-demand nodes" },
   { form: "app=frontend", desc: "label equals" },
   { form: "env!=prod", desc: "label differs" },
   { form: "nginx", desc: "pod name contains" },
@@ -78,6 +87,16 @@ function parseFilter(prefix, value, raw) {
   if (!value) return { error: { token: raw, message: `${prefix}: needs a value` } };
   if (prefix === "ns") return { term: { kind: "ns", value: value.toLowerCase() } };
   if (prefix === "node") return { term: { kind: "node", value, regex: globToRegExp(value) } };
+  if (TOPOLOGY_FIELDS[prefix]) {
+    return { term: { kind: "topology", field: TOPOLOGY_FIELDS[prefix], value, regex: globToRegExp(value) } };
+  }
+  if (prefix === "capacity") {
+    const capacity = value.toLowerCase();
+    if (CAPACITY_TYPES.indexOf(capacity) === -1) {
+      return { error: { token: raw, message: `unknown capacity type — use ${CAPACITY_TYPES.join(" or ")}` } };
+    }
+    return { term: { kind: "topology", field: "capacityType", value: capacity, regex: globToRegExp(capacity) } };
+  }
   if (prefix === "qos") {
     const qos = value.toLowerCase();
     if (QOS_CLASSES.indexOf(qos) === -1) {
@@ -165,12 +184,26 @@ function nodeHasWarning(term, node) {
   return ((node && node.warnings) || []).indexOf(term.value) !== -1;
 }
 
-function termMatchesPod(term, pod, node) {
-  const nodeName = (node && node.name) || "";
-  if (term.kind === "ns") return String(pod.namespace || "").toLowerCase() === term.value;
-  if (term.kind === "node") return term.regex.test(nodeName);
-  // A node-level fact: every pod on a matching node glows with it.
+// A node missing the label never matches, whatever the glob.
+function nodeHasTopology(term, node) {
+  const value = node && node.topology && node.topology[term.field];
+  return !!value && term.regex.test(value);
+}
+
+// The terms that describe the node rather than the pod. Each one rules a whole
+// node in or out, so nodeMatches can dim it.
+function nodeTerm(term, node) {
+  if (term.kind === "node") return term.regex.test((node && node.name) || "");
   if (term.kind === "health") return nodeHasWarning(term, node);
+  if (term.kind === "topology") return nodeHasTopology(term, node);
+  return null;
+}
+
+function termMatchesPod(term, pod, node) {
+  // A node-level fact: every pod on a matching node glows with it.
+  const onNode = nodeTerm(term, node);
+  if (onNode !== null) return onNode;
+  if (term.kind === "ns") return String(pod.namespace || "").toLowerCase() === term.value;
   if (term.kind === "qos") return String(pod.qos || "").toLowerCase() === term.value;
   if (term.kind === "has") return !!pod.hasInit;
   if (term.kind === "audit") return (pod.findings || []).indexOf(term.value) !== -1;
@@ -187,15 +220,11 @@ function podMatches(pod, parsed, node) {
   return parsed.terms.every(term => termMatchesPod(term, pod, node));
 }
 
-// Node-scoped view of the same query: only node: globs and health: warnings
-// can rule a node out, so a node keeps rendering (dimmed) rather than
-// disappearing.
+// Node-scoped view of the same query: only node: globs, health: warnings and
+// topology filters can rule a node out, so a node keeps rendering (dimmed)
+// rather than disappearing.
 function nodeMatches(node, parsed) {
-  return parsed.terms.every(term => {
-    if (term.kind === "node") return term.regex.test((node && node.name) || "");
-    if (term.kind === "health") return nodeHasWarning(term, node);
-    return true;
-  });
+  return parsed.terms.every(term => nodeTerm(term, node) !== false);
 }
 
 window.k8sQuery = { parseQuery, podMatches, nodeMatches, tokenize, globToRegExp, TOKEN_HINTS };

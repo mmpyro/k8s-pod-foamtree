@@ -5,6 +5,7 @@ const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 const { PodAuditBadge } = window.k8sPodAudit;
 const { qosHue } = window.k8sQos;
+const { groupNodes } = window.k8sTopology;
 
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
@@ -63,6 +64,40 @@ function squarify(items, x, y, w, h) {
     rest = rest.slice(row.length);
   }
   return out;
+}
+
+// Each node slot is drawn this much smaller than its squarified rect, which is
+// what leaves the gutter between cards.
+const SLOT_GAP = 6;
+// Group box chrome: the gutter between boxes, the inset around the cards in
+// one, and the band its label sits in.
+const ZONE_GAP = 10;
+const ZONE_PAD = 8;
+const ZONE_HEADER = 24;
+
+// The top-level 2D layout: a slot per node and, when grouped, a box per zone /
+// pool around its nodes. Nodes are squarified inside their group's rect, so a
+// group's area is its share of cluster capacity and a node's area within it is
+// its share of the group. Shared with the SVG exporter.
+function gridLayout(nodes, metric, groupBy, w, h) {
+  const cap = n => (metric === "cpu" ? n.cpuCapacity : n.memCapacity);
+  if (!groupBy || groupBy === "none") {
+    const items = nodes.map((node, idx) => ({ node, idx, value: cap(node) }));
+    return { zones: [], slots: squarify(items, 0, 0, w, h) };
+  }
+  const zones = [], slots = [];
+  const groups = groupNodes(nodes, groupBy, metric).map(group => ({ group, value: group.value }));
+  for (const z of squarify(groups, 0, 0, w, h)) {
+    const zw = z.w - ZONE_GAP, zh = z.h - ZONE_GAP;
+    if (zw <= 0 || zh <= 0) continue;
+    zones.push({ group: z.group, x: z.x, y: z.y, w: zw, h: zh });
+    // The slots shrink by SLOT_GAP on their own, so the inner area gets it back
+    // to keep the right and bottom inset equal to the left and top.
+    const items = z.group.items.map(({ node, idx }) => ({ node, idx, value: cap(node) }));
+    slots.push(...squarify(items, z.x + ZONE_PAD, z.y + ZONE_HEADER,
+      zw - ZONE_PAD * 2 + SLOT_GAP, zh - ZONE_HEADER - ZONE_PAD + SLOT_GAP));
+  }
+  return { zones, slots };
 }
 
 // Card chrome sizes per density. Shared with the SVG exporter so an exported
@@ -316,7 +351,7 @@ function PodBox({
 }
 
 window.k8sTreemap = {
-  squarify, NodeCard, PodBox,
+  squarify, NodeCard, PodBox, gridLayout, SLOT_GAP, ZONE_HEADER,
   cardMetrics, queryState, cardStats, cardLayout, podHeaderH, podLayout,
   cardColors, podColors, containerColor,
 };

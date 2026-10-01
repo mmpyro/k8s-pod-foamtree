@@ -251,6 +251,36 @@ def test_node_group_built_without_health_metadata_emits_neutral_values():
     assert node_foam['warnings'] == []
 
 
+def test_node_group_carries_topology_in_both_transforms():
+    # Given
+    labels = {'topology.kubernetes.io/zone': 'us-east-1a', 'eks.amazonaws.com/capacityType': 'SPOT'}
+    node = [NodeResources('worker-1', 2000, float(bitmath.GB(1).kB), False, [], HEALTHY, labels)]
+    pods = [PodResources('web', 'worker-1', 100, float(bitmath.MB(100).kB),
+                         [ContainerResources('app', 100, float(bitmath.MB(100).kB))], [])]
+    mapper = FoamTreeMapper(node, pods)
+
+    # When
+    cpu_node = _.head(mapper.transform_cpu_resources_to_foamtree()['groups'])
+    mem_node = _.head(mapper.transform_memory_resources_to_foamtree()['groups'])
+
+    # Then
+    assert cpu_node['topology'] == mem_node['topology'] == {
+        'zone': 'us-east-1a', 'region': None, 'instanceType': None, 'nodePool': None, 'capacityType': 'spot',
+    }
+
+
+def test_node_group_built_without_labels_emits_empty_topology():
+    # Given — positional construction from before this feature existed
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    mapper = FoamTreeMapper(node, [])
+
+    # When
+    node_foam = _.head(mapper.transform_cpu_resources_to_foamtree()['groups'])
+
+    # Then
+    assert set(node_foam['topology'].values()) == {None}
+
+
 def test_pod_groups_carry_audit_findings_in_both_transforms():
     # Given — no requests and no limits at all
     node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
