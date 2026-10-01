@@ -95,6 +95,18 @@ The sidebar's **QoS & Eviction Risk** panel counts pods per class, riskiest firs
 
 The class is read from the pod's `status.qosClass`, which the kubelet sets. It is not recomputed from requests and limits. A pod with no reported class renders neutral and is not counted.
 
+## Scheduling simulators
+
+Two dry runs of the kube-scheduler's filter phase, against each node's free **allocatable** capacity (allocatable minus the requests of the pods already bound there). Neither touches the cluster.
+
+**Can I fit this pod?** — the dashed **+** button in the header. Enter a CPU and memory request, optionally a `nodeSelector` (`zone=a, disk=ssd`) and tolerations (`dedicated=gpu:NoSchedule`, `spot` for any value and effect, `*` for everything). Every node gets a verdict; the ones that cannot take the pod say why, e.g. `Insufficient CPU: requires 4000m, available 1200m`.
+
+**Simulate drain** — open a node and click **Simulate drain**. Its evictable pods are bin-packed onto the other nodes, biggest first, each onto the passing node with the most headroom left. The report lists where each pod lands and which would go `Pending`, with a scheduler-style tally (`0/4 nodes available: 3 insufficient CPU, 1 cordoned`). DaemonSet and static pods stay on the node and are listed separately. Naked pods (no controller) are flagged, because a real drain deletes them for good.
+
+While a result is shown, nodes are outlined in both views — green fits / receives pods, red cannot, grey is the drained node — and a strip above the map summarises it. `Esc` or its `×` clears it.
+
+Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, `NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory. A pod that tolerates `node.kubernetes.io/unschedulable` or `not-ready` (every DaemonSet pod does) still fits a cordoned or NotReady node. **Not simulated:** node/pod affinity, topology spread, PodDisruptionBudgets, volume zone binding and extended resources (GPUs) — so a green verdict is necessary, not sufficient.
+
 ## Filtering
 
 The query bar in the header is a **highlighter, not a filter of last resort**: matching pods glow, everything else dims. No pod, node or box ever leaves the layout, so the shape of the cluster stays comparable while you narrow down. Once the query is non-empty and valid, a live counter inside the input reads `N / M pods` (and turns red at `0`).
@@ -217,6 +229,8 @@ Images keep the current metric, colours, tweaks, query dimming and pinned worklo
 | `GET /` | the dashboard |
 | `GET /healthcheck` | `{"status": "ok"}` |
 | `GET /resources/cpu`, `GET /resources/memory` | treemap JSON; optional `?context=<name>`. CPU in millicores, memory in decimal kB. Each node group also carries `unschedulable`, `taints`, `conditions` and a render-ready `warnings` list — see [Node health](#node-health). Each pod group carries a `findings` list — see [Audit & hygiene](#audit--hygiene) |
+| `POST /simulate/fit` | per-node fit verdict for a hypothetical pod — see [Scheduling simulators](#scheduling-simulators). Body `{"cpu": "4", "memory": "16Gi", "nodeSelector": {...}, "tolerations": [...]}`; `400` on a malformed spec |
+| `GET /simulate/drain/<node>` | where the node's evictable pods would land, and which would go `Pending`; `404` for an unknown node |
 | `GET /contexts` | `[{"context": "...", "active": true}]` |
 
 ## Installation

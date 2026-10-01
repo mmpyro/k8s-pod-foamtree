@@ -358,7 +358,7 @@ function labelSprite({ name, util, hue, sev }, height) {
 
 function Scene3D({
   nodes, match, zoom, hueOf, colorBy, memUnit, fmtMem, onFocus,
-  highlight, highlightActive, onPodSelect, onPodHover, captureRef,
+  highlight, highlightActive, onPodSelect, onPodHover, captureRef, verdicts,
 }) {
   const hostRef = React.useRef(null);
   const world = React.useRef(null);
@@ -620,6 +620,10 @@ function Scene3D({
     const sevColor = {
       danger: hex(token("--danger", "#ef4444")), warn: hex(token("--warn", "#f59e0b")), info: hex(token("--info", "#60a5fa")),
     };
+    // Simulation verdicts recolour the plate rim and outer glow, like the 2D outline.
+    const simColor = {
+      ok: hex(token("--ok", "#10b981")), fail: hex(token("--danger", "#ef4444")), drained: hex(token("--text-soft", "#6b7388")),
+    };
     w.recolor = () => {
       if (!w.meshes) return;
       const c = new THREE.Color(), m = new THREE.Matrix4();
@@ -654,10 +658,12 @@ function Scene3D({
       });
       w.plates.forEach((p, i) => {
         const h = hueOf(p.idx), dim = look.plateDim(p.node), sev = worstSeverity(p.node.warnings);
+        const verdict = verdicts && simColor[verdicts.get(p.node.name)];
         set(w.meshes.plates, i, plateSurface(w.bg, h));
-        setRGB(w.meshes.plateGlows.userData.color, i, scaled(hsl(h, 100, 50), GLOW.plateOuter));
+        setRGB(w.meshes.plateGlows.userData.color, i,
+          verdict ? scaled(verdict, 0.45) : scaled(hsl(h, 100, 50), GLOW.plateOuter));
         setRGB(w.meshes.plateInsets.userData.color, i, scaled(hsl(h, 100, 55), dim ? 0 : GLOW.plateInset));
-        set(w.meshes.rims, i, mix(w.bg, hsl(h, 100, 62), GLOW.rim));
+        set(w.meshes.rims, i, verdict || mix(w.bg, hsl(h, 100, 62), GLOW.rim));
         // A plate the query ruled out drops its inlay, warning hatch included.
         m.makeScale(dim ? 0 : PLATE, 1, dim ? 0 : PLATE).setPosition(p.x, 0.05, p.z);
         w.meshes.grids.setMatrixAt(i, m);
@@ -676,7 +682,7 @@ function Scene3D({
     };
     w.recolor();
     w.render();
-  }, [nodes, hueKey, colorBy, match, highlight, highlightActive]);
+  }, [nodes, hueKey, colorBy, match, highlight, highlightActive, verdicts]);
 
   React.useEffect(() => {
     const w = world.current;
