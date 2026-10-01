@@ -4,6 +4,9 @@ from flask import Flask, jsonify, request
 from typing import Optional
 from k8sfoam.src.k8s.k8s_client import K8sClient
 from k8sfoam.src.utils.mappers import FoamTreeMapper
+from k8sfoam.src.utils.extractors import to_millicores, to_kb
+from k8sfoam.src.common.dtos import PodResources
+from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
 
 
 def get_version() -> str:
@@ -11,6 +14,26 @@ def get_version() -> str:
         return version('k8sfoams')
     except PackageNotFoundError:
         return 'unknown'
+
+
+def parse_pod_spec(body) -> PodResources:
+    """Hypothetical pod from the fit form. Raises ValueError on a malformed field."""
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    node_selector = body.get('nodeSelector') or {}
+    tolerations = body.get('tolerations') or []
+    if not isinstance(node_selector, dict) or not all(isinstance(v, str) for v in node_selector.values()):
+        raise ValueError('nodeSelector must map label keys to string values')
+    if not isinstance(tolerations, list) or not all(isinstance(t, dict) for t in tolerations):
+        raise ValueError('tolerations must be a list of objects')
+    try:
+        cpu = to_millicores(str(body.get('cpu') or '0'))
+        memory = to_kb(str(body.get('memory') or '0'))
+    except Exception:
+        raise ValueError(f"Invalid quantity: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}")
+    tolerations = [{k: t.get(k) for k in ('key', 'operator', 'value', 'effect')} for t in tolerations]
+    return PodResources('hypothetical', None, cpu, memory, [], [], node_selector=node_selector,
+                        tolerations=tolerations)
 
 
 def create_app() -> Optional[Flask]:
@@ -35,6 +58,29 @@ def create_app() -> Optional[Flask]:
                     return f'Resource type: {resource_type} is not supported. Supported types are: [cpu, memory]', 400
             except Exception as ex:
                 return str(ex), 500
+
+        @app.route('/simulate/fit', methods=['POST'])
+        def simulate_pod_fit():
+            try:
+                pod = parse_pod_spec(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            try:
+                k8s_client = K8sClient(request.args.get('context'))
+                return jsonify(simulate_fit(pod, k8s_client.get_node_resources(), k8s_client.get_pod_resources()))
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/simulate/drain/<node_name>', methods=['GET'])
+        def simulate_node_drain(node_name: str):
+            try:
+                k8s_client = K8sClient(request.args.get('context'))
+                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+            except Exception as ex:
+                return str(ex), 500
+            if result is None:
+                return f'Node {node_name} not found', 404
+            return jsonify(result)
 
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
