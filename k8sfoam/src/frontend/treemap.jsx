@@ -6,6 +6,7 @@ const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 const { PodAuditBadge } = window.k8sPodAudit;
 const { qosHue } = window.k8sQos;
 const { metricValue, nodeCap } = window.k8sResources;
+const { groupNodes } = window.k8sTopology;
 
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
@@ -64,6 +65,49 @@ function squarify(items, x, y, w, h) {
     rest = rest.slice(row.length);
   }
   return out;
+}
+
+// Each node slot is drawn this much smaller than its squarified rect, which is
+// what leaves the gutter between cards.
+const SLOT_GAP = 6;
+// Group box chrome: the gutter between boxes, the inset around the cards in
+// one, and the band its label sits in.
+const ZONE_GAP = 10;
+const ZONE_PAD = 8;
+const ZONE_HEADER = 24;
+
+// The top-level 2D layout: a slot per node and, when grouped, a box per zone /
+// pool around its nodes. Nodes are squarified inside their group's rect, so a
+// group's area is its share of cluster capacity and a node's area within it is
+// its share of the group. Shared with the SVG exporter.
+function gridLayout(nodes, metric, groupBy, w, h) {
+  // Nodes without an extended resource are left out of its map; cpu and mem
+  // keep every node.
+  const shown = node => metric === "cpu" || metric === "mem" || nodeCap(node, metric) > 0;
+  if (!groupBy || groupBy === "none") {
+    const items = nodes
+      .map((node, idx) => ({ node, idx, value: nodeCap(node, metric) }))
+      .filter(it => shown(it.node));
+    return { zones: [], slots: squarify(items, 0, 0, w, h) };
+  }
+  const zones = [], slots = [];
+  // Grouped over every node so `idx` stays the node's index in `nodes`, then
+  // trimmed to the shown ones; a group left empty has no capacity and drops out.
+  const groups = groupNodes(nodes, groupBy, metric)
+    .map(g => ({ ...g, items: g.items.filter(it => shown(it.node)) }))
+    .filter(g => g.items.length > 0)
+    .map(group => ({ group, value: group.value }));
+  for (const z of squarify(groups, 0, 0, w, h)) {
+    const zw = z.w - ZONE_GAP, zh = z.h - ZONE_GAP;
+    if (zw <= 0 || zh <= 0) continue;
+    zones.push({ group: z.group, x: z.x, y: z.y, w: zw, h: zh });
+    // The slots shrink by SLOT_GAP on their own, so the inner area gets it back
+    // to keep the right and bottom inset equal to the left and top.
+    const items = z.group.items.map(({ node, idx }) => ({ node, idx, value: nodeCap(node, metric) }));
+    slots.push(...squarify(items, z.x + ZONE_PAD, z.y + ZONE_HEADER,
+      zw - ZONE_PAD * 2 + SLOT_GAP, zh - ZONE_HEADER - ZONE_PAD + SLOT_GAP));
+  }
+  return { zones, slots };
 }
 
 // Card chrome sizes per density. Shared with the SVG exporter so an exported
@@ -182,10 +226,13 @@ function containerColor(hue, init) {
   return init ? `hsla(${hue}, 10%, 55%, 0.85)` : `hsla(${hue}, 70%, 68%, 0.92)`;
 }
 
+// Header tag per simulation verdict, next to the warning badge.
+const SIM_BADGE = { ok: "fits", fail: "no fit", drained: "drained" };
+
 // Render a node card: header + nested treemap of pods (each pod = treemap of containers).
 function NodeCard({
   node, match, metric, hue, colorBy, style: nodeStyle, showLabels, density, onClick,
-  highlight, highlightActive, onPodSelect, onPodHover,
+  highlight, highlightActive, onPodSelect, onPodHover, verdict,
 }) {
   const ref = React.useRef(null);
   const [box, setBox] = React.useState({ w: 0, h: 0 });
@@ -219,7 +266,7 @@ function NodeCard({
     <div
       ref={ref}
       onClick={onClick}
-      className={`node-card ${nodeDim ? "is-dim" : ""}`}
+      className={`node-card ${nodeDim ? "is-dim" : ""} ${verdict ? `sim-${verdict}` : ""}`}
       style={{
         background: colors.css,
         borderColor: colors.border,
@@ -231,6 +278,7 @@ function NodeCard({
         <div className="node-header-dot" style={{ background: colors.dot }}></div>
         <span className="node-name">{node.name}</span>
         <span className="node-meta">
+          {verdict && <span className={`sim-badge sim-badge-${verdict}`}>{SIM_BADGE[verdict]}</span>}
           <NodeWarnBadge warnings={node.warnings} />
           <span className="node-util" style={{ color: utilColor }}>{Math.round(utilization * 100)}%</span>
         </span>
@@ -319,7 +367,7 @@ function PodBox({
 }
 
 window.k8sTreemap = {
-  squarify, NodeCard, PodBox,
+  squarify, NodeCard, PodBox, gridLayout, SLOT_GAP, ZONE_HEADER,
   cardMetrics, queryState, cardStats, cardLayout, podHeaderH, podLayout,
   cardColors, podColors, containerColor,
 };

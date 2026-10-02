@@ -18,7 +18,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 const { workloadKey } = window.k8sWorkload;
 const { findingInfo } = window.k8sPodAudit;
 const { worstSeverity } = window.k8sNodeStatus;
-const { qosHue } = window.k8sQos;
+const { qosHue, NEUTRAL_HUE } = window.k8sQos;
+const { groupMode, groupNodes } = window.k8sTopology;
 const { resourceMeta, metricValue, nodeCap, nodeUsed, fmtValue, unitOf } = window.k8sResources;
 
 const isExtended = metric => !!metric && metric !== "cpu" && metric !== "mem";
@@ -42,6 +43,10 @@ function extendedScope(match, nodes, metric) {
 
 const PLATE = 160;
 const PLATE_GAP = 28;
+// Zone / pool floors: the margin around a group's plates, and the aisle
+// between groups, wide enough for the group's label to stand in.
+const ZONE_PAD = 30;
+const ZONE_GAP = 80;
 
 const clamp = (lo, v, hi) => Math.max(lo, Math.min(hi, v));
 // The CSS scene's cubeDims(), in its 250px-plate pixels, scaled to this plate.
@@ -267,15 +272,24 @@ function webglAvailable() {
   }
 }
 
+// A near-square block of plates whose top-left plate edge is at (ox, oz).
+const blockSize = n => {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+  const rows = Math.max(1, Math.ceil(n / cols));
+  return { cols, w: cols * (PLATE + PLATE_GAP) - PLATE_GAP, d: rows * (PLATE + PLATE_GAP) - PLATE_GAP };
+};
+
 // Plates on a near-square grid, pods on a grid inside each plate, biggest
-// footprint first. Pure: positions only, no three.js.
-function layout(nodes) {
-  const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
-  const rows = Math.max(1, Math.ceil(nodes.length / cols));
-  const plates = [], cubes = [];
-  nodes.forEach((node, idx) => {
-    const x = (idx % cols) * (PLATE + PLATE_GAP);
-    const z = Math.floor(idx / cols) * (PLATE + PLATE_GAP);
+// footprint first. Grouped, each zone / pool is its own block of plates on a
+// floor, and the blocks are shelved in rows. Pure: positions only, no three.js.
+function layout(nodes, groupBy) {
+  const plates = [], cubes = [], zones = [];
+  const place = (items, ox, oz) => {
+    const { cols } = blockSize(items.length);
+    items.forEach((item, j) => placePlate(item, ox + PLATE / 2 + (j % cols) * (PLATE + PLATE_GAP),
+      oz + PLATE / 2 + Math.floor(j / cols) * (PLATE + PLATE_GAP)));
+  };
+  const placePlate = ({ node, idx }, x, z) => {
     plates.push({ node, idx, x, z });
     const pods = [...node.pods].sort((a, b) => b.cpu - a.cpu);
     const per = Math.max(1, Math.ceil(Math.sqrt(pods.length)));
@@ -288,10 +302,41 @@ function layout(nodes) {
         z: z - PLATE / 2 + cell * (Math.floor(j / per) + 0.5),
       });
     });
-  });
-  const width = cols * (PLATE + PLATE_GAP) - PLATE_GAP;
-  const depth = rows * (PLATE + PLATE_GAP) - PLATE_GAP;
-  return { plates, cubes, center: { x: (width - PLATE) / 2, z: (depth - PLATE) / 2 }, size: Math.hypot(width, depth) };
+  };
+
+  let width, depth, x0 = -PLATE / 2, z0 = -PLATE / 2;
+  if (!groupBy || groupBy === "none") {
+    // The ungrouped scene keeps its original coordinates: plate 0 at the origin.
+    place(nodes.map((node, idx) => ({ node, idx })), x0, z0);
+    ({ w: width, d: depth } = blockSize(nodes.length));
+  } else {
+    // Shelf packing: blocks left to right, a new row once the row is about as
+    // wide as the whole scene would be if it were square.
+    const blocks = groupNodes(nodes, groupBy, "cpu").map(group => {
+      const b = blockSize(group.items.length);
+      return { group, w: b.w + ZONE_PAD * 2, d: b.d + ZONE_PAD * 2 };
+    });
+    const area = blocks.reduce((s, b) => s + (b.w + ZONE_GAP) * (b.d + ZONE_GAP), 0);
+    const target = Math.max(Math.sqrt(area), ...blocks.map(b => b.w));
+    let x = 0, z = 0, rowD = 0;
+    width = depth = 0;
+    for (const b of blocks) {
+      if (x > 0 && x + b.w > target) { x = 0; z += rowD + ZONE_GAP; rowD = 0; }
+      zones.push({ group: b.group, x0: x, z0: z, x1: x + b.w, z1: z + b.d });
+      place(b.group.items, x + ZONE_PAD, z + ZONE_PAD);
+      width = Math.max(width, x + b.w);
+      rowD = Math.max(rowD, b.d);
+      depth = Math.max(depth, z + rowD);
+      x += b.w + ZONE_GAP;
+    }
+    x0 = z0 = 0;
+  }
+  return {
+    plates, cubes, zones,
+    center: { x: x0 + width / 2, z: z0 + depth / 2 },
+    // No nodes at all leaves nothing to measure; fit the camera to one plate.
+    size: Math.hypot(width, depth) || Math.hypot(PLATE, PLATE),
+  };
 }
 
 // Some faces of a unit box standing on y=0, as their own geometry, so each
@@ -377,8 +422,8 @@ function labelSprite({ name, util, hue, sev, text }, height) {
 }
 
 function Scene3D({
-  nodes, match, zoom, hueOf, colorBy, memUnit, fmtMem, metric, onFocus,
-  highlight, highlightActive, onPodSelect, onPodHover, captureRef,
+  nodes, match, zoom, hueOf, colorBy, groupBy, memUnit, fmtMem, metric, onFocus,
+  highlight, highlightActive, onPodSelect, onPodHover, captureRef, verdicts,
 }) {
   const scope = React.useMemo(() => extendedScope(match, nodes, metric), [match, nodes, metric]);
   const ext = isExtended(metric) ? metric : null;
@@ -427,7 +472,8 @@ function Scene3D({
 
     const w = {
       renderer, scene, root, cam, controls, grid, hatch, cubes: [], plates: [], labels: [], meshes: null,
-      fit: 1, fittedFor: -1, bg: hex(token("--bg", "#07080c")),
+      zones: [], zoneLabels: [],
+      fit: 1, fittedFor: "", bg: hex(token("--bg", "#07080c")),
     };
     let frame = 0;
     w.render = () => {
@@ -532,7 +578,7 @@ function Scene3D({
     const w = world.current;
     if (!w) return;
     const { root } = w;
-    const next = layout(nodes);
+    const next = layout(nodes, groupBy);
 
     w.dispose && w.dispose();
     const n = Math.max(1, next.cubes.length), np = Math.max(1, next.plates.length);
@@ -590,6 +636,49 @@ function Scene3D({
     });
     root.add(plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos);
 
+    // Zone / pool floors under their plates, framed by four thin strips. Both
+    // opaque and below the plates' glow, so the glows still light them.
+    const nz = Math.max(1, next.zones.length);
+    const srgb = rgb => new THREE.Color().setRGB(rgb[0], rgb[1], rgb[2], THREE.SRGBColorSpace);
+    const floors = new THREE.InstancedMesh(flat(), new THREE.MeshBasicMaterial({
+      color: srgb(mix(w.bg, hex(token("--line", "#232839")), 0.45)),
+    }), nz);
+    const frames = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({
+      color: srgb(hex(token("--line-2", "#2b3147"))),
+    }), nz * 4);
+    floors.count = next.zones.length;
+    frames.count = next.zones.length * 4;
+    const EDGE = 2;
+    next.zones.forEach((zn, i) => {
+      const w2 = zn.x1 - zn.x0, d2 = zn.z1 - zn.z0, cx = (zn.x0 + zn.x1) / 2, cz = (zn.z0 + zn.z1) / 2;
+      m.makeScale(w2, 1, d2).setPosition(cx, -4, cz);
+      floors.setMatrixAt(i, m);
+      [
+        [w2 + EDGE, EDGE, cx, zn.z0], [w2 + EDGE, EDGE, cx, zn.z1],
+        [EDGE, d2 + EDGE, zn.x0, cz], [EDGE, d2 + EDGE, zn.x1, cz],
+      ].forEach(([sx, sz, px, pz], k) => {
+        m.makeScale(sx, 1, sz).setPosition(px, -4, pz);
+        frames.setMatrixAt(i * 4 + k, m);
+      });
+    });
+    root.add(floors, frames);
+    const groupWord = groupMode(groupBy).label.toLowerCase();
+    const zoneLabels = next.zones.map(zn => {
+      const g = zn.group;
+      // Like the plate labels: the extended resource's share when one is
+      // selected and the group has it, else the CPU/Memory peak.
+      const cap = ext ? g.items.reduce((s, it) => s + nodeCap(it.node, ext), 0) : 0;
+      const util = cap > 0
+        ? g.items.reduce((s, it) => s + nodeUsed(it.node, ext), 0) / cap
+        : Math.max(g.cpuUtil, g.memUtil);
+      const s = labelSprite({
+        name: `${groupWord} · ${g.label}`, util, hue: NEUTRAL_HUE, sev: null,
+      }, 16);
+      s.position.set((zn.x0 + zn.x1) / 2, 6, zn.z0 - ZONE_GAP / 2.5);
+      return s;
+    });
+    if (zoneLabels.length) root.add(...zoneLabels);
+
     const labels = next.plates.map(p => {
       // With an extended resource selected, a plate that has it reports its own
       // used/allocatable (e.g. 3/4 GPU) instead of the CPU/Memory peak.
@@ -611,20 +700,21 @@ function Scene3D({
     root.position.set(-next.center.x, 0, -next.center.z);
 
     Object.assign(w, {
-      cubes: next.cubes, plates: next.plates, labels,
+      cubes: next.cubes, plates: next.plates, labels, zones: next.zones, zoneLabels,
       meshes: { top, x, z, rims, plates, grids, hatches, shadows, halos, plateGlows, plateInsets },
     });
     w.dispose = () => {
-      const meshes = [plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos];
-      root.remove(...meshes, ...labels);
+      const meshes = [plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos, floors, frames];
+      root.remove(...meshes, ...labels, ...zoneLabels);
       for (const o of meshes) { o.geometry.dispose(); o.material.dispose(); o.dispose(); }
-      for (const s of labels) { s.material.map.dispose(); s.material.dispose(); }
+      for (const s of [...labels, ...zoneLabels]) { s.material.map.dispose(); s.material.dispose(); }
     };
 
-    // Re-fit the camera only when the node count changed, so a refresh never
-    // throws away the user's orbit.
-    if (nodes.length !== w.fittedFor) {
-      w.fittedFor = nodes.length;
+    // Re-fit the camera only when the node count or the grouping changed, so a
+    // refresh never throws away the user's orbit.
+    const fitKey = `${nodes.length}|${groupBy}`;
+    if (fitKey !== w.fittedFor) {
+      w.fittedFor = fitKey;
       const host = hostRef.current;
       w.fit = Math.min(host.clientWidth, host.clientHeight) / (next.size * 1.05);
       w.controls.target.set(0, 0, 0);
@@ -636,7 +726,7 @@ function Scene3D({
     w.recolor && w.recolor();
     w.render();
     // metric/memUnit feed the plate labels, which are baked into sprites here.
-  }, [nodes, hueKey, ext, memUnit]);
+  }, [nodes, hueKey, ext, memUnit, groupBy]);
 
   // Colour-only updates (query, workload highlight) never touch geometry.
   React.useEffect(() => {
@@ -650,6 +740,10 @@ function Scene3D({
     };
     const sevColor = {
       danger: hex(token("--danger", "#ef4444")), warn: hex(token("--warn", "#f59e0b")), info: hex(token("--info", "#60a5fa")),
+    };
+    // Simulation verdicts recolour the plate rim and outer glow, like the 2D outline.
+    const simColor = {
+      ok: hex(token("--ok", "#10b981")), fail: hex(token("--danger", "#ef4444")), drained: hex(token("--text-soft", "#6b7388")),
     };
     w.recolor = () => {
       if (!w.meshes) return;
@@ -685,10 +779,12 @@ function Scene3D({
       });
       w.plates.forEach((p, i) => {
         const h = hueOf(p.idx), dim = look.plateDim(p.node), sev = worstSeverity(p.node.warnings);
+        const verdict = verdicts && simColor[verdicts.get(p.node.name)];
         set(w.meshes.plates, i, plateSurface(w.bg, h));
-        setRGB(w.meshes.plateGlows.userData.color, i, scaled(hsl(h, 100, 50), GLOW.plateOuter));
+        setRGB(w.meshes.plateGlows.userData.color, i,
+          verdict ? scaled(verdict, 0.45) : scaled(hsl(h, 100, 50), GLOW.plateOuter));
         setRGB(w.meshes.plateInsets.userData.color, i, scaled(hsl(h, 100, 55), dim ? 0 : GLOW.plateInset));
-        set(w.meshes.rims, i, mix(w.bg, hsl(h, 100, 62), GLOW.rim));
+        set(w.meshes.rims, i, verdict || mix(w.bg, hsl(h, 100, 62), GLOW.rim));
         // A plate the query ruled out drops its inlay, warning hatch included.
         m.makeScale(dim ? 0 : PLATE, 1, dim ? 0 : PLATE).setPosition(p.x, 0.05, p.z);
         w.meshes.grids.setMatrixAt(i, m);
@@ -697,6 +793,11 @@ function Scene3D({
         w.meshes.hatches.setMatrixAt(i, m);
         set(w.meshes.hatches, i, sev ? sevColor[sev] : [0, 0, 0]);
         w.labels[i].material.opacity = dim ? 0.38 : 1;
+      });
+      // A group whose every node the query ruled out steps back with them.
+      w.zones.forEach((zn, i) => {
+        const dim = zn.group.items.every(it => look.plateDim(it.node));
+        w.zoneLabels[i].material.opacity = dim ? 0.38 : 1;
       });
       for (const mesh of Object.values(w.meshes)) {
         if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
@@ -707,7 +808,7 @@ function Scene3D({
     };
     w.recolor();
     w.render();
-  }, [nodes, hueKey, colorBy, scope, highlight, highlightActive]);
+  }, [nodes, hueKey, colorBy, scope, highlight, highlightActive, verdicts]);
 
   React.useEffect(() => {
     const w = world.current;
@@ -727,7 +828,7 @@ function Scene3D({
   return (
     <div className="scene-3d">
       <div className="scene-gl" ref={hostRef} />
-      <SceneLegend colorBy={colorBy} ext={ext} />
+      <SceneLegend colorBy={colorBy} ext={ext} groupBy={groupBy} />
       <SceneTooltip tip={tip} memUnit={memUnit} fmtMem={fmtMem} />
     </div>
   );
@@ -735,7 +836,7 @@ function Scene3D({
 
 // Annotated reference cube. Abstract swatches are not enough here — without the
 // brackets there is no way to tell which axis carries which resource.
-function SceneLegend({ colorBy, ext }) {
+function SceneLegend({ colorBy, ext, groupBy }) {
   return (
     <div className="scene-legend">
       <svg viewBox="0 0 168 128" width="150" height="114" fill="none">
@@ -765,7 +866,10 @@ function SceneLegend({ colorBy, ext }) {
         <div>Width × depth → CPU request</div>
         <div>Height → Memory request</div>
         {ext && <div>Lit cubes → request {resourceMeta(ext).label}</div>}
-        <div className="legend-foot">One cube per pod · color = {colorBy === "qos" ? "QoS class" : "node"} · drag to orbit</div>
+        <div className="legend-foot">
+          One cube per pod · color = {colorBy === "qos" ? "QoS class" : "node"}
+          {groupBy && groupBy !== "none" && ` · floors = ${groupMode(groupBy).label.toLowerCase()}`} · drag to orbit
+        </div>
       </div>
     </div>
   );

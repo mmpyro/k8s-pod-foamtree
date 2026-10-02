@@ -4,6 +4,9 @@ from flask import Flask, jsonify, request
 from typing import Optional
 from k8sfoam.src.k8s.k8s_client import K8sClient
 from k8sfoam.src.utils.mappers import FoamTreeMapper
+from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
+from k8sfoam.src.common.dtos import PodResources
+from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
 
 
 def get_version() -> str:
@@ -11,6 +14,35 @@ def get_version() -> str:
         return version('k8sfoams')
     except PackageNotFoundError:
         return 'unknown'
+
+
+def parse_pod_spec(body) -> PodResources:
+    """Hypothetical pod from the fit form. Raises ValueError on a malformed field."""
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    node_selector = body.get('nodeSelector') or {}
+    tolerations = body.get('tolerations') or []
+    if not isinstance(node_selector, dict) or not all(isinstance(v, str) for v in node_selector.values()):
+        raise ValueError('nodeSelector must map label keys to string values')
+    if not isinstance(tolerations, list) or not all(isinstance(t, dict) for t in tolerations):
+        raise ValueError('tolerations must be a list of objects')
+    extended_spec = body.get('extended') or {}
+    if not isinstance(extended_spec, dict):
+        raise ValueError('extended must map resource names to quantities')
+    # cpu/memory have their own fields; pods and attachable volumes are not requestable.
+    invalid = [name for name in extended_spec if not is_extended(name)]
+    if invalid:
+        raise ValueError(f'Not an extended resource: {", ".join(invalid)}')
+    try:
+        cpu = convert_cpu(str(body.get('cpu') or '0'))
+        memory = convert_memory(str(body.get('memory') or '0'))
+        extended = {name: convert_extended(name, str(q)) for name, q in extended_spec.items()}
+    except Exception:
+        raise ValueError(f"Invalid quantity: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}, "
+                         f"extended={extended_spec!r}")
+    tolerations = [{k: t.get(k) for k in ('key', 'operator', 'value', 'effect')} for t in tolerations]
+    return PodResources('hypothetical', None, cpu, memory, [], [], extended={k: v for k, v in extended.items() if v},
+                        node_selector=node_selector, tolerations=tolerations)
 
 
 def create_app() -> Optional[Flask]:
@@ -37,6 +69,29 @@ def create_app() -> Optional[Flask]:
                 return jsonify(mapper.transform(resource))
             except Exception as ex:
                 return str(ex), 500
+
+        @app.route('/simulate/fit', methods=['POST'])
+        def simulate_pod_fit():
+            try:
+                pod = parse_pod_spec(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            try:
+                k8s_client = K8sClient(request.args.get('context'))
+                return jsonify(simulate_fit(pod, k8s_client.get_node_resources(), k8s_client.get_pod_resources()))
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/simulate/drain/<node_name>', methods=['GET'])
+        def simulate_node_drain(node_name: str):
+            try:
+                k8s_client = K8sClient(request.args.get('context'))
+                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+            except Exception as ex:
+                return str(ex), 500
+            if result is None:
+                return f'Node {node_name} not found', 404
+            return jsonify(result)
 
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():

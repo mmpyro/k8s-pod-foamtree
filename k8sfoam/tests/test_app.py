@@ -109,6 +109,115 @@ def test_should_return_contexts_when_get_contexts(k8s_client, test_client):
     assert json[1]['active'] is False
 
 
+def simulation_cluster():
+    k8s_client_instance = MagicMock()
+    k8s_client_instance.get_node_resources.return_value = [NodeResources('a', 4000, float(bitmath.GiB(16).kB)),
+                                                           NodeResources('b', 1000, float(bitmath.GiB(16).kB))]
+    k8s_client_instance.get_pod_resources.return_value = [PodResources('web', 'a', 1000, float(bitmath.GiB(1).kB), [], [],
+                                                                       owner_kind='ReplicaSet')]
+    return k8s_client_instance
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_returns_per_node_verdicts(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.post('/simulate/fit?context=minikube', json={'cpu': '2', 'memory': '1Gi'})
+
+    # Then
+    assert response.status_code == 200
+    k8s_client.assert_called_with('minikube')
+    assert response.json['fits'] == 1
+    verdicts = {r['node']: r for r in response.json['nodes']}
+    assert verdicts['a']['fits'] is True
+    assert verdicts['b']['reasons'][0]['message'] == 'Insufficient CPU: requires 2000m, available 1000m'
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_checks_extended_resources(k8s_client, test_client):
+    # Given
+    cluster = simulation_cluster()
+    cluster.get_node_resources.return_value = [
+        NodeResources('gpu', 4000, float(bitmath.GiB(16).kB), extended={'nvidia.com/gpu': 2}),
+        NodeResources('cpu', 4000, float(bitmath.GiB(16).kB))]
+    k8s_client.return_value = cluster
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'extended': {'nvidia.com/gpu': '1'}})
+
+    # Then
+    assert response.status_code == 200
+    verdicts = {r['node']: r for r in response.json['nodes']}
+    assert verdicts['gpu']['fits'] is True
+    assert verdicts['cpu']['reasons'][0]['message'] == 'Insufficient nvidia.com/gpu: requires 1, available 0'
+
+
+@pytest.mark.parametrize('body', [{'cpu': 'lots'}, {'cpu': '1', 'nodeSelector': ['zone=a']},
+                                  {'cpu': '1', 'tolerations': 'all'}, ['cpu'],
+                                  {'cpu': '1', 'extended': {'pods': '1'}}, {'cpu': '1', 'extended': {'cpu': '1'}},
+                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': 'many'}}, {'extended': ['gpu']}])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_rejects_malformed_spec(k8s_client, body, test_client):
+    # When
+    response = test_client.post('/simulate/fit', json=body)
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_node_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1'})
+
+    # Then
+    assert response.status_code == 500
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_returns_placements(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.get('/simulate/drain/a')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['fits'] is True
+    assert response.json['placements'][0]['to'] == 'b'
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_unknown_node_returns_not_found(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.get('/simulate/drain/ghost')
+
+    # Then
+    assert response.status_code == 404
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_pod_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.get('/simulate/drain/a')
+
+    # Then
+    assert response.status_code == 500
+
+
 @patch('k8sfoam.src.app.K8sClient')
 def test_should_serve_a_vendor_prefixed_extended_resource(k8s_client, test_client):
     # Given

@@ -5,6 +5,8 @@ import "./resources.jsx";
 import "./nodestatus.jsx";
 import "./podaudit.jsx";
 import "./qos.jsx";
+import "./simulate.jsx";
+import "./topology.jsx";
 import "./query.jsx";
 import "./workload.jsx";
 import "./tweaks-panel.jsx";
