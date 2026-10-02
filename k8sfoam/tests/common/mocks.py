@@ -80,6 +80,7 @@ def create_node(name: str, cpu: str, memory: str, unschedulable=None, taints=Non
     node = MagicMock()
     metadata = MagicMock()
     metadata.name = name
+    # None on the real API when the node has no labels, like a pod.
     metadata.labels = labels
     node.metadata = metadata
     status = MagicMock()

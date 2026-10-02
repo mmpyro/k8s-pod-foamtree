@@ -15,9 +15,10 @@ PodResources = namedtuple(
 # memory_limit (kB, None when unset) backs the missing-limits audit rule.
 ContainerResources = namedtuple('ContainerResources', 'name cpu memory memory_limit extended', defaults=(None, None))
 # cpu/memory are the node's allocatable. unschedulable/taints/conditions back the
-# node health markers (cordon, pressure, taints). labels/allocatable_pods back the
-# scheduling simulator; allocatable_pods is None when the node reports no pod limit.
-# Declared last with defaults so existing positional construction keeps working.
+# node health markers (cordon, pressure, taints). labels back the zone / node pool
+# grouping and the scheduling simulator; allocatable_pods is None when the node
+# reports no pod limit. Declared last with defaults so existing positional
+# construction keeps working.
 NodeResources = namedtuple(
     'NodeResources',
     'name cpu memory unschedulable taints conditions extended labels allocatable_pods',
