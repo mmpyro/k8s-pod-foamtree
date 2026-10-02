@@ -22,7 +22,7 @@ def slugs(reasons):
 
 def test_free_capacity_subtracts_bound_pods_from_allocatable():
     # Given
-    nodes = [node('a', allocatable_cpu=3800, allocatable_memory=15 * GI, allocatable_pods=110)]
+    nodes = [node('a', cpu=3800, memory=15 * GI, allocatable_pods=110)]
     pods = [pod('p1', 'a', 1000, 2 * GI), pod('p2', 'a', 500, GI), pod('pending', None, 9999, GI)]
 
     # When
@@ -32,7 +32,7 @@ def test_free_capacity_subtracts_bound_pods_from_allocatable():
     assert free['a'] == {'cpu': 2300, 'memory': 12 * GI, 'pods': 108}
 
 
-def test_free_capacity_falls_back_to_capacity_without_allocatable():
+def test_free_capacity_without_pod_limit_skips_the_pod_count():
     # When
     free = free_capacity([node('a')], [])
 

@@ -33,10 +33,10 @@ REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'taint',
 
 
 def _allocatable(node: NodeResources) -> dict:
-    """What the scheduler may fill, falling back to capacity on a node that omits it."""
+    """What the scheduler may fill. The extractor already reads cpu/memory from allocatable."""
     return {
-        'cpu': node.allocatable_cpu if node.allocatable_cpu is not None else node.cpu or 0,
-        'memory': node.allocatable_memory if node.allocatable_memory is not None else node.memory or 0,
+        'cpu': node.cpu or 0,
+        'memory': node.memory or 0,
         # No pod limit reported means no pod-count check, not a limit of zero.
         'pods': node.allocatable_pods,
     }

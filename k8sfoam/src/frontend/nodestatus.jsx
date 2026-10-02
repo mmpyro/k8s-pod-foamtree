@@ -10,6 +10,8 @@ const NODE_WARNINGS = {
   "disk-pressure":   { label: "disk pressure", sev: "warn",   pill: "pressure" },
   "pid-pressure":    { label: "pid pressure",  sev: "warn",   pill: "pressure" },
   "tainted":         { label: "tainted",       sev: "info",   pill: "tainted" },
+  // Free GPUs (or other devices) behind a node whose CPU or memory is full.
+  "stranded-devices": { label: "stranded devices", sev: "info", pill: "pressure" },
 };
 
 // Canonical worst-first order, so a legend built from a Set of slugs still

@@ -217,10 +217,21 @@ The download button in the header, next to *Refresh*, saves what you are looking
 | --- | --- | --- | --- |
 | **PNG image** | ✓ | ✓ | The current view at 2× resolution. |
 | **SVG image** | ✓ | — | The 2D map as real vectors (cards, pods, containers, labels). The 3D view is WebGL, so it has no SVG form. |
-| **JSON report** | ✓ | ✓ | Every node and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. |
-| **CSV report** | ✓ | ✓ | One row per pod: `context,node,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. |
+| **JSON report** | ✓ | ✓ | Every node and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. Extended resources sit under `extended`, in MiB when byte-sized and as a count otherwise. |
+| **CSV report** | ✓ | ✓ | One row per pod: `context,node,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. One more column per [extended resource](#extended-resources) on the cluster follows `memory_mib`, e.g. `nvidia.com/gpu` or `ephemeral_storage_mib`. |
 
 Images keep the current metric, colours, tweaks, query dimming and pinned workload, and carry a title band with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HHmm.<ext>`. Web fonts are not embedded, so exported images fall back to system fonts.
+
+## Extended resources
+
+Besides CPU and memory, the *Resource* picker lists every extended resource a node in the current context can allocate: GPUs and other device-plugin resources (`nvidia.com/gpu`, `amd.com/gpu`), `ephemeral-storage` and HugePages (`hugepages-2Mi`, `hugepages-1Gi`). When there is at least one, the two-button toggle becomes a dropdown. Switching to a context without the selected resource falls back to CPU.
+
+- **2D map.** Nodes are sized by how much of the resource they can allocate, and pods by what they request. Nodes without the resource are hidden, and the header counts them.
+- **Fragmentation.** For devices the header also shows the free units cluster-wide and the largest free block on one node. For example, 6 free GPUs spread 2 + 2 + 2 cannot run a 4-GPU job.
+- **3D cubes.** Cubes keep plotting CPU × Memory. Pods requesting the selected resource stay lit and the rest dim. Plates show `used/allocatable` for it.
+- **Node health.** `stranded devices` marks a node that still has free devices but has 90% or more of its CPU or memory requested, so no pod can reach those devices. Query it with `health:stranded-devices`.
+
+Requests follow the scheduler's rules, including init containers and native sidecars. An extended resource set only as a limit counts as a request of the same size. Node sizes come from `status.allocatable`, for CPU and memory too, so kube- and system-reserved capacity is not drawn as free space.
 
 ## HTTP API
 
@@ -228,7 +239,8 @@ Images keep the current metric, colours, tweaks, query dimming and pinned worklo
 | --- | --- |
 | `GET /` | the dashboard |
 | `GET /healthcheck` | `{"status": "ok"}` |
-| `GET /resources/cpu`, `GET /resources/memory` | treemap JSON; optional `?context=<name>`. CPU in millicores, memory in decimal kB. Each node group also carries `unschedulable`, `taints`, `conditions` and a render-ready `warnings` list — see [Node health](#node-health). Each pod group carries a `findings` list — see [Audit & hygiene](#audit--hygiene) |
+| `GET /resources/cpu`, `GET /resources/memory` | treemap JSON; optional `?context=<name>`. CPU in millicores, memory in decimal kB. Each node group also carries `unschedulable`, `taints`, `conditions` and a render-ready `warnings` list — see [Node health](#node-health). Each pod group carries a `findings` list — see [Audit & hygiene](#audit--hygiene). Node, pod and container groups carry an `extended` map of every other resource (count, or decimal kB when byte-sized) |
+| `GET /resources/<extended>` | the same treemap JSON for an extended resource some node allocates, e.g. `/resources/nvidia.com/gpu` or `/resources/ephemeral-storage`. Any other name returns `400`, listing the supported ones |
 | `POST /simulate/fit` | per-node fit verdict for a hypothetical pod — see [Scheduling simulators](#scheduling-simulators). Body `{"cpu": "4", "memory": "16Gi", "nodeSelector": {...}, "tolerations": [...]}`; `400` on a malformed spec |
 | `GET /simulate/drain/<node>` | where the node's evictable pods would land, and which would go `Pending`; `404` for an unknown node |
 | `GET /contexts` | `[{"context": "...", "active": true}]` |

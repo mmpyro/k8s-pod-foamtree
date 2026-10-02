@@ -4,7 +4,7 @@ from flask import Flask, jsonify, request
 from typing import Optional
 from k8sfoam.src.k8s.k8s_client import K8sClient
 from k8sfoam.src.utils.mappers import FoamTreeMapper
-from k8sfoam.src.utils.extractors import to_millicores, to_kb
+from k8sfoam.src.common.resources import convert_cpu, convert_memory
 from k8sfoam.src.common.dtos import PodResources
 from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
 
@@ -27,8 +27,8 @@ def parse_pod_spec(body) -> PodResources:
     if not isinstance(tolerations, list) or not all(isinstance(t, dict) for t in tolerations):
         raise ValueError('tolerations must be a list of objects')
     try:
-        cpu = to_millicores(str(body.get('cpu') or '0'))
-        memory = to_kb(str(body.get('memory') or '0'))
+        cpu = convert_cpu(str(body.get('cpu') or '0'))
+        memory = convert_memory(str(body.get('memory') or '0'))
     except Exception:
         raise ValueError(f"Invalid quantity: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}")
     tolerations = [{k: t.get(k) for k in ('key', 'operator', 'value', 'effect')} for t in tolerations]
@@ -44,18 +44,20 @@ def create_app() -> Optional[Flask]:
         def healthcheck():
             return jsonify({'status': 'ok'})
 
-        @app.route('/resources/<resource_type>', methods=['GET'])
+        # path: extended resource names carry a vendor prefix (nvidia.com/gpu).
+        @app.route('/resources/<path:resource_type>', methods=['GET'])
         def get_k8s_resources(resource_type: str):
             try:
                 context = request.args.get('context')
                 k8s_client = K8sClient(context)
                 mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
-                if resource_type.lower() == 'memory':
-                    return jsonify(mapper.transform_memory_resources_to_foamtree())
-                elif resource_type.lower() == 'cpu':
-                    return jsonify(mapper.transform_cpu_resources_to_foamtree())
-                else:
-                    return f'Resource type: {resource_type} is not supported. Supported types are: [cpu, memory]', 400
+                # cpu/memory keep their case-insensitive match; extended names are case-sensitive in Kubernetes.
+                resource = resource_type.lower() if resource_type.lower() in ('cpu', 'memory') else resource_type
+                supported = mapper.available_resources()
+                if resource not in supported:
+                    return (f'Resource type: {resource_type} is not supported. '
+                            f'Supported types are: [{", ".join(supported)}]'), 400
+                return jsonify(mapper.transform(resource))
             except Exception as ex:
                 return str(ex), 500
 
