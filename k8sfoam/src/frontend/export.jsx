@@ -9,6 +9,7 @@ const {
 const { groupMode } = window.k8sTopology;
 const { workloadKey } = window.k8sWorkload;
 const { qosHue } = window.k8sQos;
+const { detectResources, isBytes } = window.k8sResources;
 
 const FONT_MONO = `'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace`;
 const FONT_SANS = `'Space Grotesk', Manrope, -apple-system, 'Helvetica Neue', Arial, sans-serif`;
@@ -144,7 +145,7 @@ function cardSvg(node, slot, idx, opts) {
 // A zone / pool box with its label band, as .zone-box draws it on screen.
 function zoneSvg(z, metric, groupWord, match) {
   const g = z.group;
-  const util = metric === "cpu" ? g.cpuUtil : g.memUtil;
+  const util = g.util;
   const dim = !!(match && match.active) && g.items.every(it => match.dimNodes.has(it.node.name));
   const utilColor = util > 0.85 ? "#ef4444" : util > 0.6 ? "#f59e0b" : util > 0.3 ? "#10b981" : "#60a5fa";
   const cy = ZONE_HEADER / 2 + 4;
@@ -174,6 +175,8 @@ function treemapSvg({
   const accent = cssVar("--accent", "#7c5cff");
   const W = Math.round(width + MARGIN * 2), H = Math.round(height + HEADER_BAND + MARGIN);
 
+  // Same layout as the on-screen grid, which also leaves out nodes without an
+  // extended resource.
   const { zones, slots } = gridLayout(nodes, metric, groupBy, width, height);
   const groupWord = groupMode(groupBy).label.toLowerCase();
   const boxes = zones.map(z => zoneSvg(z, metric, groupWord, match));
@@ -228,9 +231,23 @@ const CSV_COLUMNS = [
   "containers", "init_containers", "findings", "node_warnings", "matched",
 ];
 
+// Column per extended resource: devices as a count under their own name,
+// byte-sized ones in MiB like memory_mib.
+function extColumn(name) {
+  return isBytes(name) ? `${name.replace(/-/g, "_")}_mib` : name;
+}
+
+// The fixed columns, with one column per extended resource on the cluster
+// slotted in after memory.
+function csvColumns(nodes) {
+  const at = CSV_COLUMNS.indexOf("memory_mib") + 1;
+  return [...CSV_COLUMNS.slice(0, at), ...detectResources(nodes).map(extColumn), ...CSV_COLUMNS.slice(at)];
+}
+
 // One row per pod. `matched` is blank when no query is active.
 function podRows(nodes, match, context) {
   const active = !!(match && match.active);
+  const extended = detectResources(nodes);
   const rows = [];
   for (const n of nodes) {
     for (const p of n.pods) {
@@ -247,6 +264,10 @@ function podRows(nodes, match, context) {
         qos: p.qos,
         cpu_millicores: Math.round(p.cpu),
         memory_mib: Math.round(p.mem * 100) / 100,
+        ...Object.fromEntries(extended.map(name => {
+          const v = p.ext[name] || 0;
+          return [extColumn(name), isBytes(name) ? Math.round(v * 100) / 100 : v];
+        })),
         containers: p.containers.filter(c => !c.init).map(c => c.name).join(";"),
         init_containers: p.containers.filter(c => c.init).map(c => c.name).join(";"),
         findings: p.findings.join(";"),
@@ -265,13 +286,14 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-function toCsv(rows) {
-  const lines = [CSV_COLUMNS.join(",")];
-  for (const r of rows) lines.push(CSV_COLUMNS.map(c => csvCell(r[c])).join(","));
+function toCsv(rows, columns = CSV_COLUMNS) {
+  const lines = [columns.map(csvCell).join(",")];
+  for (const r of rows) lines.push(columns.map(c => csvCell(r[c])).join(","));
   return lines.join("\r\n") + "\r\n";
 }
 
 // Memory is MiB and CPU millicores throughout, whatever the UI unit is set to.
+// Extended resources are MiB when byte-sized, a plain count otherwise.
 function reportJson({ nodes, totals, context, metric, query, match }) {
   const active = !!(match && match.active);
   return JSON.stringify({
@@ -279,17 +301,21 @@ function reportJson({ nodes, totals, context, metric, query, match }) {
     context,
     metric,
     query: query || "",
-    units: { cpu: "millicores", memory: "MiB" },
+    units: {
+      cpu: "millicores", memory: "MiB",
+      ...Object.fromEntries(detectResources(nodes).map(name => [name, isBytes(name) ? "MiB" : "count"])),
+    },
     totals,
     nodes: nodes.map(n => ({
       name: n.name,
       topology: n.topology,
       cpuCapacity: n.cpuCapacity, cpuUsed: n.cpuUsed,
       memCapacity: n.memCapacity, memUsed: n.memUsed,
+      extended: { capacity: n.extCap, used: n.extUsed },
       unschedulable: n.unschedulable, warnings: n.warnings, taints: n.taints, conditions: n.conditions,
       pods: n.pods.map(p => ({
         name: p.name, namespace: p.namespace, qos: p.qos, labels: p.labels,
-        cpu: p.cpu, mem: p.mem, findings: p.findings,
+        cpu: p.cpu, mem: p.mem, extended: p.ext, findings: p.findings,
         ...(active ? { matched: match.pods.has(p) } : {}),
         containers: p.containers,
       })),
@@ -315,4 +341,4 @@ function fileName(context, kind, ext, when = new Date()) {
   return `k8sfoams-${ctx}-${kind}-${stamp}.${ext}`;
 }
 
-window.k8sExport = { treemapSvg, svgToPng, canvasBlob, podRows, toCsv, reportJson, download, fileName };
+window.k8sExport = { treemapSvg, svgToPng, canvasBlob, podRows, csvColumns, toCsv, reportJson, download, fileName };

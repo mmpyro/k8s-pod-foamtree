@@ -254,6 +254,7 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 }
 
 .header {
+  container: header / inline-size;
   display: flex; align-items: center; gap: 20px;
   padding: 16px 22px;
   border-bottom: 1px solid var(--line);
@@ -272,7 +273,9 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .icon-btn:hover { background: var(--panel-2); color: var(--text); }
 .icon-btn.spinning .refresh-icon { animation: spin .6s linear infinite; }
 
-.header-title { flex: 1; min-width: 0; }
+/* overflow: last line of defence — the title block clips rather than paints
+   under the stat cards if the breakpoints below ever run short. */
+.header-title { flex: 1; min-width: 0; overflow: hidden; }
 .title-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .title-main {
   font-family: var(--font-sans);
@@ -280,7 +283,12 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   font-weight: 600;
   letter-spacing: -0.02em;
   white-space: nowrap;
-  flex-shrink: 0;
+  /* Shrinks with an ellipsis rather than sliding under the stat cards, but
+     keeps a floor so it never collapses to zero width next to the chips. */
+  flex-shrink: 1;
+  min-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .title-chip {
   font-family: var(--font-mono);
@@ -705,7 +713,9 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 }
 
 .overlay-stats {
-  display: grid; grid-template-columns: 1fr 1fr 1fr;
+  /* auto-fit: GPU and storage stats join CPU/Memory/Pods without leaving
+     empty cells that would show the gap colour. */
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 1px;
   background: var(--line);
   border-bottom: 1px solid var(--line);
@@ -821,7 +831,14 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 /* Responsive — the title must never lose. Both the stat tiles and the context
    chip give way before it, and .title-chip never gets a min-width: with
    .title-row{overflow:hidden} that silently paints the title at zero width. */
-@media (max-width: 1450px) {
+/* Sized from the header itself, not the viewport, since the sidebar collapses.
+   Fixed parts (padding, menu, tools, gaps) take ~614px and the title needs
+   ~240px, so four 150px cards fit from 1490px and three from 1330px. An
+   extended-resource card makes four; the pod count gives way first. */
+@container header (max-width: 1490px) {
+  .header-stats.has-ext .stat-pods { display: none; }
+}
+@container header (max-width: 1330px) {
   .header-stats { display: none; }
 }
 @media (max-width: 1000px) {
@@ -874,6 +891,59 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 /* Resource picker is meaningless in 3D — a cube already shows both axes. */
 .seg.seg-disabled { opacity: .35; }
 .seg.seg-disabled button { cursor: not-allowed; }
+/* Resource menu — replaces the two-button toggle once the cluster offers
+   extended resources (GPUs, ephemeral storage, hugepages). The trigger reads
+   like a .seg, the list reuses the .query-pop popover. */
+.res-menu { position: relative; }
+.res-trigger {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 9px 11px;
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font-size: 12px; font-weight: 500;
+  text-align: left;
+  transition: border-color .15s;
+}
+.res-trigger:hover, .res-trigger-open { border-color: var(--line-2); }
+.res-trigger svg:first-child { color: var(--text-dim); flex-shrink: 0; }
+.res-caret { margin-left: auto; color: var(--text-soft); flex-shrink: 0; transition: transform .15s; }
+.res-trigger-open .res-caret { transform: rotate(180deg); }
+.res-item-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.res-pop {
+  top: calc(100% + 6px); left: 0; right: 0;
+  min-width: 0;
+  padding: 5px;
+}
+.res-group { padding: 8px 8px 4px; margin: 4px 0 0; border-top: 1px solid var(--line); }
+.res-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: none; border: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.res-item .export-hint { margin-left: auto; flex-shrink: 0; }
+.res-item:hover { background: var(--bg-3); color: var(--text); }
+.res-item-on { color: var(--text); background: var(--bg-3); box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Extended requests on a pod row in the focus overlay. */
+.ext-pill {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line-2);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.ext-pill.ext-on { border-color: var(--accent); color: var(--text); }
+
 .seg-note {
   color: var(--text-soft);
   font-size: 10.5px;

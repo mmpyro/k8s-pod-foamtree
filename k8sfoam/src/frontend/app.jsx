@@ -8,6 +8,9 @@ const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
 const { QOS_INFO, QOS_ORDER, NEUTRAL_HUE } = window.k8sQos;
 const { GROUP_MODES, groupMode, groupNodes } = window.k8sTopology;
+const {
+  isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
+} = window.k8sResources;
 
 const COLOR_MODES = [
   { id: "node", label: "Node" },
@@ -25,10 +28,9 @@ function nodeHue(idx, scheme) {
   return Math.floor((idx * 137.5) % 360);
 }
 
-const METRICS = [
-  { id: "cpu", label: "CPU", icon: "cpu" },
-  { id: "mem", label: "Memory", icon: "mem" },
-];
+// Always offered; extended resources detected on the cluster are appended.
+const BASE_METRICS = [resourceMeta("cpu"), resourceMeta("mem")];
+const isBase = metric => metric === "cpu" || metric === "mem";
 
 const VIEWS = [
   { id: "2d", label: "2D Map", icon: "rect" },
@@ -49,7 +51,16 @@ function kbToMib(kb) {
   return (kb * 1000) / (1024 * 1024);
 }
 
+// Extended resource map from the backend, with byte-sized values converted
+// from kB to MiB like memory. Devices stay a plain count.
+function extOf(extended) {
+  const out = {};
+  for (const [name, v] of Object.entries(extended || {})) out[name] = isBytes(name) ? kbToMib(v) : v;
+  return out;
+}
+
 // Merge separate CPU and Memory data structures from backend into rich unified structures.
+// Extended resources ride on both payloads, so they are read off the CPU one.
 function mergeResources(cpuData, memData) {
   const cpuGroups = cpuData.groups || [];
   const memGroups = memData.groups || [];
@@ -74,6 +85,7 @@ function mergeResources(cpuData, memData) {
     const pods = [];
     let cpuUsed = 0;
     let memUsed = 0;
+    const extUsed = {};
 
     for (const cp of cpuPods) {
       if (cp.label === 'empty') continue;
@@ -96,7 +108,8 @@ function mergeResources(cpuData, memData) {
           init: !!cc.color,
           cpu: cc.weight || 0,
           // Convert memory from kB to MiB
-          mem: kbToMib(mc.weight || 0)
+          mem: kbToMib(mc.weight || 0),
+          ext: extOf(cc.extended)
         };
       });
 
@@ -105,6 +118,8 @@ function mergeResources(cpuData, memData) {
 
       cpuUsed += podCpu;
       memUsed += podMem;
+      const podExt = extOf(cp.extended);
+      for (const [name, v] of Object.entries(podExt)) extUsed[name] = (extUsed[name] || 0) + v;
 
       pods.push({
         name: cp.label,
@@ -122,6 +137,7 @@ function mergeResources(cpuData, memData) {
         cpu: podCpu,
         // Convert memory from kB to MiB
         mem: kbToMib(podMem),
+        ext: podExt,
         containers
       });
     }
@@ -132,6 +148,9 @@ function mergeResources(cpuData, memData) {
     // Placement labels from the backend; null wherever the node is unlabelled,
     // and an empty object on an older backend.
     const topo = cg.topology || {};
+    const extCap = extOf(cg.extended);
+    const extFree = {};
+    for (const [name, cap] of Object.entries(extCap)) extFree[name] = Math.max(0, cap - (extUsed[name] || 0));
 
     return {
       id: `node-${idx}`,
@@ -149,6 +168,9 @@ function mergeResources(cpuData, memData) {
       memUsed: convertedMemUsed,
       cpuFree: Math.max(0, (cg.weight || 0) - cpuUsed),
       memFree: Math.max(0, memCapacity - convertedMemUsed),
+      extCap,
+      extUsed,
+      extFree,
       pods,
       // Node health from the backend. Absent on an older backend, so every
       // field falls back to what a plainly healthy node would report.
@@ -305,15 +327,27 @@ function App() {
     return { key: selectedWorkload, replicas, nodes: spread.size };
   }, [nodes, selectedWorkload]);
 
+  // Resource picker: cpu and memory, then whatever this cluster can allocate.
+  const extended = useMemo(() => detectResources(nodes), [nodes]);
+  const metrics = useMemo(() => [...BASE_METRICS, ...extended.map(resourceMeta)], [extended]);
+
+  // A context without GPUs cannot show a GPU map; fall back instead of
+  // drawing an empty grid. Skipped while nothing is loaded yet.
+  useEffect(() => {
+    if (nodes.length > 0 && !metrics.some(m => m.id === metric)) setMetric("cpu");
+  }, [metrics, nodes.length]);
+
   // Totals
   const totals = useMemo(() => {
-    const t = { cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, pods: 0, nodes: nodes.length };
+    const t = { cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, pods: 0, nodes: nodes.length, extCap: {}, extUsed: {} };
     for (const n of nodes) {
       t.cpuCap += n.cpuCapacity;
       t.cpuUsed += n.cpuUsed;
       t.memCap += n.memCapacity;
       t.memUsed += n.memUsed;
       t.pods += n.pods.length;
+      for (const [name, v] of Object.entries(n.extCap)) t.extCap[name] = (t.extCap[name] || 0) + v;
+      for (const [name, v] of Object.entries(n.extUsed)) t.extUsed[name] = (t.extUsed[name] || 0) + v;
     }
     return t;
   }, [nodes]);
@@ -400,7 +434,7 @@ function App() {
         return;
       }
       if (kind === "csv") {
-        const body = k.toCsv(k.podRows(nodes, match, ctx));
+        const body = k.toCsv(k.podRows(nodes, match, ctx), k.csvColumns(nodes));
         k.download(new Blob([body], { type: "text/csv" }), k.fileName(ctx, "report", "csv"));
         return;
       }
@@ -414,19 +448,24 @@ function App() {
       const r = grid ? grid.getBoundingClientRect() : { width: 1600, height: 1000 };
       const memPct = Math.round((totals.memUsed / (totals.memCap || 1)) * 100);
       const cpuPct = Math.round((totals.cpuUsed / (totals.cpuCap || 1)) * 100);
+      const ext = isBase(metric) ? null : {
+        used: totals.extUsed[metric] || 0, cap: totals.extCap[metric] || 0, meta: resourceMeta(metric),
+      };
       const svg = k.treemapSvg({
         nodes, match, metric, hueOf, colorBy, groupBy,
         nodeStyle: tw.nodeStyle, density: tw.density, showLabels: tw.showLabels,
         pinned: selectedWorkload,
         width: r.width, height: r.height,
         meta: {
-          title: `${metric === "cpu" ? "CPU" : "Memory"} Resources · ${ctx ? shortContext(ctx) : "cluster"}`,
+          title: `${resourceMeta(metric).label} Resources · ${ctx ? shortContext(ctx) : "cluster"}`,
           subtitle: `${totals.nodes} nodes · ${totals.pods} pods` +
             `${match.active ? ` · query: ${query.trim()} (${match.count} matched)` : ""}` +
             `${colorBy === "qos" ? " · color = QoS class" : ""}` +
             `${groupBy !== "none" ? ` · grouped by ${groupMode(groupBy).label.toLowerCase()}` : ""}`,
           stats: `CPU ${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)} cores (${cpuPct}%)` +
-            ` · Memory ${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)} ${memUnit} (${memPct}%)`,
+            ` · Memory ${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)} ${memUnit} (${memPct}%)` +
+            (ext ? ` · ${ext.meta.label} ${fmtValue(ext.used, metric, memUnit)} / ${fmtValue(ext.cap, metric, memUnit, true)}` +
+              ` ${unitOf(metric, memUnit)} (${Math.round((ext.used / (ext.cap || 1)) * 100)}%)` : ""),
           stamp: `k8sfoams · ${new Date(lastRefresh).toLocaleString()}`,
         },
       });
@@ -453,7 +492,7 @@ function App() {
         onToggle={() => setSidebarOpen(s => !s)}
         view={view} setView={setView}
         zoom={zoom} setZoom={setZoom}
-        metric={metric} setMetric={setMetric}
+        metric={metric} setMetric={setMetric} metrics={metrics} totals={totals}
         memUnit={memUnit} setMemUnit={setMemUnit}
         refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
         contexts={contexts}
@@ -484,6 +523,7 @@ function App() {
 
         <Header
           metric={metric}
+          nodes={nodes}
           view={view} setView={setView}
           totals={totals}
           query={query} setQuery={setQuery}
@@ -511,6 +551,7 @@ function App() {
               groupBy={groupBy}
               memUnit={memUnit}
               fmtMem={fmtMem}
+              metric={metric}
               onFocus={setFocused}
               highlight={highlight}
               highlightActive={highlightActive}
@@ -580,7 +621,7 @@ function App() {
 /* ─────────── Sidebar ─────────── */
 
 function Sidebar({
-  open, onToggle, view, setView, zoom, setZoom, metric, setMetric, memUnit, setMemUnit,
+  open, onToggle, view, setView, zoom, setZoom, metric, setMetric, metrics, totals, memUnit, setMemUnit,
   refreshInterval, setRefreshInterval,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
   audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery
@@ -631,19 +672,30 @@ function Sidebar({
 
       <div className="sidebar-section">
         <div className="section-label">Resource</div>
-        {/* Cubes plot CPU and Memory on separate axes, so there is nothing for
-            this control to switch between in 3D. */}
-        <div className={`seg seg-2 ${is3d ? "seg-disabled" : ""}`}>
-          {METRICS.map(m => (
-            <button key={m.id} className={!is3d && metric === m.id ? "seg-on" : ""}
-              disabled={is3d}
-              onClick={() => !is3d && setMetric(m.id)}>
-              <MetricIcon kind={m.icon} /> {m.label}
-            </button>
-          ))}
-        </div>
+        {metrics.length > 2 ? (
+          // A cluster with extended resources can offer any number of them,
+          // so a dropdown replaces the two-button toggle. In 3D it picks which
+          // extended resource the cubes highlight.
+          <ResourceMenu metrics={metrics} metric={metric} setMetric={setMetric}
+            totals={totals} memUnit={memUnit} />
+        ) : (
+          /* Cubes plot CPU and Memory on separate axes, so there is nothing for
+             this control to switch between in 3D. */
+          <div className={`seg seg-2 ${is3d ? "seg-disabled" : ""}`}>
+            {metrics.map(m => (
+              <button key={m.id} className={!is3d && metric === m.id ? "seg-on" : ""}
+                disabled={is3d}
+                onClick={() => !is3d && setMetric(m.id)}>
+                <MetricIcon kind={m.icon} /> {m.label}
+              </button>
+            ))}
+          </div>
+        )}
         {is3d && (
-          <div className="seg-note">Cubes encode both — footprint is CPU, height is Memory.</div>
+          <div className="seg-note">
+            Cubes encode both — footprint is CPU, height is Memory.
+            {!isBase(metric) && ` Pods requesting ${resourceMeta(metric).label} are highlighted.`}
+          </div>
         )}
       </div>
 
@@ -828,10 +880,65 @@ function Sidebar({
   );
 }
 
+// Resource picker once the cluster offers extended resources. A styled menu,
+// not a <select>: the native popup is drawn by the OS and ignores the theme.
+function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  const current = resourceMeta(metric);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = e => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  // Cluster-wide allocatable, so the list doubles as an inventory.
+  const capOf = id => {
+    const cap = id === "cpu" ? totals.cpuCap : id === "mem" ? totals.memCap : totals.extCap[id] || 0;
+    return `${fmtValue(cap, id, memUnit, true)} ${unitOf(id, memUnit)}`;
+  };
+  const item = m => (
+    <button key={m.id} role="menuitemradio" aria-checked={m.id === metric}
+      className={`res-item ${m.id === metric ? "res-item-on" : ""}`}
+      onClick={() => { setMetric(m.id); setOpen(false); }}>
+      <MetricIcon kind={m.icon} />
+      <span className="res-item-label">{m.label}</span>
+      <span className="export-hint">{capOf(m.id)}</span>
+    </button>
+  );
+
+  return (
+    <div className="res-menu" ref={ref}>
+      <button className={`res-trigger ${open ? "res-trigger-open" : ""}`}
+        onClick={() => setOpen(o => !o)} aria-haspopup="menu" aria-expanded={open}>
+        <MetricIcon kind={current.icon} />
+        <span className="res-item-label">{current.label}</span>
+        <svg className="res-caret" viewBox="0 0 16 16" width="12" height="12" fill="none">
+          <path d="M4 6 L8 10 L12 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="query-pop res-pop" role="menu">
+          {metrics.filter(m => isBase(m.id)).map(item)}
+          <div className="query-hint-title res-group">Extended</div>
+          {metrics.filter(m => !isBase(m.id)).map(item)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─────────── Header ─────────── */
 
 function Header({
-  metric, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
+  metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
   onMenu, onRefresh, refreshing, workload, onClearWorkload, onExport, canExport,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
@@ -842,7 +949,14 @@ function Header({
   const contextLabel = currentCtx ? shortContext(currentCtx.context) : "No Context";
 
   const is3d = view === "3d";
-  const titleMain = is3d ? "CPU + Memory" : metric === "cpu" ? "CPU" : "Memory";
+  const extMetric = isBase(metric) ? null : metric;
+  const extMeta = extMetric && resourceMeta(extMetric);
+  // 3D always plots CPU × Memory; the selected extended resource is named by
+  // its stat card, the legend and the sidebar note, so the title stays short.
+  const titleMain = is3d ? "CPU + Memory" : resourceMeta(metric).label;
+  // Nodes without the selected resource are left out of the 2D map.
+  const hidden = extMetric && !is3d ? nodes.filter(n => nodeCap(n, extMetric) <= 0).length : 0;
+  const frag = extMetric && isDevice(extMetric) ? fragmentation(nodes, extMetric) : null;
 
   return (
     <header className="header">
@@ -867,13 +981,24 @@ function Header({
         </div>
         <div className="title-sub">
           {totals.nodes} nodes · {totals.pods} pods · {is3d ? "isometric cube topology" : "live foam-tree topology"}
+          {hidden > 0 && ` · ${hidden} node${hidden === 1 ? "" : "s"} without ${extMeta.label} hidden`}
+          {/* Fragmentation: free devices only help a pod if enough sit on one node. */}
+          {frag && (frag.largestNode
+            ? ` · ${frag.free} ${extMeta.short} free, largest block ${frag.largest} on ${frag.largestNode}`
+            : ` · no ${extMeta.short} free`)}
         </div>
       </div>
 
-      <div className="header-stats">
+      <div className={`header-stats ${extMetric ? "has-ext" : ""}`}>
         <Stat label="CPU" value={`${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)}`} unit="cores" pct={cpuPct} />
         <Stat label="Memory" value={`${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)}`} unit={memUnit} pct={memPct} />
-        <Stat label="Pods" value={totals.pods} unit={`/ ${totals.nodes * 110} cap`} pct={totals.pods / (totals.nodes * 110 || 1)} />
+        <Stat className="stat-pods" label="Pods" value={totals.pods} unit={`/ ${totals.nodes * 110} cap`} pct={totals.pods / (totals.nodes * 110 || 1)} />
+        {extMetric && (
+          <Stat label={extMeta.label}
+            value={`${fmtValue(totals.extUsed[extMetric] || 0, extMetric, memUnit)} / ${fmtValue(totals.extCap[extMetric] || 0, extMetric, memUnit, true)}`}
+            unit={unitOf(extMetric, memUnit)}
+            pct={(totals.extUsed[extMetric] || 0) / (totals.extCap[extMetric] || 1)} />
+        )}
       </div>
 
       <div className="header-tools">
@@ -998,10 +1123,10 @@ function QueryBar({ query, setQuery, match, hintOpen, setHintOpen }) {
   );
 }
 
-function Stat({ label, value, unit, pct }) {
+function Stat({ label, value, unit, pct, className = "" }) {
   const color = utilColor(pct);
   return (
-    <div className="stat">
+    <div className={`stat ${className}`} title={`${label}: ${value} ${unit}`}>
       <div className="stat-label">{label}</div>
       <div className="stat-val">
         <span className="stat-num">{value}</span>
@@ -1035,7 +1160,9 @@ function TreemapGrid({
     return () => ro.disconnect();
   }, []);
 
-  // Nodes sized by capacity, boxed by zone / pool when grouping is on.
+  // Nodes sized by capacity, boxed by zone / pool when grouping is on. A node
+  // without the selected extended resource has nothing to draw, so gridLayout
+  // leaves it out (the header counts it); idx is kept so node hues stay put.
   const { zones, slots } = box.w > 0 && box.h > 0
     ? gridLayout(nodes, metric, groupBy, box.w, box.h)
     : { zones: [], slots: [] };
@@ -1044,7 +1171,7 @@ function TreemapGrid({
   return (
     <div className="grid" ref={containerRef}>
       {zones.map(z => {
-        const util = metric === "cpu" ? z.group.cpuUtil : z.group.memUtil;
+        const util = z.group.util;
         // Every node in the group ruled out by the query → the box steps back too.
         const dim = !!(match && match.active) && z.group.items.every(it => match.dimNodes.has(it.node.name));
         return (
@@ -1119,6 +1246,15 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
             <div className="ov-val">{fmtMem(node.memUsed, memUnit)} / {fmtMem(node.memCapacity, memUnit, true)} <span>{memUnit}</span></div>
             <div className="ov-bar"><div style={{ width: `${(node.memUsed / (node.memCapacity || 1)) * 100}%`, background: "#a78bfa" }} /></div>
           </div>
+          {Object.entries(node.extCap).filter(([, cap]) => cap > 0).map(([name, cap]) => (
+            <div className="ov-stat" key={name}>
+              <div className="ov-label">{resourceMeta(name).label}</div>
+              <div className="ov-val">
+                {fmtValue(node.extUsed[name] || 0, name, memUnit)} / {fmtValue(cap, name, memUnit, true)} <span>{unitOf(name, memUnit)}</span>
+              </div>
+              <div className="ov-bar"><div style={{ width: `${((node.extUsed[name] || 0) / cap) * 100}%`, background: "#f472b6" }} /></div>
+            </div>
+          ))}
           <div className="ov-stat">
             <div className="ov-label">Pods</div>
             <div className="ov-val">{node.pods.length} <span>scheduled</span></div>
@@ -1166,6 +1302,15 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
                         <span key={j} className={`container-pill${c.init ? " init" : ""}`}>{c.name}</span>
                       ))}
                     </div>
+                    {Object.keys(p.ext).length > 0 && (
+                      <div className="pod-row-containers">
+                        {Object.entries(p.ext).map(([name, v]) => (
+                          <span key={name} className={`ext-pill${name === metric ? " ext-on" : ""}`}>
+                            {resourceMeta(name).short} {fmtValue(v, name, memUnit)}{resourceMeta(name).kind === "bytes" ? ` ${memUnit}` : ""}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     {p.findings.length > 0 && (
                       <div className="pod-row-findings">
                         {p.findings.map(f => (
@@ -1217,6 +1362,20 @@ function ViewIcon({ kind }) {
 }
 
 function MetricIcon({ kind }) {
+  if (kind === "chip") return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      {/* accelerator card: board, die, and the edge connector */}
+      <rect x="1.5" y="3.5" width="13" height="8" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <rect x="5" y="5.5" width="4" height="4" stroke="currentColor" strokeWidth="1.1" />
+      <path d="M11 6v3M4 11.5v2M6.5 11.5v2M9 11.5v2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+  if (kind === "disk") return (
+    <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
+      <ellipse cx="8" cy="4" rx="5.5" ry="2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
   if (kind === "cpu") return (
     <svg viewBox="0 0 16 16" width="13" height="13" fill="none">
       <rect x="3.5" y="3.5" width="9" height="9" rx="1" stroke="currentColor" strokeWidth="1.3" />
@@ -1233,21 +1392,6 @@ function MetricIcon({ kind }) {
 }
 
 /* ─────────── Utils ─────────── */
-
-// Format a MiB memory value into the active unit. MiB/GiB keep their original
-// precision (and integer capacity); TiB uses adaptive decimals so a non-zero
-// quantity never renders as a flat "0" (TiB is coarse for node/pod memory).
-function fmtMem(mib, unit, capacity = false) {
-  const div = unit === "TiB" ? 1024 * 1024 : unit === "GiB" ? 1024 : 1;
-  const v = mib / div;
-  if (unit === "MiB") return v.toFixed(0);
-  if (unit === "GiB") return v.toFixed(capacity ? 0 : 1);
-  // TiB: grow decimals (2 → max 6) until the rounded value is non-zero.
-  if (v === 0) return "0";
-  let d = 2;
-  while (d < 6 && Number(v.toFixed(d)) === 0) d++;
-  return v.toFixed(d);
-}
 
 // Traffic-light colour for a 0..1 utilisation, as in the header stats.
 function utilColor(u) {

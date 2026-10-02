@@ -5,6 +5,7 @@ const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 const { PodAuditBadge } = window.k8sPodAudit;
 const { qosHue } = window.k8sQos;
+const { metricValue, nodeCap } = window.k8sResources;
 const { groupNodes } = window.k8sTopology;
 
 function squarify(items, x, y, w, h) {
@@ -80,20 +81,29 @@ const ZONE_HEADER = 24;
 // group's area is its share of cluster capacity and a node's area within it is
 // its share of the group. Shared with the SVG exporter.
 function gridLayout(nodes, metric, groupBy, w, h) {
-  const cap = n => (metric === "cpu" ? n.cpuCapacity : n.memCapacity);
+  // Nodes without an extended resource are left out of its map; cpu and mem
+  // keep every node.
+  const shown = node => metric === "cpu" || metric === "mem" || nodeCap(node, metric) > 0;
   if (!groupBy || groupBy === "none") {
-    const items = nodes.map((node, idx) => ({ node, idx, value: cap(node) }));
+    const items = nodes
+      .map((node, idx) => ({ node, idx, value: nodeCap(node, metric) }))
+      .filter(it => shown(it.node));
     return { zones: [], slots: squarify(items, 0, 0, w, h) };
   }
   const zones = [], slots = [];
-  const groups = groupNodes(nodes, groupBy, metric).map(group => ({ group, value: group.value }));
+  // Grouped over every node so `idx` stays the node's index in `nodes`, then
+  // trimmed to the shown ones; a group left empty has no capacity and drops out.
+  const groups = groupNodes(nodes, groupBy, metric)
+    .map(g => ({ ...g, items: g.items.filter(it => shown(it.node)) }))
+    .filter(g => g.items.length > 0)
+    .map(group => ({ group, value: group.value }));
   for (const z of squarify(groups, 0, 0, w, h)) {
     const zw = z.w - ZONE_GAP, zh = z.h - ZONE_GAP;
     if (zw <= 0 || zh <= 0) continue;
     zones.push({ group: z.group, x: z.x, y: z.y, w: zw, h: zh });
     // The slots shrink by SLOT_GAP on their own, so the inner area gets it back
     // to keep the right and bottom inset equal to the left and top.
-    const items = z.group.items.map(({ node, idx }) => ({ node, idx, value: cap(node) }));
+    const items = z.group.items.map(({ node, idx }) => ({ node, idx, value: nodeCap(node, metric) }));
     slots.push(...squarify(items, z.x + ZONE_PAD, z.y + ZONE_HEADER,
       zw - ZONE_PAD * 2 + SLOT_GAP, zh - ZONE_HEADER - ZONE_PAD + SLOT_GAP));
   }
@@ -124,8 +134,8 @@ function cardStats(node, metric, match) {
   // Compute pod values + empty space. Size each pod by its effective request
   // (max(sum regular, max init)) — summing containers would double-count
   // init containers, which run sequentially before the regular ones.
-  const podValue = p => (metric === "cpu" ? p.cpu : p.mem);
-  const cap = metric === "cpu" ? node.cpuCapacity : node.memCapacity;
+  const podValue = p => metricValue(p, metric);
+  const cap = nodeCap(node, metric);
   const used = node.pods.reduce((s, p) => s + podValue(p), 0);
   // A pod requesting nothing on this metric (every BestEffort pod, by
   // definition) weighs 0 and squarify's `value > 0` guard drops it — so a
@@ -140,7 +150,9 @@ function cardStats(node, metric, match) {
   const empty = Math.max(0, cap - used);
   const items = [...podItems, { pod: null, value: empty, empty: true }];
 
-  const utilization = used / cap;
+  // A node without the resource never reaches a card (the grid filters it),
+  // but a refresh can race the filter — keep the colour maths finite.
+  const utilization = cap > 0 ? used / cap : 0;
   const utilColor = utilization > 0.85 ? "#ef4444" :
                     utilization > 0.6 ? "#f59e0b" :
                     utilization > 0.3 ? "#10b981" : "#3b82f6";
@@ -168,7 +180,7 @@ function podLayout(pod, metric, rect) {
   const headerH = podHeaderH(rect);
   const containers = pod.containers.map(c => ({
     container: c,
-    value: metric === "cpu" ? c.cpu : c.mem,
+    value: metricValue(c, metric),
   }));
   return squarify(
     containers,
