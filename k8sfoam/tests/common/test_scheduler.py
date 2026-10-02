@@ -29,7 +29,7 @@ def test_free_capacity_subtracts_bound_pods_from_allocatable():
     free = free_capacity(nodes, pods)
 
     # Then
-    assert free['a'] == {'cpu': 2300, 'memory': 12 * GI, 'pods': 108}
+    assert free['a'] == {'cpu': 2300, 'memory': 12 * GI, 'pods': 108, 'extended': {}}
 
 
 def test_free_capacity_without_pod_limit_skips_the_pod_count():
@@ -37,7 +37,7 @@ def test_free_capacity_without_pod_limit_skips_the_pod_count():
     free = free_capacity([node('a')], [])
 
     # Then
-    assert free['a'] == {'cpu': 4000, 'memory': 16 * GI, 'pods': None}
+    assert free['a'] == {'cpu': 4000, 'memory': 16 * GI, 'pods': None, 'extended': {}}
 
 
 def test_pod_fits_on_a_healthy_node_with_room():
@@ -183,7 +183,7 @@ def test_simulate_fit_returns_a_verdict_per_node():
     assert verdicts['big']['fits'] is True
     assert slugs(verdicts['small']['reasons']) == ['insufficient-cpu']
     assert slugs(verdicts['cordoned']['reasons']) == ['cordoned']
-    assert verdicts['big']['free'] == {'cpu': 8000, 'memory': 16 * GI, 'pods': None}
+    assert verdicts['big']['free'] == {'cpu': 8000, 'memory': 16 * GI, 'pods': None, 'extended': {}}
 
 
 def test_simulate_drain_unknown_node_returns_none():
@@ -258,3 +258,94 @@ def test_simulate_drain_on_single_node_cluster_leaves_everything_pending():
     assert result['fits'] is False
     assert result['remainingNodes'] == 0
     assert result['pending'][0]['reasons'] == []
+
+
+GPU = 'nvidia.com/gpu'
+
+
+def test_free_capacity_subtracts_extended_requests():
+    # Given
+    nodes = [node('gpu', extended={GPU: 4, 'ephemeral-storage': 100 * GI})]
+    pods = [pod('train', 'gpu', extended={GPU: 3, 'ephemeral-storage': 30 * GI})]
+
+    # When
+    free = free_capacity(nodes, pods)
+
+    # Then
+    assert free['gpu']['extended'] == {GPU: 1, 'ephemeral-storage': 70 * GI}
+
+
+def test_insufficient_gpu_reports_required_and_available():
+    # Given
+    n = node('gpu', extended={GPU: 4})
+    free = free_capacity([n], [pod('train', 'gpu', extended={GPU: 4})])['gpu']
+
+    # When
+    reasons = filter_node(pod('new', extended={GPU: 1}), n, free)
+
+    # Then
+    assert reasons == [{'slug': 'insufficient-extended', 'message': f'Insufficient {GPU}: requires 1, available 0'}]
+
+
+def test_node_without_the_extended_resource_has_none_available():
+    # Given
+    n = node('cpu-only')
+
+    # When
+    reasons = filter_node(pod('new', extended={GPU: 1}), n, free_capacity([n], [])['cpu-only'])
+
+    # Then
+    assert [r['message'] for r in reasons] == [f'Insufficient {GPU}: requires 1, available 0']
+
+
+def test_byte_sized_extended_resource_is_formatted_in_binary_units():
+    # Given
+    n = node('a', extended={'ephemeral-storage': 5 * GI})
+
+    # When
+    reasons = filter_node(pod('new', extended={'ephemeral-storage': 20 * GI}), n, free_capacity([n], [])['a'])
+
+    # Then
+    assert [r['message'] for r in reasons] == ['Insufficient ephemeral-storage: requires 20.0Gi, available 5.0Gi']
+
+
+def test_simulate_fit_sends_a_gpu_pod_only_to_the_gpu_node():
+    # Given
+    nodes = [node('cpu-1'), node('gpu-1', extended={GPU: 2})]
+
+    # When
+    result = simulate_fit(pod('train', extended={GPU: 1}), nodes, [])
+
+    # Then
+    assert result['fits'] == 1
+    verdicts = {r['node']: r for r in result['nodes']}
+    assert verdicts['gpu-1']['fits'] is True
+    assert verdicts['gpu-1']['free']['extended'] == {GPU: 2}
+    assert slugs(verdicts['cpu-1']['reasons']) == ['insufficient-extended']
+
+
+def test_simulate_drain_leaves_gpu_pod_pending_without_another_gpu_node():
+    # Given — plenty of CPU elsewhere, but no GPUs
+    nodes = [node('gpu-1', extended={GPU: 1}), node('cpu-1', cpu=16000), node('cpu-2', cpu=16000)]
+    pods = [pod('train', 'gpu-1', 1000, GI, extended={GPU: 1}), pod('web', 'gpu-1', 500)]
+
+    # When
+    result = simulate_drain('gpu-1', nodes, pods)
+
+    # Then
+    assert [p['pod'] for p in result['placements']] == ['web']
+    assert result['pending'][0]['pod'] == 'train'
+    assert result['pending'][0]['reasons'] == [{'slug': 'insufficient-extended', 'nodes': 2}]
+
+
+def test_simulate_drain_consumes_gpus_as_it_places_pods():
+    # Given — two GPU pods, one free GPU elsewhere
+    nodes = [node('gpu-1', extended={GPU: 2}), node('gpu-2', extended={GPU: 1})]
+    pods = [pod('train-a', 'gpu-1', 100, extended={GPU: 1}), pod('train-b', 'gpu-1', 50, extended={GPU: 1})]
+
+    # When
+    result = simulate_drain('gpu-1', nodes, pods)
+
+    # Then
+    assert [(p['pod'], p['to']) for p in result['placements']] == [('train-a', 'gpu-2')]
+    assert [p['pod'] for p in result['pending']] == ['train-b']

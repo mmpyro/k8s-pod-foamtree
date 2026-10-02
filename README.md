@@ -99,13 +99,13 @@ The class is read from the pod's `status.qosClass`, which the kubelet sets. It i
 
 Two dry runs of the kube-scheduler's filter phase, against each node's free **allocatable** capacity (allocatable minus the requests of the pods already bound there). Neither touches the cluster.
 
-**Can I fit this pod?** — the dashed **+** button in the header. Enter a CPU and memory request, optionally a `nodeSelector` (`zone=a, disk=ssd`) and tolerations (`dedicated=gpu:NoSchedule`, `spot` for any value and effect, `*` for everything). Every node gets a verdict; the ones that cannot take the pod say why, e.g. `Insufficient CPU: requires 4000m, available 1200m`.
+**Can I fit this pod?** — the dashed **+** button in the header. Enter a CPU and memory request, optionally extended resources (`nvidia.com/gpu=1, ephemeral-storage=10Gi`), a `nodeSelector` (`zone=a, disk=ssd`) and tolerations (`dedicated=gpu:NoSchedule`, `spot` for any value and effect, `*` for everything). Every node gets a verdict; the ones that cannot take the pod say why, e.g. `Insufficient CPU: requires 4000m, available 1200m`.
 
 **Simulate drain** — open a node and click **Simulate drain**. Its evictable pods are bin-packed onto the other nodes, biggest first, each onto the passing node with the most headroom left. The report lists where each pod lands and which would go `Pending`, with a scheduler-style tally (`0/4 nodes available: 3 insufficient CPU, 1 cordoned`). DaemonSet and static pods stay on the node and are listed separately. Naked pods (no controller) are flagged, because a real drain deletes them for good.
 
 While a result is shown, nodes are outlined in both views — green fits / receives pods, red cannot, grey is the drained node — and a strip above the map summarises it. `Esc` or its `×` clears it.
 
-Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, `NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory. A pod that tolerates `node.kubernetes.io/unschedulable` or `not-ready` (every DaemonSet pod does) still fits a cordoned or NotReady node. **Not simulated:** node/pod affinity, topology spread, PodDisruptionBudgets, volume zone binding and extended resources (GPUs) — so a green verdict is necessary, not sufficient.
+Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, `NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory, then every extended resource the pod requests against the node's free allocatable (`Insufficient nvidia.com/gpu: requires 1, available 0`; a node that does not advertise a resource has none). A pod that tolerates `node.kubernetes.io/unschedulable` or `not-ready` (every DaemonSet pod does) still fits a cordoned or NotReady node. **Not simulated:** node/pod affinity, topology spread, PodDisruptionBudgets and volume zone binding — so a green verdict is necessary, not sufficient.
 
 ## Filtering
 
@@ -241,7 +241,7 @@ Requests follow the scheduler's rules, including init containers and native side
 | `GET /healthcheck` | `{"status": "ok"}` |
 | `GET /resources/cpu`, `GET /resources/memory` | treemap JSON; optional `?context=<name>`. CPU in millicores, memory in decimal kB. Each node group also carries `unschedulable`, `taints`, `conditions` and a render-ready `warnings` list — see [Node health](#node-health). Each pod group carries a `findings` list — see [Audit & hygiene](#audit--hygiene). Node, pod and container groups carry an `extended` map of every other resource (count, or decimal kB when byte-sized) |
 | `GET /resources/<extended>` | the same treemap JSON for an extended resource some node allocates, e.g. `/resources/nvidia.com/gpu` or `/resources/ephemeral-storage`. Any other name returns `400`, listing the supported ones |
-| `POST /simulate/fit` | per-node fit verdict for a hypothetical pod — see [Scheduling simulators](#scheduling-simulators). Body `{"cpu": "4", "memory": "16Gi", "nodeSelector": {...}, "tolerations": [...]}`; `400` on a malformed spec |
+| `POST /simulate/fit` | per-node fit verdict for a hypothetical pod — see [Scheduling simulators](#scheduling-simulators). Body `{"cpu": "4", "memory": "16Gi", "extended": {"nvidia.com/gpu": "1"}, "nodeSelector": {...}, "tolerations": [...]}`; `400` on a malformed spec |
 | `GET /simulate/drain/<node>` | where the node's evictable pods would land, and which would go `Pending`; `404` for an unknown node |
 | `GET /contexts` | `[{"context": "...", "active": true}]` |
 

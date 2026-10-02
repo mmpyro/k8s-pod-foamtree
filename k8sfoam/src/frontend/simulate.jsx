@@ -14,6 +14,7 @@ const REASONS = {
   "insufficient-pods":   { label: "pod limit reached" },
   "insufficient-cpu":    { label: "insufficient CPU" },
   "insufficient-memory": { label: "insufficient memory" },
+  "insufficient-extended": { label: "insufficient extended resource" },
 };
 
 const SKIP_REASONS = {
@@ -23,7 +24,8 @@ const SKIP_REASONS = {
 
 // What the simulator does not model, shown under every result so a green
 // verdict is read as "necessary", not "guaranteed".
-const CAVEAT = "Filter phase only: resources, pod count, cordon, readiness, nodeSelector and taints. " +
+const CAVEAT = "Filter phase only: CPU, memory, extended resources (GPUs, ephemeral-storage, hugepages), " +
+  "pod count, cordon, readiness, nodeSelector and taints. " +
   "Affinity, topology spread, PDBs and volume zones are not simulated.";
 
 function reasonLabel(slug) {
@@ -128,20 +130,23 @@ function FitModal({ ctxParam, memUnit, fmtMem, onSimulation, onClose }) {
   const [memory, setMemory] = useState("1Gi");
   const [selectorText, setSelectorText] = useState("");
   const [tolerationText, setTolerationText] = useState("");
+  const [extendedText, setExtendedText] = useState("");
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const { selector, errors: selErrors } = parseSelector(selectorText);
   const { tolerations, errors: tolErrors } = parseTolerations(tolerationText);
-  const formErrors = [...selErrors, ...tolErrors];
+  // Same name=quantity syntax as the selector; quantities are validated server-side.
+  const { selector: extended, errors: extErrors } = parseSelector(extendedText);
+  const formErrors = [...selErrors, ...tolErrors, ...extErrors];
 
   const submit = async (e) => {
     e.preventDefault();
     if (formErrors.length) return;
     setBusy(true);
     try {
-      const res = await fetchFit(ctxParam, { cpu, memory, nodeSelector: selector, tolerations });
+      const res = await fetchFit(ctxParam, { cpu, memory, extended, nodeSelector: selector, tolerations });
       setResult(res);
       setError(null);
       onSimulation(fitSimulation(res));
@@ -174,6 +179,11 @@ function FitModal({ ctxParam, memUnit, fmtMem, onSimulation, onClose }) {
           <label className="sim-field">
             <span className="ov-label">Memory request</span>
             <input value={memory} onChange={e => setMemory(e.target.value)} placeholder="16Gi" spellCheck="false" />
+          </label>
+          <label className="sim-field sim-wide">
+            <span className="ov-label">Extended resources</span>
+            <input value={extendedText} onChange={e => setExtendedText(e.target.value)}
+              placeholder="nvidia.com/gpu=1, ephemeral-storage=10Gi" spellCheck="false" />
           </label>
           <label className="sim-field sim-wide">
             <span className="ov-label">nodeSelector</span>

@@ -135,8 +135,29 @@ def test_simulate_fit_returns_per_node_verdicts(k8s_client, test_client):
     assert verdicts['b']['reasons'][0]['message'] == 'Insufficient CPU: requires 2000m, available 1000m'
 
 
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_checks_extended_resources(k8s_client, test_client):
+    # Given
+    cluster = simulation_cluster()
+    cluster.get_node_resources.return_value = [
+        NodeResources('gpu', 4000, float(bitmath.GiB(16).kB), extended={'nvidia.com/gpu': 2}),
+        NodeResources('cpu', 4000, float(bitmath.GiB(16).kB))]
+    k8s_client.return_value = cluster
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'extended': {'nvidia.com/gpu': '1'}})
+
+    # Then
+    assert response.status_code == 200
+    verdicts = {r['node']: r for r in response.json['nodes']}
+    assert verdicts['gpu']['fits'] is True
+    assert verdicts['cpu']['reasons'][0]['message'] == 'Insufficient nvidia.com/gpu: requires 1, available 0'
+
+
 @pytest.mark.parametrize('body', [{'cpu': 'lots'}, {'cpu': '1', 'nodeSelector': ['zone=a']},
-                                  {'cpu': '1', 'tolerations': 'all'}, ['cpu']])
+                                  {'cpu': '1', 'tolerations': 'all'}, ['cpu'],
+                                  {'cpu': '1', 'extended': {'pods': '1'}}, {'cpu': '1', 'extended': {'cpu': '1'}},
+                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': 'many'}}, {'extended': ['gpu']}])
 @patch('k8sfoam.src.app.K8sClient')
 def test_simulate_fit_rejects_malformed_spec(k8s_client, body, test_client):
     # When

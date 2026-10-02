@@ -3,15 +3,18 @@
 Backs two what-if questions — "can this pod fit anywhere?" and "where would this
 node's pods go if it were drained?". It deliberately covers only the predicates
 that decide most placements: node condition, cordon, nodeSelector, taints and
-tolerations, pod count, CPU and memory requests. Affinity/anti-affinity, topology
-spread, PodDisruptionBudgets, volume zone binding and extended resources are out
-of scope, so a "fits" verdict is necessary rather than sufficient.
+tolerations, pod count, CPU, memory and extended resource requests (GPUs,
+ephemeral-storage, hugepages). Affinity/anti-affinity, topology spread,
+PodDisruptionBudgets and volume zone binding are out of scope, so a "fits"
+verdict is necessary rather than sufficient.
 
-Units follow the rest of the backend: CPU in millicores, memory in decimal kB.
+Units follow the rest of the backend: CPU in millicores, memory and byte-sized
+extended resources in decimal kB, other extended resources as plain counts.
 """
 from collections import Counter
 from typing import Iterable, Optional
 from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.resources import is_bytes
 
 
 # Effects the filter phase honours. PreferNoSchedule only lowers a node's score.
@@ -29,7 +32,7 @@ DRAIN_SKIPPED_OWNERS = {'DaemonSet': 'daemonset', 'Node': 'static'}
 
 # Reason slugs in the order the filter evaluates them — the frontend labels them.
 REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'taint',
-                'insufficient-pods', 'insufficient-cpu', 'insufficient-memory')
+                'insufficient-pods', 'insufficient-cpu', 'insufficient-memory', 'insufficient-extended')
 
 
 def _allocatable(node: NodeResources) -> dict:
@@ -39,7 +42,19 @@ def _allocatable(node: NodeResources) -> dict:
         'memory': node.memory or 0,
         # No pod limit reported means no pod-count check, not a limit of zero.
         'pods': node.allocatable_pods,
+        # A resource the node does not advertise has zero allocatable.
+        'extended': dict(node.extended or {}),
     }
+
+
+def _reserve(room: dict, pod: PodResources) -> None:
+    """Take a pod's effective requests out of a node's free capacity."""
+    room['cpu'] -= pod.cpu or 0
+    room['memory'] -= pod.memory or 0
+    if room['pods'] is not None:
+        room['pods'] -= 1
+    for name, amount in (pod.extended or {}).items():
+        room['extended'][name] = room['extended'].get(name, 0) - amount
 
 
 def free_capacity(nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> dict:
@@ -47,12 +62,8 @@ def free_capacity(nodes: Iterable[NodeResources], pods: Iterable[PodResources]) 
     free = {n.name: _allocatable(n) for n in nodes}
     for pod in pods:
         room = free.get(pod.node_name)
-        if room is None:
-            continue
-        room['cpu'] -= pod.cpu or 0
-        room['memory'] -= pod.memory or 0
-        if room['pods'] is not None:
-            room['pods'] -= 1
+        if room is not None:
+            _reserve(room, pod)
     return free
 
 
@@ -64,6 +75,14 @@ def fmt_memory(kb: float) -> str:
     """Binary units, like `kubectl describe node`: kB are decimal, so convert via bytes."""
     mib = max(0.0, kb) * 1000 / (1024 * 1024)
     return f'{mib / 1024:.1f}Gi' if mib >= 1024 else f'{mib:.0f}Mi'
+
+
+def fmt_extended(name: str, amount: float) -> str:
+    """kB as binary units for byte-sized resources, a plain count for devices."""
+    if is_bytes(name):
+        return fmt_memory(amount)
+    amount = max(0, amount)
+    return str(int(amount)) if amount == int(amount) else f'{amount:g}'
 
 
 def _fmt_taint(taint: dict) -> str:
@@ -120,13 +139,20 @@ def filter_node(pod: PodResources, node: NodeResources, free: dict) -> list:
     if memory > free['memory']:
         reasons.append(_reason('insufficient-memory',
                                f"Insufficient memory: requires {fmt_memory(memory)}, available {fmt_memory(free['memory'])}"))
+    for name, amount in sorted((pod.extended or {}).items()):
+        available = free['extended'].get(name, 0)
+        if amount > available:
+            reasons.append(_reason('insufficient-extended',
+                                   f'Insufficient {name}: requires {fmt_extended(name, amount)}, '
+                                   f'available {fmt_extended(name, available)}'))
 
     return reasons
 
 
 def _public_free(free: dict) -> dict:
     return {'cpu': max(0, free['cpu']), 'memory': max(0.0, free['memory']),
-            'pods': max(0, free['pods']) if free['pods'] is not None else None}
+            'pods': max(0, free['pods']) if free['pods'] is not None else None,
+            'extended': {name: max(0, amount) for name, amount in free['extended'].items()}}
 
 
 def simulate_fit(pod: PodResources, nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> dict:
@@ -193,11 +219,7 @@ def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterabl
             pending.append({**entry, 'reasons': _unschedulable_summary([r for _, r in verdicts])})
             continue
         target = max(passing, key=lambda n: (_headroom(pod, alloc[n.name], free[n.name]), n.name))
-        room = free[target.name]
-        room['cpu'] -= pod.cpu or 0
-        room['memory'] -= pod.memory or 0
-        if room['pods'] is not None:
-            room['pods'] -= 1
+        _reserve(free[target.name], pod)
         placements.append({**entry, 'to': target.name})
 
     return {
