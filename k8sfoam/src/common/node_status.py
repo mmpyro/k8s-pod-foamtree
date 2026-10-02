@@ -1,4 +1,5 @@
 from typing import Optional
+from k8sfoam.src.common.resources import is_device
 
 
 # Conditions the kubelet raises when a node is running out of something. All of
@@ -44,3 +45,22 @@ def node_warnings(unschedulable: bool, taints: Optional[list], conditions: Optio
         warnings.append('tainted')
 
     return warnings
+
+
+# CPU or memory requested past this share leaves no room for another pod, so any
+# free GPU (or other device) on the node cannot be scheduled.
+STRANDED_SHARE = 0.9
+
+
+def stranded_devices(node, used: dict) -> bool:
+    """True when the node still has free devices but no CPU or memory left to run them.
+
+    `used` holds the node's summed pod requests, keyed like `_totals` in the extractor.
+    """
+    free_devices = any(is_device(name) and allocatable > used.get(name, 0)
+                       for name, allocatable in (node.extended or {}).items())
+    if not free_devices:
+        return False
+    cpu_full = bool(node.cpu) and used.get('cpu', 0) >= STRANDED_SHARE * node.cpu
+    memory_full = bool(node.memory) and used.get('memory', 0) >= STRANDED_SHARE * node.memory
+    return cpu_full or memory_full

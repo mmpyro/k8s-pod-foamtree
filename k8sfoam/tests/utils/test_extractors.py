@@ -423,3 +423,80 @@ def test_init_container_before_a_sidecar_runs_alone():
     # Then — max(app + proxy, migrate)
     assert result.cpu == 200
     assert result.memory == pytest.approx(float(bitmath.MiB(150).kB))
+
+
+def test_gpu_set_as_limit_only_counts_as_request():
+    # Given — the API allows extended resources in limits alone
+    extractor = ResourcesExtractor()
+    pod = create_pod('train', 'gpu-node', containers=[
+        create_container('train', '1', '1Gi', extra_limits={'nvidia.com/gpu': '2'})])
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert pod_resources.containers[0].extended == {'nvidia.com/gpu': 2}
+    assert pod_resources.extended == {'nvidia.com/gpu': 2}
+
+
+def test_extended_request_wins_over_limit():
+    # Given
+    extractor = ResourcesExtractor()
+    pod = create_pod('app', 'node', containers=[
+        create_container('app', '1', '1Gi', extra_requests={'ephemeral-storage': '1G'},
+                         extra_limits={'ephemeral-storage': '2G'})])
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert pod_resources.extended == {'ephemeral-storage': bitmath.GB(1).kB}
+
+
+@pytest.mark.parametrize("name, quantity, expected", [
+    ('ephemeral-storage', '1Gi', bitmath.GiB(1).kB),
+    ('hugepages-2Mi', '512Mi', bitmath.MiB(512).kB),
+    ('hugepages-1Gi', '2Gi', bitmath.GiB(2).kB),
+    ('amd.com/gpu', '1', 1),
+])
+def test_should_convert_extended_quantities(name, quantity, expected):
+    # Given
+    extractor = ResourcesExtractor()
+    pod = create_pod('app', 'node', containers=[create_container('app', '1', '1Gi', extra_requests={name: quantity})])
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert pod_resources.extended == {name: expected}
+
+
+def test_extended_resources_follow_the_init_and_sidecar_rule():
+    # Given — sidecar 1 GPU runs next to the 2-GPU init container, then next to the 1-GPU app
+    extractor = ResourcesExtractor()
+    pod = create_pod('app', 'node',
+                     containers=[create_container('app', '1', '1Gi', extra_limits={'nvidia.com/gpu': '1'})],
+                     init_containers=[
+                         create_container('side', '0', '0', restart_policy='Always', extra_limits={'nvidia.com/gpu': '1'}),
+                         create_container('warmup', '0', '0', extra_limits={'nvidia.com/gpu': '2'})])
+
+    # When
+    pod_resources = extractor.extract_pod_requested_resources(pod)
+
+    # Then — max(app 1 + side 1, side 1 + warmup 2)
+    assert pod_resources.extended == {'nvidia.com/gpu': 3}
+
+
+def test_node_reads_allocatable_and_skips_non_requestable_keys():
+    # Given
+    extractor = ResourcesExtractor()
+    node = create_node('gpu-node', '8', '32Gi', extended={
+        'nvidia.com/gpu': '4', 'ephemeral-storage': '100G', 'hugepages-2Mi': '0',
+        'pods': '110', 'attachable-volumes-aws-ebs': '39'})
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.cpu == 8000
+    assert node_resources.extended == {'nvidia.com/gpu': 4, 'ephemeral-storage': bitmath.GB(100).kB, 'hugepages-2Mi': 0}

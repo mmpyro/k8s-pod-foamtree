@@ -5,6 +5,7 @@ const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 const { PodAuditBadge } = window.k8sPodAudit;
 const { qosHue } = window.k8sQos;
+const { metricValue, nodeCap } = window.k8sResources;
 
 function squarify(items, x, y, w, h) {
   const sorted = items.filter(i => i.value > 0).sort((a, b) => b.value - a.value);
@@ -89,8 +90,8 @@ function cardStats(node, metric, match) {
   // Compute pod values + empty space. Size each pod by its effective request
   // (max(sum regular, max init)) — summing containers would double-count
   // init containers, which run sequentially before the regular ones.
-  const podValue = p => (metric === "cpu" ? p.cpu : p.mem);
-  const cap = metric === "cpu" ? node.cpuCapacity : node.memCapacity;
+  const podValue = p => metricValue(p, metric);
+  const cap = nodeCap(node, metric);
   const used = node.pods.reduce((s, p) => s + podValue(p), 0);
   // A pod requesting nothing on this metric (every BestEffort pod, by
   // definition) weighs 0 and squarify's `value > 0` guard drops it — so a
@@ -105,7 +106,9 @@ function cardStats(node, metric, match) {
   const empty = Math.max(0, cap - used);
   const items = [...podItems, { pod: null, value: empty, empty: true }];
 
-  const utilization = used / cap;
+  // A node without the resource never reaches a card (the grid filters it),
+  // but a refresh can race the filter — keep the colour maths finite.
+  const utilization = cap > 0 ? used / cap : 0;
   const utilColor = utilization > 0.85 ? "#ef4444" :
                     utilization > 0.6 ? "#f59e0b" :
                     utilization > 0.3 ? "#10b981" : "#3b82f6";
@@ -133,7 +136,7 @@ function podLayout(pod, metric, rect) {
   const headerH = podHeaderH(rect);
   const containers = pod.containers.map(c => ({
     container: c,
-    value: metric === "cpu" ? c.cpu : c.mem,
+    value: metricValue(c, metric),
   }));
   return squarify(
     containers,

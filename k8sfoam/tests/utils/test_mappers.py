@@ -282,3 +282,59 @@ def test_pods_land_on_their_own_node_and_unscheduled_pods_on_none():
 
         # Then — list order kept within a node, free space last
         assert [[p['label'] for p in n['groups']] for n in foamtree['groups']] == [['a-1', 'a-2', 'empty'], ['b-1', 'empty']]
+
+
+def _gpu_cluster():
+    nodes = [NodeResources('gpu', 8000, float(bitmath.GB(32).kB), extended={'nvidia.com/gpu': 4}),
+             NodeResources('cpu', 8000, float(bitmath.GB(32).kB), extended={'hugepages-2Mi': 0})]
+    containers = [ContainerResources('train', 1000, float(bitmath.GB(4).kB), extended={'nvidia.com/gpu': 3})]
+    pods = [PodResources('train', 'gpu', 1000, float(bitmath.GB(4).kB), containers, [], extended={'nvidia.com/gpu': 3})]
+    return FoamTreeMapper(nodes, pods)
+
+
+def test_should_list_only_resources_some_node_can_allocate():
+    # When
+    resources = _gpu_cluster().available_resources()
+
+    # Then
+    assert resources == ['cpu', 'memory', 'nvidia.com/gpu']
+
+
+def test_should_return_foam_tree_map_of_an_extended_resource():
+    # When
+    foamtree = _gpu_cluster().transform('nvidia.com/gpu')
+    gpu_node = _.find(foamtree['groups'], lambda item: item['label'] == 'gpu')
+    cpu_node = _.find(foamtree['groups'], lambda item: item['label'] == 'cpu')
+    pod_foam = _.find(gpu_node['groups'], lambda item: item['label'] == 'train')
+    empty_foam = _.find(gpu_node['groups'], lambda item: item['label'] == 'empty')
+
+    # Then
+    assert gpu_node['weight'] == 4
+    assert pod_foam['weight'] == 3
+    assert pod_foam['groups'][0]['weight'] == 3
+    assert empty_foam['weight'] == 1
+    assert cpu_node['weight'] == 0
+
+
+def test_every_payload_carries_the_extended_maps():
+    # When
+    foamtree = _gpu_cluster().transform('cpu')
+    gpu_node = _.find(foamtree['groups'], lambda item: item['label'] == 'gpu')
+    pod_foam = _.find(gpu_node['groups'], lambda item: item['label'] == 'train')
+
+    # Then
+    assert gpu_node['extended'] == {'nvidia.com/gpu': 4}
+    assert pod_foam['extended'] == {'nvidia.com/gpu': 3}
+    assert pod_foam['groups'][0]['extended'] == {'nvidia.com/gpu': 3}
+
+
+def test_node_with_free_gpus_but_no_cpu_left_is_stranded():
+    # Given — 1 GPU free, CPU 95% requested
+    nodes = [NodeResources('gpu', 8000, float(bitmath.GB(32).kB), extended={'nvidia.com/gpu': 4})]
+    pods = [PodResources('hog', 'gpu', 7600, float(bitmath.GB(1).kB), [], [], extended={'nvidia.com/gpu': 3})]
+
+    # When
+    foamtree = FoamTreeMapper(nodes, pods).transform('cpu')
+
+    # Then
+    assert 'stranded-devices' in foamtree['groups'][0]['warnings']
