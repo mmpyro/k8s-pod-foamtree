@@ -3,12 +3,13 @@
 // own canvas (see scene3d.jsx); everything here is plain functions.
 
 const {
-  squarify, cardMetrics, queryState, cardStats, cardLayout, podHeaderH, podLayout,
-  cardColors, podColors, containerColor,
+  cardMetrics, queryState, cardStats, cardLayout, podHeaderH, podLayout,
+  cardColors, podColors, containerColor, gridLayout, ZONE_HEADER,
 } = window.k8sTreemap;
+const { groupMode } = window.k8sTopology;
 const { workloadKey } = window.k8sWorkload;
 const { qosHue } = window.k8sQos;
-const { nodeCap, detectResources, isBytes } = window.k8sResources;
+const { detectResources, isBytes } = window.k8sResources;
 
 const FONT_MONO = `'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace`;
 const FONT_SANS = `'Space Grotesk', Manrope, -apple-system, 'Helvetica Neue', Arial, sans-serif`;
@@ -141,22 +142,45 @@ function cardSvg(node, slot, idx, opts) {
   return out.join("");
 }
 
+// A zone / pool box with its label band, as .zone-box draws it on screen.
+function zoneSvg(z, metric, groupWord, match) {
+  const g = z.group;
+  const util = g.util;
+  const dim = !!(match && match.active) && g.items.every(it => match.dimNodes.has(it.node.name));
+  const utilColor = util > 0.85 ? "#ef4444" : util > 0.6 ? "#f59e0b" : util > 0.3 ? "#10b981" : "#60a5fa";
+  const cy = ZONE_HEADER / 2 + 4;
+  const meta = `${g.items.length} node${g.items.length === 1 ? "" : "s"}`;
+  const utilText = `${Math.round(util * 100)}%`;
+  const kindW = groupWord.length * 9.5 * 0.6 + 8;
+  const tailW = (meta.length + utilText.length + 2) * 11 * 0.6 + 10;
+  return `<g transform="translate(${n1(z.x)} ${n1(z.y)})"${dim ? ` opacity=".4"` : ""}>` +
+    rect(0.5, 0.5, z.w - 1, z.h - 1,
+      `rx="12" fill="${g.labelled ? "rgba(255,255,255,.015)" : "none"}" stroke="#2b3147" stroke-dasharray="${g.labelled ? "4 3" : "1 3"}"`) +
+    text(10, cy, groupWord.toUpperCase(), `font-size="9.5" letter-spacing=".08em" fill="#6b7388" font-family="${FONT_MONO}"`) +
+    text(10 + kindW, cy, fit(g.label, z.w - 20 - kindW - tailW, 11),
+      `font-size="11" font-weight="500" fill="${g.labelled ? "#e7eaf3" : "#9aa3b8"}" font-family="${FONT_MONO}"`) +
+    text(z.w - 10, cy, utilText, `font-size="11" font-weight="600" fill="${utilColor}" text-anchor="end" font-family="${FONT_MONO}"`) +
+    text(z.w - 10 - (utilText.length * 11 * 0.6) - 8, cy, meta, `font-size="11" fill="#9aa3b8" text-anchor="end" font-family="${FONT_MONO}"`) +
+    `</g>`;
+}
+
 // The 2D map as a standalone SVG document. `width`/`height` is the map area;
 // a title band with the cluster summary sits above it so the image explains
 // itself when pasted into a deck.
 function treemapSvg({
-  nodes, match, metric, hueOf, colorBy, nodeStyle, density, showLabels, pinned,
+  nodes, match, metric, hueOf, colorBy, groupBy, nodeStyle, density, showLabels, pinned,
   width, height, meta,
 }) {
   const bg = cssVar("--bg", "#07080c");
   const accent = cssVar("--accent", "#7c5cff");
   const W = Math.round(width + MARGIN * 2), H = Math.round(height + HEADER_BAND + MARGIN);
 
-  // Same rule as the on-screen grid: nodes without an extended resource are left out.
-  const items = nodes
-    .map((n, idx) => ({ node: n, value: nodeCap(n, metric), idx }))
-    .filter(it => metric === "cpu" || metric === "mem" || it.value > 0);
-  const cards = squarify(items, 0, 0, width, height).map((it, i) => cardSvg(it.node, it, i, {
+  // Same layout as the on-screen grid, which also leaves out nodes without an
+  // extended resource.
+  const { zones, slots } = gridLayout(nodes, metric, groupBy, width, height);
+  const groupWord = groupMode(groupBy).label.toLowerCase();
+  const boxes = zones.map(z => zoneSvg(z, metric, groupWord, match));
+  const cards = slots.map((it, i) => cardSvg(it.node, it, i, {
     match, metric, hue: hueOf(it.idx), colorBy, nodeStyle, density, showLabels, pinned, accent,
   }));
 
@@ -172,7 +196,7 @@ function treemapSvg({
     `<title>${esc(meta.title)}</title>` +
     `<rect width="100%" height="100%" fill="${bg}"/>` +
     head.join("") +
-    `<g transform="translate(${MARGIN} ${HEADER_BAND})">${cards.join("")}</g>` +
+    `<g transform="translate(${MARGIN} ${HEADER_BAND})">${boxes.join("")}${cards.join("")}</g>` +
     `</svg>`;
 }
 
@@ -203,7 +227,7 @@ function svgToPng(svg, scale) {
 }
 
 const CSV_COLUMNS = [
-  "context", "node", "namespace", "pod", "qos", "cpu_millicores", "memory_mib",
+  "context", "node", "zone", "region", "node_pool", "instance_type", "capacity_type", "namespace", "pod", "qos", "cpu_millicores", "memory_mib",
   "containers", "init_containers", "findings", "node_warnings", "matched",
 ];
 
@@ -230,6 +254,11 @@ function podRows(nodes, match, context) {
       rows.push({
         context,
         node: n.name,
+        zone: topo(n).zone,
+        region: topo(n).region,
+        node_pool: topo(n).nodePool,
+        instance_type: topo(n).instanceType,
+        capacity_type: topo(n).capacityType,
         namespace: p.namespace,
         pod: p.name,
         qos: p.qos,
@@ -249,6 +278,8 @@ function podRows(nodes, match, context) {
   }
   return rows;
 }
+
+const topo = n => n.topology || {};
 
 function csvCell(v) {
   const s = String(v ?? "");
@@ -277,6 +308,7 @@ function reportJson({ nodes, totals, context, metric, query, match }) {
     totals,
     nodes: nodes.map(n => ({
       name: n.name,
+      topology: n.topology,
       cpuCapacity: n.cpuCapacity, cpuUsed: n.cpuUsed,
       memCapacity: n.memCapacity, memUsed: n.memUsed,
       extended: { capacity: n.extCap, used: n.extUsed },

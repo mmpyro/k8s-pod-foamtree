@@ -101,6 +101,8 @@ class ResourcesExtractor():
         cpu = convert_cpu(allocatable['cpu'])
         memory = convert_memory(allocatable['memory'])
         unschedulable = bool(node.spec.unschedulable) if node.spec is not None else False
+        # None on the API when unset, like a pod's labels.
+        labels = node.metadata.labels or {}
         return NodeResources(node.metadata.name, cpu, memory, unschedulable,
                              self.__extract_node_taints(node), self.__extract_node_conditions(node),
-                             extract_extended(allocatable))
+                             extract_extended(allocatable), labels)

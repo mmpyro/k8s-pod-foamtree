@@ -79,6 +79,31 @@ def test_should_extract_node_resources():
     assert node_resources.cpu == 2000
 
 
+def test_should_extract_node_labels():
+    # Given
+    extractor = ResourcesExtractor()
+    labels = {'topology.kubernetes.io/zone': 'us-east-1a', 'karpenter.sh/nodepool': 'general'}
+    node = create_node('worker-1', '2', '8162156Ki', labels=labels)
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.labels == labels
+
+
+def test_should_extract_node_with_no_labels_as_empty_dict():
+    # Given
+    extractor = ResourcesExtractor()
+    node = create_node('minikube', '2', '8162156Ki')
+
+    # When
+    node_resources = extractor.extract_node_resources(node)
+
+    # Then
+    assert node_resources.labels == {}
+
+
 # --- Init container tests ---
 
 def test_effective_cpu_when_no_init_containers():

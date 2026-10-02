@@ -13,9 +13,10 @@ PodResources = namedtuple(
 # memory_limit (kB, None when unset) backs the missing-limits audit rule.
 ContainerResources = namedtuple('ContainerResources', 'name cpu memory memory_limit extended', defaults=(None, None))
 # unschedulable/taints/conditions back the node health markers (cordon, pressure,
-# taints). Declared last with defaults so existing positional construction keeps working.
+# taints); labels back the zone / node pool grouping. Declared last with defaults so
+# existing positional construction keeps working.
 NodeResources = namedtuple(
     'NodeResources',
-    'name cpu memory unschedulable taints conditions extended',
-    defaults=(False, None, None, None)
+    'name cpu memory unschedulable taints conditions extended labels',
+    defaults=(False, None, None, None, None)
 )

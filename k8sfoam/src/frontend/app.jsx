@@ -1,12 +1,13 @@
 // Main app — sidebar + treemap grid for the k8sfoams dashboard.
 
 const { useState, useEffect, useMemo, useRef } = React;
-const { NodeCard } = window.k8sTreemap;
+const { NodeCard, gridLayout, SLOT_GAP, ZONE_HEADER } = window.k8sTreemap;
 const { Scene3D } = window.k8sScene3D;
 const { workloadKey } = window.k8sWorkload;
 const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
 const { QOS_INFO, QOS_ORDER, NEUTRAL_HUE } = window.k8sQos;
+const { GROUP_MODES, groupMode, groupNodes } = window.k8sTopology;
 const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
@@ -144,6 +145,9 @@ function mergeResources(cpuData, memData) {
     // Convert node capacity from kB to MiB
     const memCapacity = kbToMib(mg.weight || 0);
     const convertedMemUsed = kbToMib(memUsed);
+    // Placement labels from the backend; null wherever the node is unlabelled,
+    // and an empty object on an older backend.
+    const topo = cg.topology || {};
     const extCap = extOf(cg.extended);
     const extFree = {};
     for (const [name, cap] of Object.entries(extCap)) extFree[name] = Math.max(0, cap - (extUsed[name] || 0));
@@ -151,8 +155,13 @@ function mergeResources(cpuData, memData) {
     return {
       id: `node-${idx}`,
       name: cg.label,
-      region: "us-east-1",
-      instanceType: "standard",
+      topology: {
+        zone: topo.zone || null,
+        region: topo.region || null,
+        instanceType: topo.instanceType || null,
+        nodePool: topo.nodePool || null,
+        capacityType: topo.capacityType || null,
+      },
       cpuCapacity: cg.weight || 0,
       memCapacity: memCapacity,
       cpuUsed,
@@ -181,6 +190,8 @@ function App() {
   const [zoom, setZoom] = useState(0.7);
   const [metric, setMetric] = useState("cpu");
   const [colorBy, setColorBy] = useState("node");
+  // "none" keeps the flat map; any other mode boxes nodes by that topology label.
+  const [groupBy, setGroupBy] = useState("none");
   const [memUnit, setMemUnit] = useState("GiB");
   const [refreshInterval, setRefreshInterval] = useState(60);
   const [contexts, setContexts] = useState([]);
@@ -401,6 +412,12 @@ function App() {
     return QOS_ORDER.map(q => ({ qos: q, count: counts.get(q), ...QOS_INFO[q] }));
   }, [nodes]);
 
+  // One row per zone / pool when grouping is on — the capacity imbalance view.
+  const topology = useMemo(
+    () => (groupBy === "none" ? [] : groupNodes(nodes, groupBy, metric)),
+    [nodes, groupBy, metric]
+  );
+
   // In QoS mode node chrome goes neutral, so only the pods carry colour.
   const hueOf = idx => (colorBy === "qos" ? NEUTRAL_HUE : nodeHue(idx, tw.colorScheme));
 
@@ -435,7 +452,7 @@ function App() {
         used: totals.extUsed[metric] || 0, cap: totals.extCap[metric] || 0, meta: resourceMeta(metric),
       };
       const svg = k.treemapSvg({
-        nodes, match, metric, hueOf, colorBy,
+        nodes, match, metric, hueOf, colorBy, groupBy,
         nodeStyle: tw.nodeStyle, density: tw.density, showLabels: tw.showLabels,
         pinned: selectedWorkload,
         width: r.width, height: r.height,
@@ -443,7 +460,8 @@ function App() {
           title: `${resourceMeta(metric).label} Resources · ${ctx ? shortContext(ctx) : "cluster"}`,
           subtitle: `${totals.nodes} nodes · ${totals.pods} pods` +
             `${match.active ? ` · query: ${query.trim()} (${match.count} matched)` : ""}` +
-            `${colorBy === "qos" ? " · color = QoS class" : ""}`,
+            `${colorBy === "qos" ? " · color = QoS class" : ""}` +
+            `${groupBy !== "none" ? ` · grouped by ${groupMode(groupBy).label.toLowerCase()}` : ""}`,
           stats: `CPU ${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)} cores (${cpuPct}%)` +
             ` · Memory ${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)} ${memUnit} (${memPct}%)` +
             (ext ? ` · ${ext.meta.label} ${fmtValue(ext.used, metric, memUnit)} / ${fmtValue(ext.cap, metric, memUnit, true)}` +
@@ -486,6 +504,8 @@ function App() {
         audit={audit}
         qosBreakdown={qosBreakdown}
         colorBy={colorBy} setColorBy={setColorBy}
+        groupBy={groupBy} setGroupBy={setGroupBy}
+        topology={topology}
         query={query} setQuery={setQuery}
       />
 
@@ -528,6 +548,7 @@ function App() {
               zoom={zoom}
               hueOf={hueOf}
               colorBy={colorBy}
+              groupBy={groupBy}
               memUnit={memUnit}
               fmtMem={fmtMem}
               metric={metric}
@@ -545,6 +566,7 @@ function App() {
               metric={metric}
               hueOf={hueOf}
               colorBy={colorBy}
+              groupBy={groupBy}
               nodeStyle={tw.nodeStyle}
               density={tw.density}
               showLabels={tw.showLabels}
@@ -602,7 +624,7 @@ function Sidebar({
   open, onToggle, view, setView, zoom, setZoom, metric, setMetric, metrics, totals, memUnit, setMemUnit,
   refreshInterval, setRefreshInterval,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
-  audit, qosBreakdown, colorBy, setColorBy, query, setQuery
+  audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery
 }) {
   const is3d = view === "3d";
   return (
@@ -690,6 +712,18 @@ function Sidebar({
       </div>
 
       <div className="sidebar-section">
+        <div className="section-label">Group by</div>
+        <div className="seg seg-wrap">
+          {GROUP_MODES.map(g => (
+            <button key={g.id} className={groupBy === g.id ? "seg-on" : ""}
+              onClick={() => setGroupBy(g.id)}>
+              {g.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="sidebar-section">
         <div className="section-label">Context</div>
         <div className="ctx-list">
           {contexts
@@ -754,6 +788,35 @@ function Sidebar({
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* Capacity per zone / pool, so an imbalance reads without hovering. A
+          row toggles its zone:/pool:/… query; the unlabelled group has no
+          token to toggle. */}
+      {topology.length > 0 && (
+        <div className="sidebar-section">
+          <div className="section-label">
+            <span>Topology</span>
+            <span className="section-value">{topology.length} group{topology.length === 1 ? "" : "s"}</span>
+          </div>
+          <div className="health-rows">
+            {topology.map(g => {
+              const on = !!g.token && query.trim() === g.token;
+              return (
+                <button key={g.label} className={`health-row topo-row ${g.token ? "audit-row" : "topo-none"} ${on ? "audit-on" : ""}`}
+                  disabled={!g.token}
+                  title={`${g.items.length} node${g.items.length === 1 ? "" : "s"} · CPU ${pct(g.cpuUtil)} · Memory ${pct(g.memUtil)}`}
+                  onClick={() => g.token && setQuery(on ? "" : g.token)}>
+                  <span className="health-name">{g.label}</span>
+                  <span className="topo-util" style={{ color: utilColor(g.cpuUtil) }}>{pct(g.cpuUtil)}</span>
+                  <span className="topo-util" style={{ color: utilColor(g.memUtil) }}>{pct(g.memUtil)}</span>
+                  <span className="health-count">{g.items.length}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="seg-note">CPU % · Memory % · nodes</div>
         </div>
       )}
 
@@ -1061,7 +1124,7 @@ function QueryBar({ query, setQuery, match, hintOpen, setHintOpen }) {
 }
 
 function Stat({ label, value, unit, pct, className = "" }) {
-  const color = pct > 0.85 ? "#ef4444" : pct > 0.6 ? "#f59e0b" : pct > 0.3 ? "#10b981" : "#60a5fa";
+  const color = utilColor(pct);
   return (
     <div className={`stat ${className}`} title={`${label}: ${value} ${unit}`}>
       <div className="stat-label">{label}</div>
@@ -1079,7 +1142,7 @@ function Stat({ label, value, unit, pct, className = "" }) {
 /* ─────────── Grid ─────────── */
 
 function TreemapGrid({
-  nodes, match, metric, hueOf, colorBy, nodeStyle, density, showLabels, onFocus,
+  nodes, match, metric, hueOf, colorBy, groupBy, nodeStyle, density, showLabels, onFocus,
   highlight, highlightActive, onPodSelect, onPodHover,
 }) {
   const containerRef = useRef(null);
@@ -1097,25 +1160,40 @@ function TreemapGrid({
     return () => ro.disconnect();
   }, []);
 
-  // Top-level squarify of nodes themselves, sized by capacity. A node without
-  // the selected extended resource has nothing to draw, so it is left out
-  // (the header counts it); idx is kept so node hues stay put across metrics.
-  const items = nodes
-    .map((n, idx) => ({ node: n, value: nodeCap(n, metric), idx }))
-    .filter(it => isBase(metric) || it.value > 0);
-
-  const laid = box.w > 0 && box.h > 0
-    ? window.k8sTreemap.squarify(items, 0, 0, box.w, box.h)
-    : [];
+  // Nodes sized by capacity, boxed by zone / pool when grouping is on. A node
+  // without the selected extended resource has nothing to draw, so gridLayout
+  // leaves it out (the header counts it); idx is kept so node hues stay put.
+  const { zones, slots } = box.w > 0 && box.h > 0
+    ? gridLayout(nodes, metric, groupBy, box.w, box.h)
+    : { zones: [], slots: [] };
+  const groupWord = groupMode(groupBy).label.toLowerCase();
 
   return (
     <div className="grid" ref={containerRef}>
-      {laid.map((it, i) => {
+      {zones.map(z => {
+        const util = z.group.util;
+        // Every node in the group ruled out by the query → the box steps back too.
+        const dim = !!(match && match.active) && z.group.items.every(it => match.dimNodes.has(it.node.name));
+        return (
+          <div key={z.group.label} className={`zone-box ${z.group.labelled ? "" : "zone-unlabelled"} ${dim ? "is-dim" : ""}`}
+            style={{ left: z.x, top: z.y, width: z.w, height: z.h }}>
+            <div className="zone-head" style={{ height: ZONE_HEADER }}>
+              <span className="zone-kind">{groupWord}</span>
+              <span className="zone-name">{z.group.label}</span>
+              <span className="zone-meta">
+                {z.group.items.length} node{z.group.items.length === 1 ? "" : "s"}
+                <span className="zone-util" style={{ color: utilColor(util) }}>{pct(util)}</span>
+              </span>
+            </div>
+          </div>
+        );
+      })}
+      {slots.map((it, i) => {
         const hue = hueOf(it.idx);
         return (
           <div key={it.node.id} className="grid-slot"
             style={{
-              left: it.x, top: it.y, width: it.w - 6, height: it.h - 6,
+              left: it.x, top: it.y, width: it.w - SLOT_GAP, height: it.h - SLOT_GAP,
             }}>
             <NodeCard
               node={it.node}
@@ -1149,7 +1227,7 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
           <div>
             <div className="overlay-title">{node.name}</div>
             <div className="overlay-sub">
-              {node.instanceType} · {node.region} ·
+              {topologyLine(node)}
               <span className={`status-pill status-${node.status}`}>{node.status}</span>
             </div>
           </div>
@@ -1314,6 +1392,23 @@ function MetricIcon({ kind }) {
 }
 
 /* ─────────── Utils ─────────── */
+
+// Traffic-light colour for a 0..1 utilisation, as in the header stats.
+function utilColor(u) {
+  return u > 0.85 ? "#ef4444" : u > 0.6 ? "#f59e0b" : u > 0.3 ? "#10b981" : "#60a5fa";
+}
+
+function pct(u) {
+  return `${Math.round((u || 0) * 100)}%`;
+}
+
+// "m5.large · us-east-1a · general · spot ·" — only the facts the node is
+// labelled with, each followed by the separator the status pill expects.
+function topologyLine(node) {
+  const t = node.topology || {};
+  return [t.instanceType, t.zone || t.region, t.nodePool, t.capacityType]
+    .filter(Boolean).map(v => `${v} · `).join("");
+}
 
 function shortContext(ctx) {
   const last = ctx.split("/").pop();
