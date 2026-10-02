@@ -1,3 +1,4 @@
+from kubernetes.utils import parse_quantity  # type: ignore
 from k8sfoam.src.common.dtos import PodResources, ContainerResources, NodeResources
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS, CORDON_TAINT
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, extract_extended
@@ -16,9 +17,27 @@ def _totals(c: ContainerResources) -> dict:
     return {'cpu': c.cpu, 'memory': c.memory, **(c.extended or {})}
 
 
+# The kubelet marks a static pod's API copy with this annotation. Such a pod is
+# owned by the node itself: a drain cannot evict it and nothing reschedules it.
+MIRROR_POD_ANNOTATION = 'kubernetes.io/config.mirror'
+
+
 class ResourcesExtractor():
     def __requests_contains_key(self, requests: dict, key: str) -> bool:
         return requests is not None and key in requests
+
+    def __extract_tolerations(self, pod) -> list:
+        return [{'key': t.key, 'operator': t.operator, 'value': t.value, 'effect': t.effect}
+                for t in pod.spec.tolerations or []]
+
+    def __extract_owner_kind(self, pod):
+        """Who recreates the pod after an eviction: a controller kind, 'Node' for a
+        static pod, or None for a naked pod that nothing brings back."""
+        if MIRROR_POD_ANNOTATION in (pod.metadata.annotations or {}):
+            return 'Node'
+        refs = pod.metadata.owner_references or []
+        controller = next((r for r in refs if r.controller), refs[0] if refs else None)
+        return controller.kind if controller is not None else None
 
     def __extract_container_resources(self, container) -> ContainerResources:
         requests = container.resources.requests
@@ -71,7 +90,8 @@ class ResourcesExtractor():
         extended = {k: v for k, v in effective.items() if k not in ('cpu', 'memory') and v}
 
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
-                            namespace, labels, qos_class, extended)
+                            namespace, labels, qos_class, extended, dict(pod.spec.node_selector or {}),
+                            self.__extract_tolerations(pod), self.__extract_owner_kind(pod))
 
     def __extract_node_taints(self, node) -> list:
         """Every taint on the node, minus the one Kubernetes adds on cordon.
@@ -101,6 +121,8 @@ class ResourcesExtractor():
         cpu = convert_cpu(allocatable['cpu'])
         memory = convert_memory(allocatable['memory'])
         unschedulable = bool(node.spec.unschedulable) if node.spec is not None else False
+        # The pod slot count backs the simulator's pod-limit check; None when unreported.
+        alloc_pods = int(parse_quantity(allocatable['pods'])) if 'pods' in allocatable else None
         return NodeResources(node.metadata.name, cpu, memory, unschedulable,
                              self.__extract_node_taints(node), self.__extract_node_conditions(node),
-                             extract_extended(allocatable))
+                             extract_extended(allocatable), dict(node.metadata.labels or {}), alloc_pods)

@@ -1179,3 +1179,105 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .export-item:hover:not(:disabled) { background: var(--bg-3); }
 .export-item:disabled { color: var(--text-soft); cursor: default; }
 .export-hint { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-soft); }
+
+/* ─────────── Scheduling simulators ─────────── */
+
+.header-tools .icon-btn:disabled { opacity: .4; cursor: default; }
+
+/* Node outlines while a fit or drain result is shown. Inset, so they never
+   change the card's box and the treemap layout stays put. */
+.node-card.sim-ok { box-shadow: inset 0 0 0 2px var(--ok), 0 0 18px -6px var(--ok); }
+.node-card.sim-fail { box-shadow: inset 0 0 0 2px var(--danger), 0 0 18px -6px var(--danger); }
+.node-card.sim-drained { box-shadow: inset 0 0 0 2px var(--text-soft); opacity: .55; }
+.sim-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  flex-shrink: 0;
+}
+.sim-badge-ok { background: rgba(16,185,129,.18); color: var(--ok); }
+.sim-badge-fail { background: rgba(239,68,68,.18); color: var(--danger); }
+.sim-badge-drained { background: var(--bg-3); color: var(--text-dim); }
+
+.sim-strip {
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 22px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+  border-bottom: 1px solid;
+}
+.sim-strip-ok { background: rgba(16,185,129,.08); border-color: rgba(16,185,129,.35); }
+.sim-strip-fail { background: rgba(239,68,68,.08); border-color: rgba(239,68,68,.35); }
+.sim-strip-kind { color: var(--text-soft); text-transform: uppercase; letter-spacing: .08em; font-size: 10px; }
+.sim-strip-legend { margin-left: auto; display: flex; gap: 6px; }
+
+.overlay-head-tools { display: flex; align-items: center; gap: 8px; }
+.sim-drain-btn { padding: 8px 12px; white-space: nowrap; }
+.btn-primary:disabled { opacity: .6; cursor: default; transform: none; }
+
+.sim-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.sim-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sim-wide { grid-column: 1 / -1; }
+.sim-field input {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.sim-field input:focus { outline: none; border-color: var(--accent); }
+.sim-field input::placeholder { color: var(--text-soft); }
+.sim-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+.sim-error { font-size: 11px; color: var(--danger); margin-right: auto; }
+
+.sim-summary {
+  font-size: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  border: 1px solid;
+}
+.sim-summary-ok { color: var(--ok); border-color: rgba(16,185,129,.35); background: rgba(16,185,129,.08); }
+.sim-summary-fail { color: var(--danger); border-color: rgba(239,68,68,.35); background: rgba(239,68,68,.08); }
+
+.sim-row-ok { border-left: 3px solid var(--ok); }
+.sim-row-fail { border-left: 3px solid var(--danger); }
+.sim-reasons {
+  display: flex; flex-wrap: wrap; gap: 4px 10px;
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--danger);
+}
+.sim-reasons-ok { color: var(--ok); font-family: var(--font-mono); }
+.sim-tag {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: rgba(245,158,11,.15);
+  color: var(--warn);
+}
+.sim-group + .sim-group { margin-top: 16px; }
+.sim-skipped { display: flex; flex-direction: column; gap: 4px; }
+.sim-report-head { display: flex; align-items: baseline; justify-content: space-between; }
+.sim-link { font-size: 11px; color: var(--text-dim); background: none; border: 0; cursor: pointer; }
+.sim-link:hover { color: var(--text); }
+.sim-caveat { margin-top: 14px; font-size: 10.5px; color: var(--text-soft); line-height: 1.5; }
+
+@media (max-width: 760px) {
+  .sim-form { grid-template-columns: 1fr; }
+}

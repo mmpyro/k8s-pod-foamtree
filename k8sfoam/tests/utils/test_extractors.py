@@ -2,7 +2,8 @@ import bitmath  # type: ignore
 import pytest
 from k8sfoam.src.utils.extractors import ResourcesExtractor
 from pydash import py_ as _  # type: ignore
-from k8sfoam.tests.common.mocks import create_container, create_pod, create_node, create_taint, create_condition
+from k8sfoam.tests.common.mocks import (create_container, create_pod, create_node, create_taint, create_condition,
+                                        create_toleration)
 from unittest.mock import MagicMock
 
 
@@ -423,6 +424,67 @@ def test_init_container_before_a_sidecar_runs_alone():
     # Then — max(app + proxy, migrate)
     assert result.cpu == 200
     assert result.memory == pytest.approx(float(bitmath.MiB(150).kB))
+
+
+def test_should_extract_node_labels_and_pod_limit():
+    # Given
+    extractor = ResourcesExtractor()
+    node = create_node('worker', '3800m', '15Gi', labels={'zone': 'a'}, pods='110')
+
+    # When
+    result = extractor.extract_node_resources(node)
+
+    # Then
+    assert result.labels == {'zone': 'a'}
+    assert result.allocatable_pods == 110
+    # pods is a slot count, not a requestable resource
+    assert result.extended == {}
+
+
+def test_node_without_pod_limit_or_labels_emits_neutral_values():
+    # When
+    result = ResourcesExtractor().extract_node_resources(create_node('worker', '4', '16Gi'))
+
+    # Then
+    assert result.labels == {}
+    assert result.allocatable_pods is None
+
+
+def test_should_extract_pod_scheduling_constraints():
+    # Given
+    extractor = ResourcesExtractor()
+    pod = create_pod('web', 'node', containers=[create_container('app', '100m', '100Mi')],
+                     node_selector={'zone': 'a'},
+                     tolerations=[create_toleration('dedicated', 'Equal', 'gpu', 'NoSchedule')],
+                     owner_kind='ReplicaSet')
+
+    # When
+    result = extractor.extract_pod_requested_resources(pod)
+
+    # Then
+    assert result.node_selector == {'zone': 'a'}
+    assert result.tolerations == [{'key': 'dedicated', 'operator': 'Equal', 'value': 'gpu', 'effect': 'NoSchedule'}]
+    assert result.owner_kind == 'ReplicaSet'
+
+
+@pytest.mark.parametrize('owner_kind, annotations, expected', [
+    (None, None, None),
+    ('DaemonSet', None, 'DaemonSet'),
+    ('Node', {'kubernetes.io/config.mirror': 'abc'}, 'Node'),
+    (None, {'kubernetes.io/config.mirror': 'abc'}, 'Node'),
+])
+def test_should_extract_pod_owner_kind(owner_kind, annotations, expected):
+    # Given
+    pod = create_pod('p', 'node', containers=[create_container('app', '100m', '100Mi')],
+                     owner_kind=owner_kind, annotations=annotations)
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert result.owner_kind == expected
+    assert result.node_selector == {}
+    assert result.tolerations == []
 
 
 def test_gpu_set_as_limit_only_counts_as_request():

@@ -10,6 +10,7 @@ const { QOS_INFO, QOS_ORDER, NEUTRAL_HUE } = window.k8sQos;
 const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
+const { FitModal, DrainButton, DrainReport, drainSimulation } = window.k8sSimulate;
 
 const COLOR_MODES = [
   { id: "node", label: "Node" },
@@ -193,6 +194,10 @@ function App() {
   // previews one, so a pinned selection always wins over the pointer.
   const [selectedWorkload, setSelectedWorkload] = useState(null);
   const [hoveredWorkload, setHoveredWorkload] = useState(null);
+  // Latest fit or drain simulation: { kind, summary, ok, verdicts: Map<node, verdict> }.
+  // Its verdicts outline nodes in both views until cleared.
+  const [sim, setSim] = useState(null);
+  const [fitOpen, setFitOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [nodes, setNodes] = useState([]);
   const [error, setError] = useState(null);
@@ -225,12 +230,13 @@ function App() {
       });
   }, []);
 
+  const currentCtx = contexts[contextIdx];
+  const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
+
   // Fetch cluster resource data
   const loadData = async () => {
     setRefreshing(true);
     try {
-      const currentCtx = contexts[contextIdx];
-      const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
 
       const [cpuRes, memRes] = await Promise.all([
         fetch(`/resources/cpu${ctxParam}`).then(r => {
@@ -267,6 +273,7 @@ function App() {
   useEffect(() => {
     setSelectedWorkload(null);
     setHoveredWorkload(null);
+    setSim(null);
   }, [contextIdx]);
 
   // Keep a stable ref to the latest loadData so the auto-refresh interval
@@ -355,12 +362,14 @@ function App() {
   // rendered set is replaced; the pin is unaffected.
   useEffect(() => { setHoveredWorkload(null); }, [nodes, view]);
 
-  // Escape clears the highlight — pin and hover preview alike.
+  // Escape clears the highlight — pin, hover preview and simulation outlines alike.
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== "Escape") return;
       setSelectedWorkload(null);
       setHoveredWorkload(null);
+      setSim(null);
+      setFitOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -518,7 +527,23 @@ function App() {
           onClearWorkload={() => setSelectedWorkload(null)}
           onExport={onExport}
           canExport={nodes.length > 0}
+          onFit={() => setFitOpen(true)}
         />
+
+        {/* Active simulation — explains the green/red node outlines. A strip,
+            not a header chip: the header title has no room left at laptop widths. */}
+        {sim && (
+          <div className={`sim-strip ${sim.ok ? "sim-strip-ok" : "sim-strip-fail"}`}>
+            <span className="sim-strip-kind">{sim.kind === "fit" ? "Fit simulation" : "Drain simulation"}</span>
+            <span>{sim.summary}</span>
+            <span className="sim-strip-legend">
+              <span className="sim-badge sim-badge-ok">fits</span>
+              <span className="sim-badge sim-badge-fail">no fit</span>
+              {sim.kind === "drain" && <span className="sim-badge sim-badge-drained">drained</span>}
+            </span>
+            <button className="wl-chip-clear" onClick={() => setSim(null)} title="Clear simulation (Esc)">×</button>
+          </div>
+        )}
 
         <div className="grid-wrap" ref={gridWrapRef}>
           {view === "3d" ? (
@@ -537,6 +562,7 @@ function App() {
               onPodSelect={toggleWorkload}
               onPodHover={setHoveredWorkload}
               captureRef={captureRef}
+              verdicts={sim && sim.verdicts}
             />
           ) : (
             <TreemapGrid
@@ -553,13 +579,20 @@ function App() {
               highlightActive={highlightActive}
               onPodSelect={toggleWorkload}
               onPodHover={setHoveredWorkload}
+              verdicts={sim && sim.verdicts}
             />
           )}
         </div>
       </main>
 
       {focused && (
-        <FocusOverlay node={focused} onClose={() => setFocused(null)} metric={metric} memUnit={memUnit} />
+        <FocusOverlay key={focused.name} node={focused} onClose={() => setFocused(null)} metric={metric} memUnit={memUnit}
+          ctxParam={ctxParam} onSimulation={setSim} />
+      )}
+
+      {fitOpen && (
+        <FitModal ctxParam={ctxParam} memUnit={memUnit} fmtMem={fmtMem}
+          onSimulation={setSim} onClose={() => setFitOpen(false)} />
       )}
 
       <TweaksPanel>
@@ -877,6 +910,7 @@ function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
 function Header({
   metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
   onMenu, onRefresh, refreshing, workload, onClearWorkload, onExport, canExport,
+  onFit,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
@@ -951,6 +985,13 @@ function Header({
         </div>
         <QueryBar query={query} setQuery={setQuery} match={match}
           hintOpen={hintOpen} setHintOpen={setHintOpen} />
+        <button className="icon-btn" onClick={onFit} disabled={!canExport} title="Can I fit this pod?">
+          {/* A dashed pod slot with a plus — "place a new pod". */}
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.4 1.6" />
+            <path d="M8 5.2 V10.8 M5.2 8 H10.8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </button>
         <ExportMenu is3d={is3d} disabled={!canExport} onExport={onExport} />
         <button className={`icon-btn ${refreshing ? "spinning" : ""}`} onClick={onRefresh} title="Refresh">
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
@@ -1080,7 +1121,7 @@ function Stat({ label, value, unit, pct, className = "" }) {
 
 function TreemapGrid({
   nodes, match, metric, hueOf, colorBy, nodeStyle, density, showLabels, onFocus,
-  highlight, highlightActive, onPodSelect, onPodHover,
+  highlight, highlightActive, onPodSelect, onPodHover, verdicts,
 }) {
   const containerRef = useRef(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -1131,6 +1172,7 @@ function TreemapGrid({
               highlightActive={highlightActive}
               onPodSelect={onPodSelect}
               onPodHover={onPodHover}
+              verdict={verdicts && verdicts.get(it.node.name)}
             />
           </div>
         );
@@ -1141,7 +1183,13 @@ function TreemapGrid({
 
 /* ─────────── Focus overlay ─────────── */
 
-function FocusOverlay({ node, onClose, metric, memUnit }) {
+function FocusOverlay({ node, onClose, metric, memUnit, ctxParam, onSimulation }) {
+  // Drain report for this node; replaces the workload list while shown.
+  const [drain, setDrain] = useState(null);
+  const onDrainReport = (report) => {
+    setDrain(report);
+    if (report.result) onSimulation(drainSimulation(report.result));
+  };
   return (
     <div className="overlay" onClick={onClose}>
       <div className="overlay-card" onClick={e => e.stopPropagation()}>
@@ -1153,9 +1201,12 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
               <span className={`status-pill status-${node.status}`}>{node.status}</span>
             </div>
           </div>
-          <button className="icon-btn" onClick={onClose}>
-            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
-          </button>
+          <div className="overlay-head-tools">
+            <DrainButton ctxParam={ctxParam} nodeName={node.name} onReport={onDrainReport} />
+            <button className="icon-btn" onClick={onClose}>
+              <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+            </button>
+          </div>
         </div>
         <div className="overlay-stats">
           <div className="ov-stat">
@@ -1206,7 +1257,16 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
             )}
           </div>
         )}
-        <div className="overlay-pods">
+        {drain && (
+          <div className="overlay-pods">
+            <div className="sim-report-head">
+              <div className="ov-section-title">Drain simulation</div>
+              <button className="sim-link" onClick={() => setDrain(null)}>← back to workloads</button>
+            </div>
+            <DrainReport report={drain} memUnit={memUnit} fmtMem={fmtMem} />
+          </div>
+        )}
+        {!drain && <div className="overlay-pods">
           <div className="ov-section-title">Workloads</div>
           {node.pods.length === 0 && <div className="empty-state">Node has no scheduled pods.</div>}
           <div className="pod-rows">
@@ -1256,7 +1316,7 @@ function FocusOverlay({ node, onClose, metric, memUnit }) {
               );
             })}
           </div>
-        </div>
+        </div>}
       </div>
     </div>
   );

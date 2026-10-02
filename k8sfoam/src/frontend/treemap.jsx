@@ -182,10 +182,13 @@ function containerColor(hue, init) {
   return init ? `hsla(${hue}, 10%, 55%, 0.85)` : `hsla(${hue}, 70%, 68%, 0.92)`;
 }
 
+// Header tag per simulation verdict, next to the warning badge.
+const SIM_BADGE = { ok: "fits", fail: "no fit", drained: "drained" };
+
 // Render a node card: header + nested treemap of pods (each pod = treemap of containers).
 function NodeCard({
   node, match, metric, hue, colorBy, style: nodeStyle, showLabels, density, onClick,
-  highlight, highlightActive, onPodSelect, onPodHover,
+  highlight, highlightActive, onPodSelect, onPodHover, verdict,
 }) {
   const ref = React.useRef(null);
   const [box, setBox] = React.useState({ w: 0, h: 0 });
@@ -219,7 +222,7 @@ function NodeCard({
     <div
       ref={ref}
       onClick={onClick}
-      className={`node-card ${nodeDim ? "is-dim" : ""}`}
+      className={`node-card ${nodeDim ? "is-dim" : ""} ${verdict ? `sim-${verdict}` : ""}`}
       style={{
         background: colors.css,
         borderColor: colors.border,
@@ -231,6 +234,7 @@ function NodeCard({
         <div className="node-header-dot" style={{ background: colors.dot }}></div>
         <span className="node-name">{node.name}</span>
         <span className="node-meta">
+          {verdict && <span className={`sim-badge sim-badge-${verdict}`}>{SIM_BADGE[verdict]}</span>}
           <NodeWarnBadge warnings={node.warnings} />
           <span className="node-util" style={{ color: utilColor }}>{Math.round(utilization * 100)}%</span>
         </span>
