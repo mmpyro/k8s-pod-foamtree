@@ -1,9 +1,19 @@
 from unittest.mock import MagicMock
 
 
+def create_list(items, next_page=None, resource_version='1') -> MagicMock:
+    """One page of a LIST response; next_page is its continue token. A bare
+    MagicMock token is truthy, so paging would never stop; the last page must carry None."""
+    page = MagicMock()
+    page.items = items
+    page.metadata._continue = next_page
+    page.metadata.resource_version = resource_version
+    return page
+
+
 def create_pod(name: str, node_name: str, containers=[], init_containers=None,
                namespace='default', labels=None, qos_class='Burstable', node_selector=None,
-               tolerations=None, owner_kind='ReplicaSet', annotations=None) -> MagicMock:
+               tolerations=None, owner_kind='ReplicaSet', annotations=None, phase='Running') -> MagicMock:
     pod = MagicMock()
     metadata = MagicMock()
     metadata.name = name
@@ -22,6 +32,7 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     spec.init_containers = init_containers
     status = MagicMock()
     status.qos_class = qos_class
+    status.phase = phase
     pod.metadata = metadata
     pod.spec = spec
     pod.status = status

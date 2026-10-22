@@ -1,13 +1,14 @@
 import pytest
 import bitmath  # type: ignore
-from k8sfoam.src.app import create_app
+from k8sfoam.src.app import create_app, main
 from unittest.mock import patch, MagicMock
 from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
 
 
 @pytest.fixture
 def test_client():
-    app = create_app()
+    # Per-request listing, so each test can patch K8sClient.
+    app = create_app(watch=False)
     return app.test_client()
 
 
@@ -128,7 +129,7 @@ def test_simulate_fit_returns_per_node_verdicts(k8s_client, test_client):
 
     # Then
     assert response.status_code == 200
-    k8s_client.assert_called_with('minikube')
+    k8s_client.assert_called_with('minikube', 500)
     assert response.json['fits'] == 1
     verdicts = {r['node']: r for r in response.json['nodes']}
     assert verdicts['a']['fits'] is True
@@ -253,3 +254,92 @@ def test_should_reject_an_extended_resource_no_node_allocates(k8s_client, test_c
     # Then
     assert response.status_code == 400
     assert b'[cpu, memory]' in response.data
+
+
+@patch('k8sfoam.src.app.K8sClient')
+@patch('k8sfoam.src.app.CacheRegistry')
+def test_watch_mode_serves_resources_from_the_cache(registry, k8s_client):
+    # Given
+    registry.return_value.get.return_value = simulation_cluster()
+    test_client = create_app(page_size=100).test_client()
+
+    # When
+    response = test_client.get('/resources/cpu?context=prod')
+
+    # Then
+    assert response.status_code == 200
+    registry.assert_called_once_with(100)
+    registry.return_value.get.assert_called_once_with('prod')
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+@patch('k8sfoam.src.app.CacheRegistry')
+def test_watch_mode_runs_simulations_on_the_cache(registry, k8s_client):
+    # Given
+    registry.return_value.get.return_value = simulation_cluster()
+    test_client = create_app().test_client()
+
+    # When
+    fit = test_client.post('/simulate/fit?context=prod', json={'cpu': '1'})
+    drain = test_client.get('/simulate/drain/a?context=prod')
+
+    # Then
+    assert fit.status_code == 200
+    assert drain.status_code == 200
+    assert registry.return_value.get.call_count == 2
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.CacheRegistry')
+def test_watch_mode_reports_a_cache_failure(registry):
+    # Given
+    registry.return_value.get.return_value.get_node_resources.side_effect = Exception('Unauthorized')
+    test_client = create_app().test_client()
+
+    # When
+    response = test_client.get('/resources/cpu')
+
+    # Then
+    assert response.status_code == 500
+    assert response.data == b'Unauthorized'
+
+
+@patch('k8sfoam.src.app.K8sClient')
+@patch('k8sfoam.src.app.CacheRegistry')
+def test_no_watch_lists_per_request_with_the_page_size(registry, k8s_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+    test_client = create_app(page_size=50, watch=False).test_client()
+
+    # When
+    response = test_client.get('/resources/memory?context=prod')
+
+    # Then
+    assert response.status_code == 200
+    k8s_client.assert_called_once_with('prod', 50)
+    registry.assert_not_called()
+
+
+@pytest.mark.parametrize('argv, expected', [
+    ([], {'page_size': 500, 'watch': True}),
+    (['--page-size', '100', '--no-watch'], {'page_size': 100, 'watch': False}),
+])
+@patch('k8sfoam.src.app.create_app')
+def test_main_passes_cache_options(create_app, argv, expected):
+    # Given
+    with patch('sys.argv', ['k8sfoams', *argv]):
+        # When
+        main()
+
+    # Then
+    create_app.assert_called_once_with(**expected)
+
+
+@pytest.mark.parametrize('page_size', ['0', '-5', 'many'])
+def test_main_rejects_a_page_size_below_one(page_size):
+    # Given
+    with patch('sys.argv', ['k8sfoams', '--page-size', page_size]):
+        # When / Then
+        with pytest.raises(SystemExit):
+            main()

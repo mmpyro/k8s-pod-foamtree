@@ -10,7 +10,7 @@ It visualizes **resource requests** — what the scheduler reserves — not live
 
 ## How it works
 
-1. Lists nodes (`status.capacity`) and all non-terminated pods. Pods in `Succeeded`/`Failed` are excluded — they still report requests via the API but no longer reserve anything.
+1. Lists nodes (`status.capacity`) and all non-terminated pods. Pods in `Succeeded`/`Failed` are excluded — they still report requests via the API but no longer reserve anything. The first request for a context lists both in pages (`--page-size`, 500 by default) and then keeps the result current in memory with a WATCH. Refreshes and simulations read that cache, so once it is warm they make no API calls, however large the cluster. A context's cache stops after 15 minutes without requests. If the API server becomes unreachable, the dashboard shows the error instead of stale data. `--no-watch` lists on every request instead.
 2. Parses quantities with the Kubernetes client's `parse_quantity` — CPU to millicores, memory to decimal kB. A pod's **effective request** is `max(sum(regular containers), max(init containers))` — init containers run sequentially, so they are maxed, not summed. Native sidecars (init containers with `restartPolicy: Always`) keep running, so they count as regular containers and add to every init container started after them. This is what the scheduler actually reserves.
 3. Nests the result node → pod → container and adds a synthetic `empty` child per node for free capacity, then serves it as JSON.
 4. A React single-page app fetches CPU and memory in parallel, merges them, and renders. esbuild compiles its `.jsx` files and bundles React into one `bundle.js`, which the Python package ships, so no script is loaded from a CDN. The view auto-refreshes every 60 seconds by default.
@@ -307,10 +307,13 @@ uv run k8sfoams
 - host: host IP address on which server listen, default is **127.0.0.1**
 - port: port number on which server listen, default is **8080**
 - d: turn on **debug** mode when server starts
+- page-size: objects fetched per LIST request, default is **500**
+- no-watch: list nodes and pods on every request instead of keeping a watch cache per context
 
 Example:
 ```bash
 k8sfoams --host 0.0.0.0 --port 8080 -d
+k8sfoams --page-size 200 --no-watch
 ```
 
 ## Development
