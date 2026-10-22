@@ -1,8 +1,13 @@
 from functools import cache
 from kubernetes import config, client  # type: ignore
-from typing import List, Dict, Any, Optional, Iterator
+from typing import List, Dict, Any, Optional, Iterator, Callable, Tuple
 from k8sfoam.src.utils.extractors import ResourcesExtractor
 from k8sfoam.src.common.dtos import PodResources, NodeResources
+
+DEFAULT_PAGE_SIZE = 500
+# Terminated pods (Succeeded/Failed) keep their requests in the API
+# but no longer reserve node resources, so exclude them.
+ACTIVE_POD_SELECTOR = 'status.phase!=Succeeded,status.phase!=Failed'
 
 
 @cache
@@ -17,21 +22,37 @@ def core_v1(context: Optional[str]) -> Any:
     return client.CoreV1Api(config.new_client_from_config(context=context))
 
 
+def list_all(func: Callable[..., Any], page_size: int, **kwargs) -> Tuple[List[Any], Optional[str]]:
+    """Every item of a LIST call, fetched `page_size` at a time.
+
+    All pages come from one consistent snapshot, whose resourceVersion is
+    returned too so a WATCH can resume exactly where the list ended.
+    """
+    items: List[Any] = []
+    token = None
+    while True:
+        page = func(limit=page_size, _continue=token, **kwargs)
+        items.extend(page.items)
+        token = page.metadata._continue
+        if not token:
+            return items, page.metadata.resource_version
+
+
 class K8sClient():
-    def __init__(self, current_context: Optional[str] = None):
+    def __init__(self, current_context: Optional[str] = None, page_size: int = DEFAULT_PAGE_SIZE):
         self.__current_context = current_context
+        self.__page_size = page_size
         self.__extractor = ResourcesExtractor()
 
     def get_node_resources(self) -> Iterator[NodeResources]:
         v1_client = core_v1(self.__current_context)
-        return map(lambda node: self.__extractor.extract_node_resources(node), v1_client.list_node().items)
+        nodes, _ = list_all(v1_client.list_node, self.__page_size)
+        return map(lambda node: self.__extractor.extract_node_resources(node), nodes)
 
     def get_pod_resources(self) -> Iterator[PodResources]:
         v1_client = core_v1(self.__current_context)
-        # Terminated pods (Succeeded/Failed) keep their requests in the API
-        # but no longer reserve node resources, so exclude them.
-        pods = v1_client.list_pod_for_all_namespaces(field_selector='status.phase!=Succeeded,status.phase!=Failed')
-        return map(lambda pod: self.__extractor.extract_pod_requested_resources(pod), pods.items)
+        pods, _ = list_all(v1_client.list_pod_for_all_namespaces, self.__page_size, field_selector=ACTIVE_POD_SELECTOR)
+        return map(lambda pod: self.__extractor.extract_pod_requested_resources(pod), pods)
 
     def get_contexts(slef) -> List[Dict[str, Any]]:
         contexts, active = config.list_kube_config_contexts()

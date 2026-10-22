@@ -1,8 +1,9 @@
 import argparse
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, jsonify, request
-from typing import Optional
-from k8sfoam.src.k8s.k8s_client import K8sClient
+from typing import Any, Optional
+from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
+from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import PodResources
@@ -45,9 +46,21 @@ def parse_pod_spec(body) -> PodResources:
                         node_selector=node_selector, tolerations=tolerations)
 
 
-def create_app() -> Optional[Flask]:
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f'must be at least 1, got {value}')
+    return number
+
+
+def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True) -> Optional[Flask]:
     try:
         app = Flask(__name__, static_url_path='', static_folder='frontend')
+        registry = CacheRegistry(page_size) if watch else None
+
+        def cluster(context: Optional[str]) -> Any:
+            """Nodes and pods of a context: from its watch cache, or listed right now with --no-watch."""
+            return registry.get(context) if registry is not None else K8sClient(context, page_size)
 
         @app.route('/healthcheck', methods=['GET'])
         def healthcheck():
@@ -57,8 +70,7 @@ def create_app() -> Optional[Flask]:
         @app.route('/resources/<path:resource_type>', methods=['GET'])
         def get_k8s_resources(resource_type: str):
             try:
-                context = request.args.get('context')
-                k8s_client = K8sClient(context)
+                k8s_client = cluster(request.args.get('context'))
                 mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
                 # cpu/memory keep their case-insensitive match; extended names are case-sensitive in Kubernetes.
                 resource = resource_type.lower() if resource_type.lower() in ('cpu', 'memory') else resource_type
@@ -77,7 +89,7 @@ def create_app() -> Optional[Flask]:
             except ValueError as ex:
                 return str(ex), 400
             try:
-                k8s_client = K8sClient(request.args.get('context'))
+                k8s_client = cluster(request.args.get('context'))
                 return jsonify(simulate_fit(pod, k8s_client.get_node_resources(), k8s_client.get_pod_resources()))
             except Exception as ex:
                 return str(ex), 500
@@ -85,7 +97,7 @@ def create_app() -> Optional[Flask]:
         @app.route('/simulate/drain/<node_name>', methods=['GET'])
         def simulate_node_drain(node_name: str):
             try:
-                k8s_client = K8sClient(request.args.get('context'))
+                k8s_client = cluster(request.args.get('context'))
                 result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources())
             except Exception as ex:
                 return str(ex), 500
@@ -116,9 +128,13 @@ def main():
     parser.add_argument('--host', type=str, default='127.0.0.1', required=False, help='Host IP on which server listen')
     parser.add_argument('--port', type=int, default=8080, required=False, help='Port on which server listen')
     parser.add_argument('-d', action='store_true', help='Run server in debug mode')
+    parser.add_argument('--page-size', type=positive_int, default=DEFAULT_PAGE_SIZE,
+                        help='Objects fetched per LIST request')
+    parser.add_argument('--no-watch', action='store_true',
+                        help='List nodes and pods on every request instead of keeping a watch cache per context')
     parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
     args = parser.parse_args()
 
-    app = create_app()
+    app = create_app(page_size=args.page_size, watch=not args.no_watch)
     if app:
         app.run(host=args.host, port=args.port, debug=args.d)
