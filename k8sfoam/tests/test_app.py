@@ -1,6 +1,7 @@
 import pytest
 import bitmath  # type: ignore
 from k8sfoam.src.app import create_app, main, change_events, DEBOUNCE
+from k8sfoam.src.k8s.k8s_client import DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock
 from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
 
@@ -257,6 +258,50 @@ def test_should_reject_an_extended_resource_no_node_allocates(k8s_client, test_c
 
 
 @patch('k8sfoam.src.app.K8sClient')
+def test_get_all_k8s_resources_lists_the_cluster_once(k8s_client, test_client):
+    # Given
+    k8s_client_instance = MagicMock()
+    k8s_client_instance.get_node_resources.return_value = [
+        NodeResources('gpu', 2000, float(bitmath.GiB(1).kB), extended={'nvidia.com/gpu': 4})]
+    k8s_client_instance.get_pod_resources.return_value = [PodResources('train', 'gpu', 150, float(bitmath.MiB(150).kB),
+     [ContainerResources('train', 150, float(bitmath.MiB(150).kB), extended={'nvidia.com/gpu': 1})], [],
+     extended={'nvidia.com/gpu': 1})]
+    k8s_client.return_value = k8s_client_instance
+
+    # When
+    response = test_client.get('/resources?context=prod')
+    json = response.json
+
+    # Then
+    assert response.status_code == 200
+    assert json['resources'] == ['cpu', 'memory', 'nvidia.com/gpu']
+    node = json['nodes'][0]
+    assert (node['name'], node['cpu'], node['memory'], node['extended']) == \
+        ('gpu', 2000, float(bitmath.GiB(1).kB), {'nvidia.com/gpu': 4})
+    pod = node['pods'][0]
+    assert (pod['name'], pod['cpu'], pod['memory'], pod['extended']) == \
+        ('train', 150, float(bitmath.MiB(150).kB), {'nvidia.com/gpu': 1})
+    assert pod['containers'][0]['name'] == 'train'
+    assert node['warnings'] == []
+    k8s_client.assert_called_once_with('prod', DEFAULT_PAGE_SIZE)
+    k8s_client_instance.get_node_resources.assert_called_once_with()
+    k8s_client_instance.get_pod_resources.assert_called_once_with()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_get_all_k8s_resources_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_node_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.get('/resources')
+
+    # Then
+    assert response.status_code == 500
+    assert response.data == b'Cannot connect to k8s api'
+
+
+@patch('k8sfoam.src.app.K8sClient')
 @patch('k8sfoam.src.app.CacheRegistry')
 def test_watch_mode_serves_resources_from_the_cache(registry, k8s_client):
     # Given
@@ -270,6 +315,26 @@ def test_watch_mode_serves_resources_from_the_cache(registry, k8s_client):
     assert response.status_code == 200
     registry.assert_called_once_with(100)
     registry.return_value.get.assert_called_once_with('prod')
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+@patch('k8sfoam.src.app.CacheRegistry')
+def test_watch_mode_serves_all_resources_from_one_cache_read(registry, k8s_client):
+    # Given
+    cache = simulation_cluster()
+    registry.return_value.get.return_value = cache
+    test_client = create_app().test_client()
+
+    # When
+    response = test_client.get('/resources?context=prod')
+
+    # Then
+    assert response.status_code == 200
+    assert [node['name'] for node in response.json['nodes']] == ['a', 'b']
+    registry.return_value.get.assert_called_once_with('prod')
+    cache.get_node_resources.assert_called_once_with()
+    cache.get_pod_resources.assert_called_once_with()
     k8s_client.assert_not_called()
 
 
