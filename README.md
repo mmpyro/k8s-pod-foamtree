@@ -45,6 +45,8 @@ Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header
 - **Filter**: the header query bar highlights matching pods and dims the rest — nothing is removed from the view. See [Filtering](#filtering) for the full grammar.
 - **Focus**: click a node to open an overlay listing its pods with per-pod CPU/memory and container breakdown.
 
+The URL keeps track of the context, view, resource, colour and grouping modes, memory unit, query and pinned workload, so a link or bookmark reopens the same view. See [Shareable links](#shareable-links).
+
 ## Node health
 
 Free capacity on a node that refuses pods is not really free. A node that is cordoned, under pressure, or carrying a `NoSchedule` taint has its **idle foam hatched with diagonal warning stripes** (the plate surface in 3D), gets a warning badge next to the utilization percentage, and lists a **Node health** key in the sidebar counting how many nodes are affected by each reason. A healthy cluster looks exactly as it did before — nothing is added.
@@ -239,8 +241,35 @@ The download button in the header, next to *Refresh*, saves what you are looking
 | **SVG image** | ✓ | — | The 2D map as real vectors (cards, pods, containers, labels). The 3D view is WebGL, so it has no SVG form. |
 | **JSON report** | ✓ | ✓ | Every node (with its topology) and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. Extended resources sit under `extended`, in MiB when byte-sized and as a count otherwise. |
 | **CSV report** | ✓ | ✓ | One row per pod: `context,node,zone,region,node_pool,instance_type,capacity_type,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. One more column per [extended resource](#extended-resources) on the cluster follows `memory_mib`, e.g. `nvidia.com/gpu` or `ephemeral_storage_mib`. |
+| **Copy link** | ✓ | ✓ | Puts a [shareable link](#shareable-links) to the current view on the clipboard; the item reads *copied* to confirm. |
 
 Images keep the current metric, colours, grouping, tweaks, query dimming and pinned workload, and carry a title band with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HHmm.<ext>`. Web fonts are not embedded, so exported images fall back to system fonts.
+
+## Shareable links
+
+The view is encoded in the URL hash, so a link reproduces exactly what the sender saw and any view can be bookmarked:
+
+```
+http://localhost:8080/#ctx=prod&view=3d&groupBy=zone&q=ns%3Apayments
+```
+
+| Parameter | Values | Default |
+| --- | --- | --- |
+| `ctx` | Context name as listed in your kubeconfig (the name, not its position) | the active context |
+| `view` | `2d`, `3d` | `2d` |
+| `metric` | `cpu`, `mem`, or an [extended resource](#extended-resources) such as `nvidia.com/gpu` | `cpu` |
+| `colorBy` | `node`, `qos` | `node` |
+| `groupBy` | `none`, `zone`, `region`, `nodePool`, `instanceType`, `capacityType` | `none` |
+| `memUnit` | `MiB`, `GiB`, `TiB` | `GiB` |
+| `q` | A [query](#filtering), URL-encoded | empty |
+| `wl` | Pinned workload, e.g. `web-api` | none |
+
+- The URL updates as you change the view. Parameters at their default are left out, and `ctx` is always written.
+- The URL is replaced in place, so typing a query does not fill your browser history.
+- Pasting a link into a tab that is already open applies it. A parameter the link leaves out goes back to its default.
+- A context that is not in your kubeconfig falls back to the active one, and a notice above the map says so. A resource the context cannot allocate falls back to CPU, as when switching contexts. Any other unknown value uses its default.
+- A pinned workload that matches no pod in the context is dropped, so it cannot dim the whole map.
+- *Zoom*, *Refresh* and the tweaks panel are not part of the link.
 
 ## Extended resources
 

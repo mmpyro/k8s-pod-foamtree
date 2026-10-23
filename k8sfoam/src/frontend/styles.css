@@ -883,6 +883,18 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .error-banner button:active {
   transform: scale(0.97);
 }
+/* Informational, not a failure: e.g. a shared link named an unknown context. */
+.notice-banner {
+  background: rgba(96, 165, 250, 0.12);
+  border-bottom-color: var(--info);
+  color: #bfdbfe;
+}
+.notice-banner button {
+  background: none;
+  color: inherit;
+  font-size: 14px;
+  padding: 0 6px;
+}
 
 .dot-warn {
   background: var(--warn);
@@ -1238,6 +1250,8 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .export-item:hover:not(:disabled) { background: var(--bg-3); }
 .export-item:disabled { color: var(--text-soft); cursor: default; }
 .export-hint { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-soft); }
+.export-hint-ok { color: var(--ok); }
+.export-sep { height: 1px; margin: 5px 4px; background: var(--line); }
 
 /* ─────────── Scheduling simulators ─────────── */
 

@@ -12,6 +12,7 @@ const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
 const { FitModal, DrainButton, DrainReport, drainSimulation } = window.k8sSimulate;
+const { readHash, writeHash } = window.k8sUrlState;
 
 const COLOR_MODES = [
   { id: "node", label: "Node" },
@@ -37,6 +38,30 @@ const VIEWS = [
   { id: "2d", label: "2D Map", icon: "rect" },
   { id: "3d", label: "3D Cubes", icon: "cube" },
 ];
+
+const MEM_UNITS = ["MiB", "GiB", "TiB"];
+
+// What the view shows with nothing in the URL; also what writeHash leaves out.
+const URL_DEFAULTS = {
+  view: "2d", metric: "cpu", colorBy: "node", groupBy: "none", memUnit: "GiB", query: "", workload: null,
+};
+
+// Hash values checked against what the UI offers; anything else is its default.
+// The metric is kept as is: only loaded data can tell whether it exists, and
+// App falls back to CPU once it does.
+function linkState(raw) {
+  const pick = (v, ids, field) => (ids.includes(v) ? v : URL_DEFAULTS[field]);
+  return {
+    ctx: raw.ctx || null,
+    view: pick(raw.view, VIEWS.map(v => v.id), "view"),
+    metric: raw.metric || URL_DEFAULTS.metric,
+    colorBy: pick(raw.colorBy, COLOR_MODES.map(c => c.id), "colorBy"),
+    groupBy: pick(raw.groupBy, GROUP_MODES.map(g => g.id), "groupBy"),
+    memUnit: pick(raw.memUnit, MEM_UNITS, "memUnit"),
+    query: raw.query || URL_DEFAULTS.query,
+    workload: raw.workload || URL_DEFAULTS.workload,
+  };
+}
 
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "colorScheme": "spectrum",
@@ -140,14 +165,16 @@ function toNodes(payload) {
 
 function App() {
   const [tw, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  // The view a link opened with, read once.
+  const [initial] = useState(() => linkState(readHash(window.location.hash)));
 
-  const [view, setView] = useState("2d");
+  const [view, setView] = useState(initial.view);
   const [zoom, setZoom] = useState(0.7);
-  const [metric, setMetric] = useState("cpu");
-  const [colorBy, setColorBy] = useState("node");
+  const [metric, setMetric] = useState(initial.metric);
+  const [colorBy, setColorBy] = useState(initial.colorBy);
   // "none" keeps the flat map; any other mode boxes nodes by that topology label.
-  const [groupBy, setGroupBy] = useState("none");
-  const [memUnit, setMemUnit] = useState("GiB");
+  const [groupBy, setGroupBy] = useState(initial.groupBy);
+  const [memUnit, setMemUnit] = useState(initial.memUnit);
   const [refreshInterval, setRefreshInterval] = useState(60);
   // Live: refetch when the server's watch cache reports a change (/events).
   // Polling every refreshInterval stays on whenever the stream is not live.
@@ -156,13 +183,13 @@ function App() {
   const [liveStatus, setLiveStatus] = useState("off");
   const [contexts, setContexts] = useState([]);
   const [contextIdx, setContextIdx] = useState(0);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initial.query);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(Date.now());
   const [focused, setFocused] = useState(null);
   // Cross-node workload highlighting. A click pins a workload; hover only
   // previews one, so a pinned selection always wins over the pointer.
-  const [selectedWorkload, setSelectedWorkload] = useState(null);
+  const [selectedWorkload, setSelectedWorkload] = useState(initial.workload);
   const [hoveredWorkload, setHoveredWorkload] = useState(null);
   // Latest fit or drain simulation: { kind, summary, ok, verdicts: Map<node, verdict> }.
   // Its verdicts outline nodes in both views until cleared.
@@ -170,10 +197,28 @@ function App() {
   const [fitOpen, setFitOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [nodes, setNodes] = useState([]);
+  // Context name the loaded nodes came from; null until the first load.
+  const [loadedCtx, setLoadedCtx] = useState(null);
   const [error, setError] = useState(null);
   const [exportError, setExportError] = useState(null);
+  // Why the view differs from the link that opened it, e.g. an unknown context.
+  const [urlNotice, setUrlNotice] = useState(null);
   const gridWrapRef = useRef(null);
   const captureRef = useRef(null);
+  // Set by a link that switches context, so the switch keeps the link's pin.
+  const keepPinRef = useRef(false);
+  // Context whose data a link's pinned workload is still to be checked against.
+  const pinCheckRef = useRef(null);
+
+  // Index of the context a link names. An unknown name keeps `fallback` and
+  // says so, rather than leaving the link's recipient on an empty view.
+  const resolveContext = (list, name, fallback) => {
+    if (!name) return fallback;
+    const idx = list.findIndex(c => c.context === name);
+    if (idx !== -1) return idx;
+    setUrlNotice(`Context "${name}" from the link is not in your kubeconfig; showing ${shortContext(list[fallback].context)} instead.`);
+    return fallback;
+  };
 
   // Load contexts from server
   useEffect(() => {
@@ -186,7 +231,9 @@ function App() {
         if (data && data.length > 0) {
           setContexts(data);
           const activeIdx = data.findIndex(c => c.active);
-          setContextIdx(activeIdx !== -1 ? activeIdx : 0);
+          const idx = resolveContext(data, initial.ctx, activeIdx !== -1 ? activeIdx : 0);
+          setContextIdx(idx);
+          if (initial.workload) pinCheckRef.current = data[idx].context;
         } else {
           console.warn("No contexts config found");
           setContexts([]);
@@ -201,6 +248,7 @@ function App() {
   }, []);
 
   const currentCtx = contexts[contextIdx];
+  const ctxName = currentCtx ? currentCtx.context : null;
   const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
 
   // One load at a time: a request made meanwhile (a change event, a context
@@ -220,6 +268,7 @@ function App() {
       const res = await fetch(`/resources${ctxParam}`);
       if (!res.ok) throw new Error(`Resources endpoint returned status ${res.status}`);
       setNodes(toNodes(await res.json()));
+      setLoadedCtx(ctxName);
       setError(null);
       setLastRefresh(Date.now());
     } catch (err) {
@@ -243,12 +292,18 @@ function App() {
 
   // Switching context swaps the whole data set, so a workload pinned in the
   // previous cluster is meaningless in the new one: it would match nothing and
-  // dim every pod on screen with no pod glowing to explain why.
+  // dim every pod on screen with no pod glowing to explain why. Resolving the
+  // first context is not a switch, and a link that switches brings its own pin.
+  const prevCtxRef = useRef(null);
   useEffect(() => {
-    setSelectedWorkload(null);
+    const prev = prevCtxRef.current;
+    prevCtxRef.current = ctxName;
+    if (prev === null || prev === ctxName) return;
+    if (keepPinRef.current) keepPinRef.current = false;
+    else setSelectedWorkload(null);
     setHoveredWorkload(null);
     setSim(null);
-  }, [contextIdx]);
+  }, [ctxName]);
 
   // Keep a stable ref to the latest loadData so the auto-refresh interval
   // always calls the current closure without re-subscribing each render.
@@ -302,10 +357,60 @@ function App() {
   const metrics = useMemo(() => [...BASE_METRICS, ...extended.map(resourceMeta)], [extended]);
 
   // A context without GPUs cannot show a GPU map; fall back instead of
-  // drawing an empty grid. Skipped while nothing is loaded yet.
+  // drawing an empty grid. Skipped while nothing is loaded yet, and while the
+  // data on screen still belongs to the previous context.
   useEffect(() => {
-    if (nodes.length > 0 && !metrics.some(m => m.id === metric)) setMetric("cpu");
-  }, [metrics, nodes.length]);
+    if (nodes.length > 0 && loadedCtx === ctxName && !metrics.some(m => m.id === metric)) setMetric("cpu");
+  }, [metrics, nodes.length, metric, loadedCtx, ctxName]);
+
+  // A link can pin a workload the cluster no longer runs, which would dim every
+  // pod; once its context has loaded, drop such a pin.
+  useEffect(() => {
+    if (pinCheckRef.current === null || loadedCtx !== pinCheckRef.current) return;
+    pinCheckRef.current = null;
+    if (workloadStats && workloadStats.replicas === 0) setSelectedWorkload(null);
+  }, [loadedCtx, workloadStats]);
+
+  // Applies a link pasted into an open tab. Every field is set, so keys the
+  // link leaves out go back to their defaults.
+  const applyLink = (link) => {
+    setView(link.view);
+    setMetric(link.metric);
+    setColorBy(link.colorBy);
+    setGroupBy(link.groupBy);
+    setMemUnit(link.memUnit);
+    setQuery(link.query);
+    setSelectedWorkload(link.workload);
+    setUrlNotice(null);
+    if (contexts.length === 0) return;
+    const idx = resolveContext(contexts, link.ctx, contextIdx);
+    keepPinRef.current = idx !== contextIdx;
+    setContextIdx(idx);
+    pinCheckRef.current = link.workload ? contexts[idx].context : null;
+  };
+  const applyLinkRef = useRef(applyLink);
+  applyLinkRef.current = applyLink;
+
+  // replaceState fires no hashchange, so only an edited or pasted URL lands here.
+  useEffect(() => {
+    const onHash = () => applyLinkRef.current(linkState(readHash(window.location.hash)));
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  // Mirror the view into the URL. Replace, not push: typing a query must not
+  // flood history. Waits for /contexts, so an incoming link is applied before
+  // anything is written over it.
+  useEffect(() => {
+    if (!ctxName) return;
+    const hash = writeHash(
+      { ctx: ctxName, view, metric, colorBy, groupBy, memUnit, query, workload: selectedWorkload },
+      URL_DEFAULTS,
+    );
+    if (hash === window.location.hash) return;
+    const { pathname, search } = window.location;
+    window.history.replaceState(null, "", `${pathname}${search}${hash}`);
+  }, [ctxName, view, metric, colorBy, groupBy, memUnit, query, selectedWorkload]);
 
   // Totals
   const totals = useMemo(() => {
@@ -423,6 +528,10 @@ function App() {
     const ctx = contexts[contextIdx] ? contexts[contextIdx].context : "";
     try {
       setExportError(null);
+      if (kind === "link") {
+        await copyText(window.location.href);
+        return true;
+      }
       if (kind === "json") {
         const body = k.reportJson({ nodes, totals, context: ctx, metric, query, match });
         k.download(new Blob([body], { type: "application/json" }), k.fileName(ctx, "report", "json"));
@@ -514,6 +623,12 @@ function App() {
         {exportError && (
           <div className="error-banner">
             <span>Export failed: {exportError}</span>
+          </div>
+        )}
+        {urlNotice && (
+          <div className="error-banner notice-banner">
+            <span>{urlNotice}</span>
+            <button onClick={() => setUrlNotice(null)} title="Dismiss">×</button>
           </div>
         )}
 
@@ -792,7 +907,7 @@ function Sidebar({
       <div className="sidebar-section">
         <div className="section-label">Memory unit</div>
         <div className="seg seg-3">
-          {["MiB", "GiB", "TiB"].map(u => (
+          {MEM_UNITS.map(u => (
             <button key={u} className={memUnit === u ? "seg-on" : ""} onClick={() => setMemUnit(u)}>{u}</button>
           ))}
         </div>
@@ -1076,13 +1191,31 @@ const EXPORTS = [
   { id: "svg", label: "SVG image", hint: "vector, 2D only", only2d: true },
   { id: "json", label: "JSON report", hint: "nodes, pods, containers" },
   { id: "csv", label: "CSV report", hint: "one row per pod" },
+  { id: "link", label: "Copy link", hint: "current view", divider: true },
 ];
 
 // Download menu next to Refresh. Images capture the current view; reports
-// are the same in both views.
+// are the same in both views. Copy link keeps the menu open to confirm.
 function ExportMenu({ is3d, disabled, onExport }) {
   const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const ref = useRef(null);
+
+  useEffect(() => {
+    if (!copied) return;
+    const id = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(id);
+  }, [copied]);
+
+  const onItem = async (id) => {
+    if (id !== "link") {
+      setOpen(false);
+      onExport(id);
+      return;
+    }
+    if (await onExport(id)) setCopied(true);
+    else setOpen(false);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -1109,13 +1242,17 @@ function ExportMenu({ is3d, disabled, onExport }) {
           <div className="query-hint-title">Export {is3d ? "3D view" : "2D map"}</div>
           {EXPORTS.map(x => {
             const off = x.only2d && is3d;
+            const done = x.id === "link" && copied;
             return (
-              <button key={x.id} role="menuitem" className="export-item" disabled={off}
-                title={off ? "The 3D view is WebGL; switch to 2D for vector SVG" : undefined}
-                onClick={() => { setOpen(false); onExport(x.id); }}>
-                <span>{x.label}</span>
-                <span className="export-hint">{off ? "2D only" : x.hint}</span>
-              </button>
+              <React.Fragment key={x.id}>
+                {x.divider && <div className="export-sep" />}
+                <button role="menuitem" className="export-item" disabled={off}
+                  title={off ? "The 3D view is WebGL; switch to 2D for vector SVG" : undefined}
+                  onClick={() => onItem(x.id)}>
+                  <span>{x.label}</span>
+                  <span className={`export-hint ${done ? "export-hint-ok" : ""}`}>{off ? "2D only" : done ? "copied" : x.hint}</span>
+                </button>
+              </React.Fragment>
             );
           })}
         </div>
@@ -1472,6 +1609,22 @@ function topologyLine(node) {
   const t = node.topology || {};
   return [t.instanceType, t.zone || t.region, t.nodePool, t.capacityType]
     .filter(Boolean).map(v => `${v} · `).join("");
+}
+
+// navigator.clipboard exists only in secure contexts (https, localhost), so
+// plain http on a LAN address falls back to the legacy copy command.
+async function copyText(s) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(s);
+  const ta = document.createElement("textarea");
+  ta.value = s;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  if (!ok) throw new Error("the clipboard is unavailable; copy the address bar instead");
 }
 
 function shortContext(ctx) {

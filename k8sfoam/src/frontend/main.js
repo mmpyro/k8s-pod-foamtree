@@ -13,4 +13,5 @@ import "./tweaks-panel.jsx";
 import "./treemap.jsx";
 import "./export.jsx";
 import "./scene3d.jsx";
+import "./urlstate.jsx";
 import "./app.jsx";
