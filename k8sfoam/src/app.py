@@ -1,13 +1,20 @@
 import argparse
+import time
 from importlib.metadata import PackageNotFoundError, version
-from flask import Flask, jsonify, request
-from typing import Any, Optional
+from flask import Flask, Response, jsonify, request
+from typing import Any, Iterator, Optional
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import PodResources
 from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
+
+# Minimum seconds between two `changed` events; a burst in between becomes one.
+DEBOUNCE = 1.0
+# A quiet stream still sends a comment this often, so a closed tab is noticed
+# (the write fails) and proxies do not drop the connection as idle.
+HEARTBEAT = 15.0
 
 
 def get_version() -> str:
@@ -44,6 +51,30 @@ def parse_pod_spec(body) -> PodResources:
     tolerations = [{k: t.get(k) for k in ('key', 'operator', 'value', 'effect')} for t in tolerations]
     return PodResources('hypothetical', None, cpu, memory, [], [], extended={k: v for k, v in extended.items() if v},
                         node_selector=node_selector, tolerations=tolerations)
+
+
+def change_events(registry: CacheRegistry, context: Optional[str]) -> Iterator[str]:
+    """Server-Sent Events for one browser tab: `changed` whenever the context's cache changes."""
+    cache = registry.get(context)
+    seen = cache.version
+    last_sent = float('-inf')
+    # EventSource drops an event whose data is empty, so each one carries the version.
+    yield f'event: ready\ndata: {seen}\n\n'
+    while True:
+        if cache.wait_for_change(seen, HEARTBEAT) != seen:
+            delay = DEBOUNCE - (time.monotonic() - last_sent)
+            if delay > 0:
+                time.sleep(delay)
+            seen = cache.version
+            last_sent = time.monotonic()
+            yield f'event: changed\ndata: {seen}\n\n'
+            continue
+        yield ': ping\n\n'
+        # Counts as use, so an open tab keeps a quiet cluster's cache from idling out,
+        # and picks up the replacement once a failed cache has been stopped.
+        current = registry.get(context)
+        if current is not cache:
+            cache, seen = current, current.version
 
 
 def positive_int(value: str) -> int:
@@ -104,6 +135,24 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True) -> Option
             if result is None:
                 return f'Node {node_name} not found', 404
             return jsonify(result)
+
+        @app.route('/events', methods=['GET'])
+        def get_change_events():
+            # Without a cache there is nothing to watch; the browser falls back to polling.
+            if registry is None:
+                return 'Live updates need the watch cache (started without --no-watch)', 404
+            try:
+                events = change_events(registry, request.args.get('context'))
+                first = next(events)
+            except Exception as ex:
+                return str(ex), 500
+
+            def stream() -> Iterator[str]:
+                yield first
+                yield from events
+
+            return Response(stream(), mimetype='text/event-stream',
+                            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
