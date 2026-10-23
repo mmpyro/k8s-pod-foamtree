@@ -1,6 +1,6 @@
 import pytest
 import bitmath  # type: ignore
-from k8sfoam.src.app import create_app, main
+from k8sfoam.src.app import create_app, main, change_events, DEBOUNCE
 from unittest.mock import patch, MagicMock
 from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
 
@@ -319,6 +319,96 @@ def test_no_watch_lists_per_request_with_the_page_size(registry, k8s_client):
     assert response.status_code == 200
     k8s_client.assert_called_once_with('prod', 50)
     registry.assert_not_called()
+
+
+class FakeCache():
+    """Each wait_for_change applies the next scripted version delta; 0 is a timeout."""
+
+    def __init__(self, deltas, version=0):
+        self.deltas = list(deltas)
+        self.version = version
+
+    def wait_for_change(self, since, timeout):
+        self.version += self.deltas.pop(0)
+        return self.version
+
+
+def test_events_need_the_watch_cache(test_client):
+    # When
+    response = test_client.get('/events')
+
+    # Then
+    assert response.status_code == 404
+
+
+@patch('k8sfoam.src.app.CacheRegistry')
+def test_events_stream_starts_with_ready(registry):
+    # Given
+    registry.return_value.get.return_value = FakeCache([], version=7)
+    test_client = create_app().test_client()
+
+    # When
+    response = test_client.get('/events?context=prod')
+
+    # Then
+    try:
+        assert response.status_code == 200
+        assert response.mimetype == 'text/event-stream'
+        assert response.headers['Cache-Control'] == 'no-cache'
+        assert next(response.response) == b'event: ready\ndata: 7\n\n'
+        registry.return_value.get.assert_called_once_with('prod')
+    finally:
+        response.close()
+
+
+@patch('k8sfoam.src.app.CacheRegistry')
+def test_events_report_a_context_that_cannot_be_watched(registry):
+    # Given
+    registry.return_value.get.side_effect = Exception('context not found')
+    test_client = create_app().test_client()
+
+    # When
+    response = test_client.get('/events?context=nope')
+
+    # Then
+    assert response.status_code == 500
+    assert response.data == b'context not found'
+
+
+@patch('k8sfoam.src.app.time')
+def test_change_events_merge_a_burst_into_one_event_per_debounce(clock):
+    # Given — the second change comes 0.3 s after the first; two more land while it waits
+    cache = FakeCache([1, 1, 0])
+    registry = MagicMock()
+    registry.get.return_value = cache
+    clock.monotonic.side_effect = [10.0, 10.0, 10.3, 11.0]
+
+    def more_changes(seconds):
+        cache.version += 2
+    clock.sleep.side_effect = more_changes
+    events = change_events(registry, 'prod')
+
+    # When
+    sent = [next(events) for _ in range(4)]
+
+    # Then
+    assert sent == ['event: ready\ndata: 0\n\n', 'event: changed\ndata: 1\n\n',
+                    'event: changed\ndata: 4\n\n', ': ping\n\n']
+    clock.sleep.assert_called_once_with(pytest.approx(DEBOUNCE - 0.3))
+
+
+def test_change_events_follow_a_replaced_cache_after_a_heartbeat():
+    # Given — the first cache was stopped and the registry made a new one
+    stopped, replacement = FakeCache([0]), FakeCache([1], version=5)
+    registry = MagicMock()
+    registry.get.side_effect = [stopped, replacement]
+    events = change_events(registry, 'prod')
+
+    # When
+    sent = [next(events) for _ in range(3)]
+
+    # Then
+    assert sent == ['event: ready\ndata: 0\n\n', ': ping\n\n', 'event: changed\ndata: 6\n\n']
 
 
 @pytest.mark.parametrize('argv, expected', [

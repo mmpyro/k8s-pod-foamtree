@@ -233,6 +233,72 @@ def test_bad_watch_event_relists(fake_watch):
     assert v1.list_node.call_count == 2
 
 
+def test_only_real_store_changes_notify(fake_watch):
+    # Given
+    v1 = MagicMock()
+    v1.list_node.return_value = create_list([create_node('a', '1', '1Gi')], resource_version='10')
+    fake_watch.stream.return_value = iter([
+        event('ADDED', create_node('c', '1', '1Gi'), '11'),
+        event('MODIFIED', create_node('a', '1', '1Gi'), '12'),
+        event('MODIFIED', create_node('a', '4', '1Gi'), '13'),
+        bookmark('14'),
+        event('DELETED', create_node('gone', '1', '1Gi'), '15'),
+        event('DELETED', create_node('c', '1', '1Gi'), '16'),
+    ])
+    on_change = MagicMock()
+    informer = node_informer(v1, 500, on_change=on_change)
+
+    # When
+    informer.relist()
+    informer.watch()
+
+    # Then — the first list, the add, the resize and the delete; not the no-op
+    # update, the bookmark or the delete of an unknown node
+    assert on_change.call_count == 4
+
+
+def test_relist_notifies_on_the_first_failure_and_on_recovery(fake_watch):
+    # Given
+    v1 = MagicMock()
+    same = create_list([create_node('a', '1', '1Gi')])
+    v1.list_node.side_effect = [same, Exception('down'), Exception('down'), same, same]
+    on_change = MagicMock()
+    informer = node_informer(v1, 500, on_change=on_change)
+
+    # When / Then
+    informer.relist()
+    assert on_change.call_count == 1
+    for _ in range(2):
+        with pytest.raises(Exception, match='down'):
+            informer.relist()
+    assert on_change.call_count == 2
+    informer.relist()
+    assert on_change.call_count == 3
+    informer.relist()
+    assert on_change.call_count == 3
+
+
+@patch('k8sfoam.src.k8s.cache.pod_informer')
+@patch('k8sfoam.src.k8s.cache.node_informer')
+@patch('k8sfoam.src.k8s.cache.core_v1')
+def test_cache_version_moves_when_either_informer_changes(core_v1, node_informer, pod_informer):
+    # Given
+    cache = ClusterCache('prod', 500)
+    nodes_changed = node_informer.call_args.kwargs['on_change']
+    pods_changed = pod_informer.call_args.kwargs['on_change']
+
+    # When / Then — a quiet cache times out with the same version
+    assert cache.wait_for_change(0, 0.01) == 0
+
+    # When / Then — a waiter wakes up as soon as an informer reports a change
+    timer = threading.Timer(0.05, pods_changed)
+    timer.start()
+    assert cache.wait_for_change(0, 5) == 1
+    timer.join()
+    nodes_changed()
+    assert cache.version == 2
+
+
 def test_snapshot_times_out_before_the_first_list():
     # Given
     informer = node_informer(MagicMock(), 500)

@@ -33,11 +33,14 @@ class Informer():
     """
 
     def __init__(self, list_func: Callable[..., Any], extract: Callable[[Any], Any], key: Callable[[Any], str],
-                 page_size: int, keep: Callable[[Any], bool] = lambda obj: True, **selectors):
+                 page_size: int, keep: Callable[[Any], bool] = lambda obj: True,
+                 on_change: Callable[[], None] = lambda: None, **selectors):
         self.__list_func = list_func
         self.__extract = extract
         self.__key = key
         self.__keep = keep
+        # Called outside the lock whenever what snapshot() returns would differ.
+        self.__on_change = on_change
         self.__page_size = page_size
         self.__selectors = selectors
         self.__lock = threading.Lock()
@@ -77,15 +80,22 @@ class Informer():
         except Exception as ex:
             # Serving the last good state would show a dead cluster as healthy.
             with self.__lock:
+                newly_failed = self.__error is None
                 self.__error = ex
             self.__settled.set()
+            # Only the first failure: the retry loop would otherwise notify on every backoff.
+            if newly_failed:
+                self.__on_change()
             raise
         with self.__lock:
+            changed = self.__error is not None or store != self.__store
             self.__store = store
             self.__error = None
         self.resource_version = resource_version
         self.__synced.set()
         self.__settled.set()
+        if changed:
+            self.__on_change()
 
     def watch(self) -> None:
         """One WATCH request, from the last resourceVersion until the server ends it.
@@ -110,9 +120,13 @@ class Informer():
             value = self.__extract(obj) if kind != 'DELETED' and self.__keep(obj) else None
             with self.__lock:
                 if value is None:
-                    self.__store.pop(key, None)
+                    changed = self.__store.pop(key, None) is not None
                 else:
+                    # Status updates that leave the extracted DTO equal are not a change.
+                    changed = self.__store.get(key) != value
                     self.__store[key] = value
+            if changed:
+                self.__on_change()
         # The client ignores the resourceVersion of a BOOKMARK, so read it from the raw object.
         resource_version = (event.get('raw_object') or {}).get('metadata', {}).get('resourceVersion')
         if resource_version:
@@ -152,21 +166,21 @@ class Informer():
             backoff = min(backoff * 2, MAX_BACKOFF)
 
 
-def node_informer(v1_client: Any, page_size: int) -> Informer:
+def node_informer(v1_client: Any, page_size: int, on_change: Callable[[], None] = lambda: None) -> Informer:
     return Informer(v1_client.list_node, ResourcesExtractor().extract_node_resources,
-                    lambda node: node.metadata.name, page_size)
+                    lambda node: node.metadata.name, page_size, on_change=on_change)
 
 
 def _is_active(pod: Any) -> bool:
     return pod.status is None or pod.status.phase not in TERMINAL_PHASES
 
 
-def pod_informer(v1_client: Any, page_size: int) -> Informer:
+def pod_informer(v1_client: Any, page_size: int, on_change: Callable[[], None] = lambda: None) -> Informer:
     # The field selector makes the server send DELETED once a pod terminates;
     # _is_active also drops a terminal pod that still arrives as MODIFIED.
     return Informer(v1_client.list_pod_for_all_namespaces, ResourcesExtractor().extract_pod_requested_resources,
                     lambda pod: f'{pod.metadata.namespace}/{pod.metadata.name}', page_size,
-                    keep=_is_active, field_selector=ACTIVE_POD_SELECTOR)
+                    keep=_is_active, on_change=on_change, field_selector=ACTIVE_POD_SELECTOR)
 
 
 class ClusterCache():
@@ -174,14 +188,33 @@ class ClusterCache():
 
     def __init__(self, context: Optional[str], page_size: int):
         v1_client = core_v1(context)
-        self.__nodes = node_informer(v1_client, page_size)
-        self.__pods = pod_informer(v1_client, page_size)
+        self.__changed = threading.Condition()
+        self.__version = 0
+        self.__nodes = node_informer(v1_client, page_size, on_change=self.__bump)
+        self.__pods = pod_informer(v1_client, page_size, on_change=self.__bump)
         self.__stopped = False
         self.last_used = 0.0
 
     @property
     def stopped(self) -> bool:
         return self.__stopped
+
+    @property
+    def version(self) -> int:
+        """Increases whenever the nodes or pods this cache returns change."""
+        with self.__changed:
+            return self.__version
+
+    def wait_for_change(self, since: int, timeout: float) -> int:
+        """Block until the version moves past `since` or `timeout` passes; return the current version."""
+        with self.__changed:
+            self.__changed.wait_for(lambda: self.__version != since, timeout)
+            return self.__version
+
+    def __bump(self) -> None:
+        with self.__changed:
+            self.__version += 1
+            self.__changed.notify_all()
 
     def start(self) -> None:
         self.__nodes.start()

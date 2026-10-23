@@ -195,6 +195,11 @@ function App() {
   const [groupBy, setGroupBy] = useState("none");
   const [memUnit, setMemUnit] = useState("GiB");
   const [refreshInterval, setRefreshInterval] = useState(60);
+  // Live: refetch when the server's watch cache reports a change (/events).
+  // Polling every refreshInterval stays on whenever the stream is not live.
+  const [liveMode, setLiveMode] = useState(true);
+  // "connecting" | "live" | "reconnecting" | "off" (no stream: polling only).
+  const [liveStatus, setLiveStatus] = useState("off");
   const [contexts, setContexts] = useState([]);
   const [contextIdx, setContextIdx] = useState(0);
   const [query, setQuery] = useState("");
@@ -244,8 +249,18 @@ function App() {
   const currentCtx = contexts[contextIdx];
   const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
 
+  // One load at a time: a request made meanwhile (a change event, a context
+  // switch) runs once the current one ends, with the latest context.
+  const loadingRef = useRef(false);
+  const reloadRef = useRef(false);
+
   // Fetch cluster resource data
   const loadData = async () => {
+    if (loadingRef.current) {
+      reloadRef.current = true;
+      return;
+    }
+    loadingRef.current = true;
     setRefreshing(true);
     try {
 
@@ -268,7 +283,12 @@ function App() {
       console.error("Error loading resources from live cluster:", err);
       setError(err.message || String(err));
     } finally {
+      loadingRef.current = false;
       setRefreshing(false);
+      if (reloadRef.current) {
+        reloadRef.current = false;
+        loadDataRef.current();
+      }
     }
   };
 
@@ -359,13 +379,36 @@ function App() {
     return t;
   }, [nodes]);
 
-  // Auto-refresh tick — re-fetch live cluster data every refreshInterval seconds.
+  // Live updates. The browser reconnects a dropped stream by itself; it gives
+  // up (CLOSED) only when the server refuses it, e.g. a 404 under --no-watch.
   useEffect(() => {
+    if (!liveMode || contexts.length === 0) {
+      setLiveStatus("off");
+      return;
+    }
+    const source = new EventSource(`/events${ctxParam}`);
+    let reconnect = false;
+    setLiveStatus("connecting");
+    source.addEventListener("ready", () => {
+      setLiveStatus("live");
+      // The context switch already loaded once; a reconnect may have missed changes.
+      if (reconnect) loadDataRef.current();
+      reconnect = true;
+    });
+    source.addEventListener("changed", () => loadDataRef.current());
+    source.onerror = () => setLiveStatus(source.readyState === EventSource.CLOSED ? "off" : "reconnecting");
+    return () => source.close();
+  }, [liveMode, contextIdx, contexts.length]);
+
+  // Auto-refresh tick — re-fetch live cluster data every refreshInterval
+  // seconds, unless the live stream is delivering changes.
+  useEffect(() => {
+    if (liveStatus === "live") return;
     const id = setInterval(() => {
       if (contexts.length > 0) loadDataRef.current();
     }, refreshInterval * 1000);
     return () => clearInterval(id);
-  }, [refreshInterval, contexts.length]);
+  }, [refreshInterval, contexts.length, liveStatus]);
 
   // React fires no mouseleave when the hovered pod unmounts — a refresh
   // dropping the pod or a view switch both do that — so a stale preview would
@@ -504,6 +547,7 @@ function App() {
         metric={metric} setMetric={setMetric} metrics={metrics} totals={totals}
         memUnit={memUnit} setMemUnit={setMemUnit}
         refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
+        liveMode={liveMode} setLiveMode={setLiveMode} liveStatus={liveStatus}
         contexts={contexts}
         contextIdx={contextIdx} setContextIdx={setContextIdx}
         doRefresh={loadData} refreshing={refreshing}
@@ -543,6 +587,7 @@ function App() {
           onMenu={() => setSidebarOpen(s => !s)}
           onRefresh={loadData}
           refreshing={refreshing}
+          liveStatus={liveStatus}
           workload={workloadStats}
           onClearWorkload={() => setSelectedWorkload(null)}
           onExport={onExport}
@@ -655,7 +700,7 @@ function App() {
 
 function Sidebar({
   open, onToggle, view, setView, zoom, setZoom, metric, setMetric, metrics, totals, memUnit, setMemUnit,
-  refreshInterval, setRefreshInterval,
+  refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
   audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery
 }) {
@@ -779,10 +824,19 @@ function Sidebar({
       <div className="sidebar-section">
         <div className="section-label">
           <span>Refresh</span>
-          <span className="section-value">{refreshInterval}s</span>
+          <span className="section-value">{liveStatus === "live" ? "on change" : `${refreshInterval}s`}</span>
         </div>
+        <div className="seg seg-2">
+          <button className={liveMode ? "seg-on" : ""} onClick={() => setLiveMode(true)}>Live</button>
+          <button className={liveMode ? "" : "seg-on"} onClick={() => setLiveMode(false)}>Interval</button>
+        </div>
+        {/* The slider still sets the fallback while Live is connecting or down. */}
         <input type="range" min="5" max="600" step="5" value={refreshInterval}
+          disabled={liveStatus === "live"}
           onChange={e => setRefreshInterval(+e.target.value)} className="slider" />
+        {liveMode && liveStatus === "off" && (
+          <div className="seg-note">Live updates are unavailable, so the view polls instead.</div>
+        )}
         <button className={`btn-primary ${refreshing ? "spinning" : ""}`} onClick={doRefresh}>
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
@@ -972,7 +1026,7 @@ function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
 
 function Header({
   metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
-  onMenu, onRefresh, refreshing, workload, onClearWorkload, onExport, canExport,
+  onMenu, onRefresh, refreshing, liveStatus, workload, onClearWorkload, onExport, canExport,
   onFit,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
@@ -1002,6 +1056,13 @@ function Header({
         <div className="title-row">
           <span className="title-main">{titleMain} Resources</span>
           <span className="title-chip">{contextLabel}</span>
+          {(liveStatus === "live" || liveStatus === "reconnecting") && (
+            <span className={`title-chip live-chip live-${liveStatus}`}
+              title={liveStatus === "live" ? "Updates as the cluster changes" : "Live stream lost; polling until it reconnects"}>
+              <span className="live-dot" />
+              {liveStatus}
+            </span>
+          )}
           {/* Replica spread of the pinned workload — the anti-affinity check. */}
           {workload && (
             <span className="title-chip wl-chip" title={workload.key}>

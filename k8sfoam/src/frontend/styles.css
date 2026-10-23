@@ -211,6 +211,9 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   background: var(--accent); border: 2px solid var(--bg);
   cursor: pointer;
 }
+.slider:disabled { opacity: .35; }
+.slider:disabled::-webkit-slider-thumb { cursor: not-allowed; }
+.slider:disabled::-moz-range-thumb { cursor: not-allowed; }
 
 .btn-primary {
   display: flex; align-items: center; justify-content: center;
@@ -885,6 +888,15 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   background: var(--warn);
   box-shadow: 0 0 6px var(--warn);
 }
+
+/* Header live-updates indicator. */
+.live-chip { display: inline-flex; align-items: center; gap: 6px; overflow: visible; }
+.live-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.live-live { color: var(--ok); }
+.live-live .live-dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.live-reconnecting { color: var(--warn); }
+.live-reconnecting .live-dot { background: var(--warn); animation: livePulse 1.2s ease-in-out infinite; }
+@keyframes livePulse { 50% { opacity: .25; } }
 
 /* ─────────── 3D Cubes ─────────── */
 
