@@ -97,6 +97,15 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True) -> Option
         def healthcheck():
             return jsonify({'status': 'ok'})
 
+        @app.route('/resources', methods=['GET'])
+        def get_all_k8s_resources():
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
+                return jsonify(mapper.combined())
+            except Exception as ex:
+                return str(ex), 500
+
         # path: extended resource names carry a vendor prefix (nvidia.com/gpu).
         @app.route('/resources/<path:resource_type>', methods=['GET'])
         def get_k8s_resources(resource_type: str):

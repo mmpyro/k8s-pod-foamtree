@@ -106,6 +106,25 @@ class FoamTreeMapper():
             result['groups'].append(foam_node)
         return result
 
+    def __container(self, c, init: bool) -> dict:
+        return {'name': c.name, 'init': init, 'cpu': c.cpu or 0, 'memory': c.memory or 0,
+                'extended': dict(c.extended or {})}
+
+    def combined(self) -> dict:
+        """Every node with cpu, memory and extended resources side by side, plus available_resources()."""
+        nodes = []
+        for node in self.__nodes:
+            pods = []
+            for pod in self.__pods_by_node.get(node.name, []):
+                containers = [self.__container(c, False) for c in pod.containers]
+                containers += [self.__container(c, True) for c in pod.init_containers
+                               if c.cpu or c.memory or any((c.extended or {}).values())]
+                pods.append({'name': pod.name, 'cpu': pod.cpu or 0, 'memory': pod.memory or 0,
+                             'containers': containers, **self.__pod_metadata(pod, node)})
+            nodes.append({'name': node.name, 'cpu': node.cpu or 0, 'memory': node.memory or 0,
+                          'pods': pods, **self.__node_metadata(node)})
+        return {'resources': self.available_resources(), 'nodes': nodes}
+
     def transform_cpu_resources_to_foamtree(self) -> dict:
         return self.transform('cpu')
 

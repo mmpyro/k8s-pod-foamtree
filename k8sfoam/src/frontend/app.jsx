@@ -46,7 +46,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "#7c5cff"
 }/*EDITMODE-END*/;
 
-// Backend memory weights are decimal kB (1 kB = 1000 bytes),
+// Backend memory values are decimal kB (1 kB = 1000 bytes),
 // so MiB = kB * 1000 / 1024^2 — not a plain /1024, which would treat kB as KiB.
 function kbToMib(kb) {
   return (kb * 1000) / (1024 * 1024);
@@ -60,102 +60,57 @@ function extOf(extended) {
   return out;
 }
 
-// Merge separate CPU and Memory data structures from backend into rich unified structures.
-// Extended resources ride on both payloads, so they are read off the CPU one.
-function mergeResources(cpuData, memData) {
-  const cpuGroups = cpuData.groups || [];
-  const memGroups = memData.groups || [];
-
-  const memNodesMap = new Map();
-  for (const mg of memGroups) {
-    memNodesMap.set(mg.label, mg);
-  }
-
-  return cpuGroups.map((cg, idx) => {
-    const mg = memNodesMap.get(cg.label) || { weight: 0, groups: [] };
-
-    // Group pods by label
-    const cpuPods = cg.groups || [];
-    const memPods = mg.groups || [];
-
-    const memPodsMap = new Map();
-    for (const mp of memPods) {
-      memPodsMap.set(mp.label, mp);
-    }
-
-    const pods = [];
+// Node objects the views share, from the GET /resources payload: memory and
+// byte-sized extended resources converted to MiB, pod requests summed per node.
+function toNodes(payload) {
+  return (payload.nodes || []).map((n, idx) => {
     let cpuUsed = 0;
     let memUsed = 0;
     const extUsed = {};
 
-    for (const cp of cpuPods) {
-      if (cp.label === 'empty') continue;
-
-      const mp = memPodsMap.get(cp.label) || { weight: 0, groups: [] };
-
-      // Group containers by label
-      const cpuConts = cp.groups || [];
-      const memConts = mp.groups || [];
-      const memContsMap = new Map();
-      for (const mc of memConts) {
-        memContsMap.set(mc.label, mc);
-      }
-
-      const containers = cpuConts.map(cc => {
-        const mc = memContsMap.get(cc.label) || { weight: 0 };
-        return {
-          name: cc.label,
-          // Backend marks init containers with a grey color hint
-          init: !!cc.color,
-          cpu: cc.weight || 0,
-          // Convert memory from kB to MiB
-          mem: kbToMib(mc.weight || 0),
-          ext: extOf(cc.extended)
-        };
-      });
-
-      const podCpu = cp.weight || 0;
-      const podMem = mp.weight || 0;
-
-      cpuUsed += podCpu;
-      memUsed += podMem;
-      const podExt = extOf(cp.extended);
+    const pods = (n.pods || []).map(p => {
+      const podExt = extOf(p.extended);
+      cpuUsed += p.cpu || 0;
+      memUsed += p.memory || 0;
       for (const [name, v] of Object.entries(podExt)) extUsed[name] = (extUsed[name] || 0) + v;
 
-      pods.push({
-        name: cp.label,
-        shortName: cp.label.split('-')[0],
-        // Selector metadata for the query bar. Absent on an older backend, so
-        // every field falls back to a value that simply never matches.
-        namespace: cp.namespace || "",
-        labels: cp.labels || {},
-        qos: cp.qos || "",
-        hasInit: !!cp.hasInitContainers,
+      return {
+        name: p.name,
+        shortName: p.name.split('-')[0],
+        // Selector metadata for the query bar.
+        namespace: p.namespace || "",
+        labels: p.labels || {},
+        qos: p.qos || "",
+        hasInit: !!p.hasInitContainers,
         // Best-practice rule slugs, decided by the backend.
-        findings: cp.findings || [],
+        findings: p.findings || [],
         // Effective request (what the scheduler reserves) — init containers
         // run sequentially, so this is max(sum regular, max init), not a sum.
-        cpu: podCpu,
-        // Convert memory from kB to MiB
-        mem: kbToMib(podMem),
+        cpu: p.cpu || 0,
+        mem: kbToMib(p.memory || 0),
         ext: podExt,
-        containers
-      });
-    }
+        containers: (p.containers || []).map(c => ({
+          name: c.name,
+          init: !!c.init,
+          cpu: c.cpu || 0,
+          mem: kbToMib(c.memory || 0),
+          ext: extOf(c.extended)
+        }))
+      };
+    });
 
-    // Convert node capacity from kB to MiB
-    const memCapacity = kbToMib(mg.weight || 0);
+    const cpuCapacity = n.cpu || 0;
+    const memCapacity = kbToMib(n.memory || 0);
     const convertedMemUsed = kbToMib(memUsed);
-    // Placement labels from the backend; null wherever the node is unlabelled,
-    // and an empty object on an older backend.
-    const topo = cg.topology || {};
-    const extCap = extOf(cg.extended);
+    // Placement labels from the backend; null wherever the node is unlabelled.
+    const topo = n.topology || {};
+    const extCap = extOf(n.extended);
     const extFree = {};
     for (const [name, cap] of Object.entries(extCap)) extFree[name] = Math.max(0, cap - (extUsed[name] || 0));
 
     return {
       id: `node-${idx}`,
-      name: cg.label,
+      name: n.name,
       topology: {
         zone: topo.zone || null,
         region: topo.region || null,
@@ -163,23 +118,22 @@ function mergeResources(cpuData, memData) {
         nodePool: topo.nodePool || null,
         capacityType: topo.capacityType || null,
       },
-      cpuCapacity: cg.weight || 0,
-      memCapacity: memCapacity,
+      cpuCapacity,
+      memCapacity,
       cpuUsed,
       memUsed: convertedMemUsed,
-      cpuFree: Math.max(0, (cg.weight || 0) - cpuUsed),
+      cpuFree: Math.max(0, cpuCapacity - cpuUsed),
       memFree: Math.max(0, memCapacity - convertedMemUsed),
       extCap,
       extUsed,
       extFree,
       pods,
-      // Node health from the backend. Absent on an older backend, so every
-      // field falls back to what a plainly healthy node would report.
-      warnings: cg.warnings || [],
-      taints: cg.taints || [],
-      conditions: cg.conditions || {},
-      unschedulable: !!cg.unschedulable,
-      status: statusOf(cg.warnings || [])
+      // Node health from the backend.
+      warnings: n.warnings || [],
+      taints: n.taints || [],
+      conditions: n.conditions || {},
+      unschedulable: !!n.unschedulable,
+      status: statusOf(n.warnings || [])
     };
   });
 }
@@ -263,20 +217,9 @@ function App() {
     loadingRef.current = true;
     setRefreshing(true);
     try {
-
-      const [cpuRes, memRes] = await Promise.all([
-        fetch(`/resources/cpu${ctxParam}`).then(r => {
-          if (!r.ok) throw new Error(`CPU resources endpoint returned status ${r.status}`);
-          return r.json();
-        }),
-        fetch(`/resources/memory${ctxParam}`).then(r => {
-          if (!r.ok) throw new Error(`Memory resources endpoint returned status ${r.status}`);
-          return r.json();
-        })
-      ]);
-
-      const merged = mergeResources(cpuRes, memRes);
-      setNodes(merged);
+      const res = await fetch(`/resources${ctxParam}`);
+      if (!res.ok) throw new Error(`Resources endpoint returned status ${res.status}`);
+      setNodes(toNodes(await res.json()));
       setError(null);
       setLastRefresh(Date.now());
     } catch (err) {
