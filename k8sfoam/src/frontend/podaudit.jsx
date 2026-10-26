@@ -8,6 +8,10 @@ const POD_FINDINGS = {
   "missing-limits":   { label: "no memory limit",  sev: "info", why: "no memory limit — a leak can take the node down" },
   "monolith":         { label: "monolith",         sev: "warn", why: "reserves over 80% of its node — nowhere else to reschedule it" },
   "ratio-asymmetry":  { label: "ratio asymmetry",  sev: "info", why: "CPU:memory ratio far from the node's — strands the other resource" },
+  // Workload rules: every replica of the workload carries the same finding.
+  "spof-node":        { label: "replicas on one node", sev: "warn", why: "every replica on one node — losing that node takes the workload down" },
+  "spof-zone":        { label: "replicas in one zone", sev: "warn", why: "every replica in one zone — a zone outage takes the workload down" },
+  "spof-spot":        { label: "spot-only replicas",   sev: "warn", why: "every replica on spot capacity — one reclaim wave can take them all" },
 };
 
 const FINDING_ORDER = Object.keys(POD_FINDINGS);

@@ -1,5 +1,5 @@
 from k8sfoam.src.common.dtos import ContainerResources, NodeResources, PodResources
-from k8sfoam.src.common.pod_audit import pod_findings
+from k8sfoam.src.common.pod_audit import pod_findings, workload_findings
 
 
 # 4 cores / 16000 MB (in kB) — a 1:4 core:GB node.
@@ -92,3 +92,113 @@ def test_every_finding_is_reported_in_order():
 
     # Then
     assert findings == ['missing-limits', 'monolith', 'ratio-asymmetry']
+
+
+def worker(name: str, zone=None, capacity=None) -> NodeResources:
+    labels = {}
+    if zone:
+        labels['topology.kubernetes.io/zone'] = zone
+    if capacity:
+        labels['karpenter.sh/capacity-type'] = capacity
+    return NodeResources(name, 4000, 16_000_000, labels=labels)
+
+
+def replicas(node_names: list, kind='Deployment', name='web') -> dict:
+    pods = [PodResources(f'{name}-{i}', n, 100, 100_000, [], [], 'default', owner_kind=kind, owner_name=name)
+            for i, n in enumerate(node_names)]
+    return {('default', kind, name): pods}
+
+
+def by_name(*nodes: NodeResources) -> dict:
+    return {n.name: n for n in nodes}
+
+
+def test_replicas_on_one_node_are_a_single_point_of_failure():
+    # Given
+    nodes = by_name(worker('a', 'z1'), worker('b', 'z2'))
+
+    # When
+    findings = workload_findings(replicas(['a', 'a', 'a']), nodes)
+
+    # Then — reported on every replica, and the node finding hides the zone one
+    assert findings == {('default', f'web-{i}'): ['spof-node'] for i in range(3)}
+
+
+def test_replicas_in_one_zone_of_a_multi_zone_cluster_are_flagged():
+    # Given
+    nodes = by_name(worker('a', 'z1'), worker('b', 'z1'), worker('c', 'z2'))
+
+    # When
+    findings = workload_findings(replicas(['a', 'b']), nodes)
+
+    # Then
+    assert findings[('default', 'web-0')] == ['spof-zone']
+
+
+def test_replicas_across_zones_are_not_flagged():
+    # Given
+    nodes = by_name(worker('a', 'z1'), worker('c', 'z2'))
+
+    # When / Then
+    assert workload_findings(replicas(['a', 'c']), nodes) == {}
+
+
+def test_single_zone_or_unlabelled_cluster_never_reports_spof_zone():
+    # Given — minikube / kind have one zone, or none at all
+    for nodes in (by_name(worker('a', 'z1'), worker('b', 'z1')), by_name(worker('a'), worker('b'))):
+        # When / Then
+        assert workload_findings(replicas(['a', 'b']), nodes) == {}
+
+
+def test_replica_on_an_unlabelled_node_is_not_called_one_zone():
+    # Given — the zone of b is unknown, so the replicas may well be spread
+    nodes = by_name(worker('a', 'z1'), worker('b'), worker('c', 'z2'))
+
+    # When / Then
+    assert workload_findings(replicas(['a', 'b']), nodes) == {}
+
+
+def test_replicas_only_on_spot_are_flagged():
+    # Given
+    nodes = by_name(worker('a', capacity='spot'), worker('b', capacity='spot'), worker('c', capacity='on-demand'))
+
+    # When / Then
+    assert workload_findings(replicas(['a', 'b']), nodes)[('default', 'web-0')] == ['spof-spot']
+    assert workload_findings(replicas(['a', 'c']), nodes) == {}
+
+
+def test_spot_is_reported_alongside_the_placement_finding():
+    # Given
+    nodes = by_name(worker('a', capacity='spot'))
+
+    # When / Then
+    assert workload_findings(replicas(['a', 'a']), nodes)[('default', 'web-0')] == ['spof-node', 'spof-spot']
+
+
+def test_statefulsets_and_bare_replicasets_are_checked_too():
+    # Given
+    nodes = by_name(worker('a'))
+
+    # When / Then
+    for kind in ('StatefulSet', 'ReplicaSet'):
+        assert workload_findings(replicas(['a', 'a'], kind=kind), nodes)[('default', 'web-0')] == ['spof-node']
+
+
+def test_daemonsets_and_jobs_are_not_spread_checked():
+    # Given
+    nodes = by_name(worker('a', capacity='spot'))
+
+    # When / Then
+    for kind in ('DaemonSet', 'Job'):
+        assert workload_findings(replicas(['a', 'a'], kind=kind), nodes) == {}
+
+
+def test_one_replica_is_not_a_spread_problem():
+    # Given
+    nodes = by_name(worker('a', capacity='spot'))
+
+    # When
+    findings = workload_findings(replicas(['a']), nodes)
+
+    # Then
+    assert not any(f.startswith('spof-') for fs in findings.values() for f in fs)
