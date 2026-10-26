@@ -473,3 +473,19 @@ def test_workload_rules_see_scheduled_pods_grouped_by_owner(monkeypatch):
     assert findings['web-2'] == []
     tree_pod = _.find(mapper.transform('cpu')['groups'][0]['groups'], lambda item: item['label'] == 'web-1')
     assert tree_pod['findings'] == ['wl-rule']
+
+
+def test_workload_rules_skip_pending_naked_and_static_pods():
+    # Given — the second replica is Pending, so the Deployment runs one pod
+    nodes = [NodeResources('a', 2000, float(bitmath.GB(1).kB))]
+    pods = [_owned('web-1', 'a'), _owned('web-2', None),
+            _owned('debug', 'a', kind=None, owner=None),
+            _owned('etcd-a', 'a', kind='Node', owner=None)]
+
+    # When
+    out = {p['name']: p['findings'] for p in _.head(FoamTreeMapper(nodes, pods).combined()['nodes'])['pods']}
+
+    # Then
+    assert 'single-replica' in out['web-1']
+    assert 'single-replica' not in out['debug']
+    assert 'single-replica' not in out['etcd-a']

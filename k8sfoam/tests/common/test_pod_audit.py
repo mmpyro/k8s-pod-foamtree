@@ -193,6 +193,29 @@ def test_daemonsets_and_jobs_are_not_spread_checked():
         assert workload_findings(replicas(['a', 'a'], kind=kind), nodes) == {}
 
 
+def test_deployment_with_one_pod_is_a_single_replica():
+    # Given
+    nodes = by_name(worker('a'), worker('b'))
+
+    # When / Then
+    assert workload_findings(replicas(['a']), nodes) == {('default', 'web-0'): ['single-replica']}
+    assert workload_findings(replicas(['a', 'b']), nodes) == {}
+
+
+def test_statefulset_with_one_pod_is_a_single_replica():
+    # When
+    findings = workload_findings(replicas(['a'], kind='StatefulSet'), by_name(worker('a')))
+
+    # Then
+    assert findings == {('default', 'web-0'): ['single-replica']}
+
+
+def test_one_pod_jobs_daemonsets_and_bare_replicasets_are_not_single_replicas():
+    # When / Then
+    for kind in ('Job', 'DaemonSet', 'ReplicaSet'):
+        assert workload_findings(replicas(['a'], kind=kind), by_name(worker('a'))) == {}
+
+
 def test_one_replica_is_not_a_spread_problem():
     # Given
     nodes = by_name(worker('a', capacity='spot'))

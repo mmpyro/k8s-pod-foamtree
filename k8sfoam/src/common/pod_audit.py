@@ -22,6 +22,10 @@ SPOF_MIN_REPLICAS = 2
 # A DaemonSet is pinned one per node by design and a Job runs to completion.
 SPOF_KINDS = ('Deployment', 'StatefulSet', 'ReplicaSet')
 
+# Long-running services where one replica means every rollout, drain or eviction
+# is downtime. Counted from the scheduled pods; spec.replicas is never read.
+SINGLE_REPLICA_KINDS = ('Deployment', 'StatefulSet')
+
 
 def _share(requested: float, capacity: float) -> float:
     return requested / capacity if capacity else 0.0
@@ -89,6 +93,8 @@ def workload_findings(pods_by_workload: dict, nodes_by_name: dict) -> dict:
     result: dict = {}
     for (namespace, kind, _), pods in pods_by_workload.items():
         findings = []
+        if kind in SINGLE_REPLICA_KINDS and len(pods) == 1:
+            findings.append('single-replica')
         if kind in SPOF_KINDS and len(pods) >= SPOF_MIN_REPLICAS:
             findings += _spof(pods, nodes_by_name, multi_zone)
         if findings:
