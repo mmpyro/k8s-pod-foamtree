@@ -45,6 +45,29 @@ def test_init_containers_are_not_audited():
     assert findings == []
 
 
+GI = 1_073_741.824  # 1Gi in decimal kB, the unit the extractor emits
+
+
+def test_memory_limit_far_above_request_is_flagged():
+    # When — 1Gi request, 8Gi limit
+    findings = pod_findings(pod(400, GI, memory_limit=8 * GI), NODE)
+
+    # Then
+    assert findings == ['limit-overcommit']
+
+
+def test_memory_limit_close_to_request_is_not_flagged():
+    # When / Then — 2× and exactly 4× are fine
+    assert pod_findings(pod(400, GI, memory_limit=2 * GI), NODE) == []
+    assert pod_findings(pod(400, GI, memory_limit=4 * GI), NODE) == []
+
+
+def test_limit_overcommit_does_not_double_report_missing_values():
+    # When / Then — no limit, or no request, is already its own finding
+    assert pod_findings(pod(400, GI, memory_limit=None), NODE) == ['missing-limits']
+    assert pod_findings(pod(400, 0, memory_limit=8 * GI), NODE) == ['missing-requests']
+
+
 def test_pod_taking_most_of_a_node_is_a_monolith():
     # When / Then — either axis is enough
     assert 'monolith' in pod_findings(pod(3600, 14_400_000), NODE)
@@ -86,12 +109,21 @@ def test_node_without_capacity_does_not_crash():
 
 
 def test_every_finding_is_reported_in_order():
-    # Given — no memory limit, 90% of the CPU, 10% of the memory
+    # Given — no memory limit, 90% of the CPU, 10% of the memory, no controller
     # When
-    findings = pod_findings(pod(3600, 1_600_000, memory_limit=None), NODE)
+    findings = pod_findings(pod(3600, 1_600_000, memory_limit=None, owner_kind=None), NODE)
 
     # Then
-    assert findings == ['missing-limits', 'monolith', 'ratio-asymmetry']
+    assert findings == ['missing-limits', 'monolith', 'ratio-asymmetry', 'naked-pod']
+
+
+def test_limit_overcommit_follows_missing_requests():
+    # Given — app has no CPU request; sidecar's limit is 8× its request
+    containers = [ContainerResources('app', 0, GI, GI), ContainerResources('side', 800, GI, 8 * GI)]
+    overcommitted = PodResources('app', 'worker', 800, 2 * GI, containers, [], owner_kind='ReplicaSet')
+
+    # When / Then
+    assert pod_findings(overcommitted, NODE) == ['missing-requests', 'limit-overcommit']
 
 
 def test_pod_without_a_controller_is_naked():

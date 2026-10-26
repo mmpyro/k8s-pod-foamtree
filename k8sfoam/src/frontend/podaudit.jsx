@@ -6,6 +6,7 @@
 const POD_FINDINGS = {
   "missing-requests": { label: "missing requests", sev: "warn", why: "no CPU or memory request — the scheduler packs it blind" },
   "missing-limits":   { label: "no memory limit",  sev: "info", why: "no memory limit — a leak can take the node down" },
+  "limit-overcommit": { label: "limit far above request", sev: "info", why: "memory limit over 4× the request — the node is packed by request but OOM-kills by usage" },
   "monolith":         { label: "monolith",         sev: "warn", why: "reserves over 80% of its node — nowhere else to reschedule it" },
   "ratio-asymmetry":  { label: "ratio asymmetry",  sev: "info", why: "CPU:memory ratio far from the node's — strands the other resource" },
   "naked-pod":        { label: "naked pod",        sev: "warn", why: "no controller — a drain or node failure deletes it for good" },

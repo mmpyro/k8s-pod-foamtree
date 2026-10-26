@@ -10,6 +10,10 @@ MONOLITH_SHARE = 0.8
 # leftover capacity on the other axis is effectively stranded.
 RATIO_ASYMMETRY_FACTOR = 4
 
+# A memory limit more than this many times its request lets the node be
+# overcommitted: the scheduler packs by request, the kubelet OOM-kills by usage.
+LIMIT_REQUEST_FACTOR = 4
+
 # Below this share on its dominant axis a pod is too small to strand anything,
 # so an extreme ratio on a tiny sidecar is not worth reporting.
 RATIO_MIN_SHARE = 0.10
@@ -46,6 +50,10 @@ def pod_findings(pod: PodResources, node: NodeResources) -> list:
         findings.append('missing-requests')
     if any(c.memory_limit is None for c in containers):
         findings.append('missing-limits')
+    # A 0 request or no limit is already reported above, and has no ratio.
+    if any(c.memory and c.memory_limit is not None and c.memory_limit > LIMIT_REQUEST_FACTOR * c.memory
+           for c in containers):
+        findings.append('limit-overcommit')
 
     cpu_share = _share(pod.cpu or 0, node.cpu or 0)
     mem_share = _share(pod.memory or 0, node.memory or 0)

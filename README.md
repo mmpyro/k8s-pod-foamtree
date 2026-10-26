@@ -91,6 +91,7 @@ Every pod is checked against the best-practice rules below. Workload rules look 
 | --- | --- | --- |
 | amber | `missing requests` | a regular container requests 0 CPU or 0 memory |
 | blue | `no memory limit` | a regular container sets no `limits.memory` |
+| blue | `limit far above request` (`limit-overcommit`) | a regular container's memory limit is more than 4× its memory request |
 | amber | `monolith` | the pod reserves more than 80% of its node's CPU or memory |
 | blue | `ratio asymmetry` | the pod's share of node CPU and its share of node memory differ by 4× or more, and the larger share is at least 10% |
 | amber | `naked pod` | no controller owns the pod, so a drain or node failure deletes it for good (static pods are not flagged; the kubelet restarts them) |
@@ -103,6 +104,7 @@ These details are worth knowing:
 
 - **Init containers are not audited.** They finish before the app runs, so their requests and limits say nothing about how the pod behaves once it is running.
 - **CPU limits are not required.** Only a missing *memory* limit is flagged. A memory leak without a limit can take the whole node down; a CPU spike without a limit only gets throttled.
+- **Limit overcommit is memory-only.** The scheduler packs nodes by request, so a limit far above the request lets the node promise more memory than it has, and the kubelet OOM-kills by real usage. A container with no request or no limit is already reported by the two rules above and is not counted again. CPU overcommit only throttles, so it is not checked; a CPU limit-to-request rule is a possible follow-up.
 - **Ratio asymmetry ignores small pods.** A sidecar asking for 5% of the CPU and almost no memory has an extreme ratio, but it leaves no meaningful capacity stranded.
 - **Replicas are the pods k8sfoams sees.** Workload rules count scheduled, running pods; `spec.replicas` is not read, so no extra API call is needed. A Deployment scaled to 2 with one pod still Pending reads as a single replica.
 - **Spread rules skip DaemonSets and Jobs.** A DaemonSet runs one pod per node by design, and a Job runs to completion. Zones and capacity types come from the same node labels as [Group by](#topology). A single-zone cluster, or one without zone labels (minikube, kind), never reports `spof-zone`, and a replica on a node without a capacity-type label is not counted as spot.
@@ -153,7 +155,7 @@ An empty query matches everything. A query that contains a malformed token is **
 | `node:<glob>` | node the pod is scheduled on | `*` is the only wildcard; anchored (whole name must match); case-insensitive |
 | `qos:<class>` | [QoS class](#qos--eviction-risk): `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
 | `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
-| `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `monolith`, `ratio-asymmetry`, `naked-pod`, `single-replica`, `spof-node`, `spof-zone`, `spof-spot` |
+| `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `limit-overcommit`, `monolith`, `ratio-asymmetry`, `naked-pod`, `single-replica`, `spof-node`, `spof-zone`, `spof-spot` |
 | `health:<warning>` | nodes carrying a health warning, and every pod on them | `cordoned`, `not-ready`, `memory-pressure`, `disk-pressure`, `pid-pressure`, `tainted` |
 | `zone:<glob>` `region:<glob>` `pool:<glob>` `type:<glob>` | nodes with that [topology](#topology) label, and every pod on them | globs like `node:` (`zone:us-east-1*`); a node without the label never matches |
 | `capacity:<type>` | spot or on-demand nodes, and every pod on them | `spot`, `on-demand`; case-insensitive |
