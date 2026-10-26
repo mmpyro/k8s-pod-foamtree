@@ -13,7 +13,8 @@ def create_list(items, next_page=None, resource_version='1') -> MagicMock:
 
 def create_pod(name: str, node_name: str, containers=[], init_containers=None,
                namespace='default', labels=None, qos_class='Burstable', node_selector=None,
-               tolerations=None, owner_kind='ReplicaSet', annotations=None, phase='Running') -> MagicMock:
+               tolerations=None, owner_kind='ReplicaSet', annotations=None, phase='Running',
+               owner_name=None) -> MagicMock:
     pod = MagicMock()
     metadata = MagicMock()
     metadata.name = name
@@ -23,7 +24,7 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     metadata.labels = labels
     metadata.annotations = annotations
     # owner_kind=None builds a naked pod with no controller to recreate it.
-    metadata.owner_references = [create_owner(owner_kind)] if owner_kind else None
+    metadata.owner_references = [create_owner(owner_kind, owner_name)] if owner_kind else None
     spec = MagicMock()
     spec.node_name = node_name
     spec.node_selector = node_selector
@@ -39,9 +40,11 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     return pod
 
 
-def create_owner(kind: str, controller: bool = True) -> MagicMock:
+def create_owner(kind: str, name=None, controller: bool = True) -> MagicMock:
     owner = MagicMock()
     owner.kind = kind
+    # Set after construction: MagicMock(name=...) names the mock, not the attribute.
+    owner.name = name
     owner.controller = controller
     return owner
 

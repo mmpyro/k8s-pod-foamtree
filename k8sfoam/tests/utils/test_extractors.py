@@ -512,6 +512,30 @@ def test_should_extract_pod_owner_kind(owner_kind, annotations, expected):
     assert result.tolerations == []
 
 
+@pytest.mark.parametrize('owner_kind, owner_name, labels, annotations, expected', [
+    # A Deployment's ReplicaSet is <deployment>-<pod-template-hash>
+    ('ReplicaSet', 'web-api-66b6c48dd5', {'pod-template-hash': '66b6c48dd5'}, None, ('Deployment', 'web-api')),
+    # A bare ReplicaSet has no hash label, or one that is not its name suffix
+    ('ReplicaSet', 'web-api', None, None, ('ReplicaSet', 'web-api')),
+    ('ReplicaSet', 'web-api-x', {'pod-template-hash': '66b6c48dd5'}, None, ('ReplicaSet', 'web-api-x')),
+    ('StatefulSet', 'db', None, None, ('StatefulSet', 'db')),
+    ('DaemonSet', 'fluentd', None, None, ('DaemonSet', 'fluentd')),
+    ('Job', 'backup-28234560', None, None, ('Job', 'backup-28234560')),
+    ('Node', 'cp-node', None, {'kubernetes.io/config.mirror': 'abc'}, ('Node', None)),
+    (None, None, None, None, (None, None)),
+])
+def test_should_extract_pod_workload_identity(owner_kind, owner_name, labels, annotations, expected):
+    # Given
+    pod = create_pod('p', 'node', containers=[create_container('app', '100m', '100Mi')], labels=labels,
+                     owner_kind=owner_kind, owner_name=owner_name, annotations=annotations)
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert (result.owner_kind, result.owner_name) == expected
+
+
 def test_gpu_set_as_limit_only_counts_as_request():
     # Given — the API allows extended resources in limits alone
     extractor = ResourcesExtractor()

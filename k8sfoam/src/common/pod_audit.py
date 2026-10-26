@@ -47,3 +47,13 @@ def pod_findings(pod: PodResources, node: NodeResources) -> list:
             findings.append('ratio-asymmetry')
 
     return findings
+
+
+def workload_findings(pods_by_workload: dict, nodes_by_name: dict) -> dict:
+    """Rules that need every replica of a workload at once, in a fixed order.
+
+    `pods_by_workload` maps (namespace, kind, name) to the workload's scheduled
+    pods. Returns {(namespace, pod name): [slug, ...]}; each finding is added to
+    every pod of the workload, after that pod's own pod_findings.
+    """
+    return {}

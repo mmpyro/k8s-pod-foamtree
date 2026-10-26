@@ -1,5 +1,9 @@
-// Workload identity derived from a pod name — no backend call needed.
+// Workload identity of a pod. The backend sends the real owner (a Deployment's
+// ReplicaSet already resolved to the Deployment) as `pod.owner`; the key is then
+// "namespace/Kind/name", so same-named workloads in two namespaces never merge.
 //
+// Snapshots and old data carry no owner, and neither do naked and static pods
+// worth grouping, so those fall back to recovering the owner from the pod name.
 // Kubernetes builds pod names by appending generated suffixes to the owner's
 // name, so the owner can be recovered by stripping them back off:
 //
@@ -31,7 +35,7 @@ function isOrdinal(token) {
   return /^(0|[1-9]\d{0,2})$/.test(token);
 }
 
-function workloadKey(podName) {
+function nameKey(podName) {
   if (!podName) return "";
   const parts = podName.split("-");
   if (parts.length < 2) return podName;
@@ -51,4 +55,17 @@ function workloadKey(podName) {
   return podName;
 }
 
-window.k8sWorkload = { workloadKey };
+// A static pod's owner is its node, which every static pod on that node shares.
+function workloadKey(pod) {
+  if (!pod) return "";
+  const owner = pod.owner;
+  if (owner && owner.name && owner.kind !== "Node") return `${pod.namespace}/${owner.kind}/${owner.name}`;
+  return nameKey(pod.name);
+}
+
+// What a person calls the workload: the owner name without namespace and kind.
+function workloadLabel(key) {
+  return (key || "").split("/").pop();
+}
+
+window.k8sWorkload = { workloadKey, workloadLabel };

@@ -20,6 +20,7 @@ def _totals(c: ContainerResources) -> dict:
 # The kubelet marks a static pod's API copy with this annotation. Such a pod is
 # owned by the node itself: a drain cannot evict it and nothing reschedules it.
 MIRROR_POD_ANNOTATION = 'kubernetes.io/config.mirror'
+POD_TEMPLATE_HASH_LABEL = 'pod-template-hash'
 
 
 class ResourcesExtractor():
@@ -30,14 +31,24 @@ class ResourcesExtractor():
         return [{'key': t.key, 'operator': t.operator, 'value': t.value, 'effect': t.effect}
                 for t in pod.spec.tolerations or []]
 
-    def __extract_owner_kind(self, pod):
-        """Who recreates the pod after an eviction: a controller kind, 'Node' for a
-        static pod, or None for a naked pod that nothing brings back."""
+    def __extract_owner(self, pod, labels: dict) -> tuple:
+        """Who recreates the pod after an eviction, as (kind, name): a controller,
+        ('Node', None) for a static pod, or (None, None) for a naked pod that
+        nothing brings back."""
         if MIRROR_POD_ANNOTATION in (pod.metadata.annotations or {}):
-            return 'Node'
+            return 'Node', None
         refs = pod.metadata.owner_references or []
         controller = next((r for r in refs if r.controller), refs[0] if refs else None)
-        return controller.kind if controller is not None else None
+        if controller is None:
+            return None, None
+        kind, name = controller.kind, controller.name
+        # A Deployment names its ReplicaSet <deployment>-<pod-template-hash> and
+        # stamps the hash on the pod, so the Deployment is recoverable without
+        # reading apps/v1. A bare ReplicaSet carries no such suffix.
+        template_hash = labels.get(POD_TEMPLATE_HASH_LABEL)
+        if kind == 'ReplicaSet' and template_hash and name and name.endswith(f'-{template_hash}'):
+            return 'Deployment', name[:-len(template_hash) - 1]
+        return kind, name
 
     def __extract_container_resources(self, container) -> ContainerResources:
         requests = container.resources.requests
@@ -89,9 +100,10 @@ class ResourcesExtractor():
         effective_memory = effective.get('memory', 0)
         extended = {k: v for k, v in effective.items() if k not in ('cpu', 'memory') and v}
 
+        owner_kind, owner_name = self.__extract_owner(pod, labels)
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
                             namespace, labels, qos_class, extended, dict(pod.spec.node_selector or {}),
-                            self.__extract_tolerations(pod), self.__extract_owner_kind(pod))
+                            self.__extract_tolerations(pod), owner_kind, owner_name)
 
     def __extract_node_taints(self, node) -> list:
         """Every taint on the node, minus the one Kubernetes adds on cordon.
