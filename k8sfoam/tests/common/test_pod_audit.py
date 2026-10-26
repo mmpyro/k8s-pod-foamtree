@@ -6,9 +6,9 @@ from k8sfoam.src.common.pod_audit import pod_findings, workload_findings
 NODE = NodeResources('worker', 4000, 16_000_000)
 
 
-def pod(cpu: float, memory: float, memory_limit=1, init_containers=None) -> PodResources:
+def pod(cpu: float, memory: float, memory_limit=1, init_containers=None, owner_kind='ReplicaSet') -> PodResources:
     containers = [ContainerResources('app', cpu, memory, memory_limit)]
-    return PodResources('app', 'worker', cpu, memory, containers, init_containers or [])
+    return PodResources('app', 'worker', cpu, memory, containers, init_containers or [], owner_kind=owner_kind)
 
 
 def test_well_sized_pod_has_no_findings():
@@ -92,6 +92,20 @@ def test_every_finding_is_reported_in_order():
 
     # Then
     assert findings == ['missing-limits', 'monolith', 'ratio-asymmetry']
+
+
+def test_pod_without_a_controller_is_naked():
+    # When
+    findings = pod_findings(pod(400, 1_600_000, owner_kind=None), NODE)
+
+    # Then
+    assert findings == ['naked-pod']
+
+
+def test_static_and_controller_owned_pods_are_not_naked():
+    # When / Then — the kubelet owns a static pod and restarts it
+    assert pod_findings(pod(400, 1_600_000, owner_kind='Node'), NODE) == []
+    assert pod_findings(pod(400, 1_600_000, owner_kind='ReplicaSet'), NODE) == []
 
 
 def worker(name: str, zone=None, capacity=None) -> NodeResources:

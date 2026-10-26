@@ -285,7 +285,7 @@ def test_pod_groups_carry_audit_findings_in_both_transforms():
     # Given — no requests and no limits at all
     node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
     containers = [ContainerResources('app', 0, 0)]
-    pods = [PodResources('bare', 'minikube', 0, 0, containers, [])]
+    pods = [PodResources('bare', 'minikube', 0, 0, containers, [], owner_kind='DaemonSet', owner_name='bare')]
     mapper = FoamTreeMapper(node, pods)
 
     # When
@@ -393,7 +393,8 @@ def test_combined_carries_health_topology_and_findings():
     taints = [{'key': 'gpu-only', 'value': None, 'effect': 'NoSchedule'}]
     labels = {'topology.kubernetes.io/zone': 'us-east-1a'}
     node = [NodeResources('worker-1', 2000, float(bitmath.GB(1).kB), True, taints, HEALTHY, labels=labels)]
-    pods = [PodResources('bare', 'worker-1', 0, 0, [ContainerResources('app', 0, 0)], [], 'default', {'app': 'bare'})]
+    pods = [PodResources('bare', 'worker-1', 0, 0, [ContainerResources('app', 0, 0)], [], 'default', {'app': 'bare'},
+                         owner_kind='DaemonSet', owner_name='bare')]
 
     # When
     node_out = _.head(FoamTreeMapper(node, pods).combined()['nodes'])

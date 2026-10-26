@@ -59,6 +59,11 @@ def pod_findings(pod: PodResources, node: NodeResources) -> list:
         if high >= RATIO_MIN_SHARE and high / low >= RATIO_ASYMMETRY_FACTOR:
             findings.append('ratio-asymmetry')
 
+    # Nothing recreates a pod without a controller after a drain or node failure.
+    # A static pod is owned by its node ('Node'), and the kubelet restarts it.
+    if pod.owner_kind is None:
+        findings.append('naked-pod')
+
     return findings
 
 

@@ -93,6 +93,7 @@ Every pod is checked against the best-practice rules below. Workload rules look 
 | blue | `no memory limit` | a regular container sets no `limits.memory` |
 | amber | `monolith` | the pod reserves more than 80% of its node's CPU or memory |
 | blue | `ratio asymmetry` | the pod's share of node CPU and its share of node memory differ by 4× or more, and the larger share is at least 10% |
+| amber | `naked pod` | no controller owns the pod, so a drain or node failure deletes it for good (static pods are not flagged; the kubelet restarts them) |
 | blue | `single replica` | a Deployment or StatefulSet runs exactly one pod |
 | amber | `replicas on one node` (`spof-node`) | a workload with 2 or more replicas has all of them on the same node |
 | amber | `replicas in one zone` (`spof-zone`) | otherwise, all replicas sit in one zone while the cluster has nodes in more than one |
@@ -152,7 +153,7 @@ An empty query matches everything. A query that contains a malformed token is **
 | `node:<glob>` | node the pod is scheduled on | `*` is the only wildcard; anchored (whole name must match); case-insensitive |
 | `qos:<class>` | [QoS class](#qos--eviction-risk): `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
 | `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
-| `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `monolith`, `ratio-asymmetry`, `single-replica`, `spof-node`, `spof-zone`, `spof-spot` |
+| `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `monolith`, `ratio-asymmetry`, `naked-pod`, `single-replica`, `spof-node`, `spof-zone`, `spof-spot` |
 | `health:<warning>` | nodes carrying a health warning, and every pod on them | `cordoned`, `not-ready`, `memory-pressure`, `disk-pressure`, `pid-pressure`, `tainted` |
 | `zone:<glob>` `region:<glob>` `pool:<glob>` `type:<glob>` | nodes with that [topology](#topology) label, and every pod on them | globs like `node:` (`zone:us-east-1*`); a node without the label never matches |
 | `capacity:<type>` | spot or on-demand nodes, and every pod on them | `spot`, `on-demand`; case-insensitive |

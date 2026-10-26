@@ -8,6 +8,7 @@ const POD_FINDINGS = {
   "missing-limits":   { label: "no memory limit",  sev: "info", why: "no memory limit — a leak can take the node down" },
   "monolith":         { label: "monolith",         sev: "warn", why: "reserves over 80% of its node — nowhere else to reschedule it" },
   "ratio-asymmetry":  { label: "ratio asymmetry",  sev: "info", why: "CPU:memory ratio far from the node's — strands the other resource" },
+  "naked-pod":        { label: "naked pod",        sev: "warn", why: "no controller — a drain or node failure deletes it for good" },
   // Workload rules: every replica of the workload carries the same finding.
   "single-replica":   { label: "single replica",   sev: "info", why: "the only replica — every rollout, drain or eviction is downtime" },
   "spof-node":        { label: "replicas on one node", sev: "warn", why: "every replica on one node — losing that node takes the workload down" },
