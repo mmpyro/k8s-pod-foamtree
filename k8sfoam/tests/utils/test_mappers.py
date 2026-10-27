@@ -285,7 +285,7 @@ def test_pod_groups_carry_audit_findings_in_both_transforms():
     # Given — no requests and no limits at all
     node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
     containers = [ContainerResources('app', 0, 0)]
-    pods = [PodResources('bare', 'minikube', 0, 0, containers, [])]
+    pods = [PodResources('bare', 'minikube', 0, 0, containers, [], owner_kind='DaemonSet', owner_name='bare')]
     mapper = FoamTreeMapper(node, pods)
 
     # When
@@ -393,7 +393,8 @@ def test_combined_carries_health_topology_and_findings():
     taints = [{'key': 'gpu-only', 'value': None, 'effect': 'NoSchedule'}]
     labels = {'topology.kubernetes.io/zone': 'us-east-1a'}
     node = [NodeResources('worker-1', 2000, float(bitmath.GB(1).kB), True, taints, HEALTHY, labels=labels)]
-    pods = [PodResources('bare', 'worker-1', 0, 0, [ContainerResources('app', 0, 0)], [], 'default', {'app': 'bare'})]
+    pods = [PodResources('bare', 'worker-1', 0, 0, [ContainerResources('app', 0, 0)], [], 'default', {'app': 'bare'},
+                         owner_kind='DaemonSet', owner_name='bare')]
 
     # When
     node_out = _.head(FoamTreeMapper(node, pods).combined()['nodes'])
@@ -421,3 +422,71 @@ def test_combined_keeps_init_containers_that_request_anything():
     # Then
     assert [(c['name'], c['init']) for c in pod_out['containers']] == [('app', False), ('migrate', True)]
     assert pod_out['hasInitContainers'] is True
+
+
+def _owned(name, node_name, namespace='default', kind='Deployment', owner='web'):
+    app = [ContainerResources('app', 100, float(bitmath.MB(100).kB), 1)]
+    return PodResources(name, node_name, 100, float(bitmath.MB(100).kB), app, [], namespace,
+                        owner_kind=kind, owner_name=owner)
+
+
+def test_pods_carry_their_owner():
+    # Given
+    node = [NodeResources('a', 2000, float(bitmath.GB(1).kB))]
+    pods = [_owned('web-1', 'a'),
+            PodResources('debug', 'a', 100, 100, [], [], 'default'),
+            PodResources('etcd-a', 'a', 100, 100, [], [], 'kube-system', owner_kind='Node')]
+
+    # When
+    out = {p['name']: p['owner'] for p in _.head(FoamTreeMapper(node, pods).combined()['nodes'])['pods']}
+
+    # Then
+    assert out == {'web-1': {'kind': 'Deployment', 'name': 'web'},
+                   'debug': None,
+                   'etcd-a': {'kind': 'Node', 'name': None}}
+
+
+def test_workload_rules_see_scheduled_pods_grouped_by_owner(monkeypatch):
+    # Given — same Deployment name in two namespaces, a pending replica, a naked and a static pod
+    seen = {}
+
+    def fake_workload_findings(pods_by_workload, nodes_by_name):
+        seen.update({key: [p.name for p in pods] for key, pods in pods_by_workload.items()})
+        seen['nodes'] = sorted(nodes_by_name)
+        return {('default', 'web-1'): ['wl-rule']}
+
+    monkeypatch.setattr('k8sfoam.src.utils.mappers.workload_findings', fake_workload_findings)
+    nodes = [NodeResources('a', 2000, float(bitmath.GB(1).kB)), NodeResources('b', 2000, float(bitmath.GB(1).kB))]
+    pods = [_owned('web-1', 'a'), _owned('web-2', 'b'), _owned('web-3', None),
+            _owned('web-x', 'a', namespace='staging'),
+            PodResources('debug', 'a', 100, 100, [], [], 'default'),
+            PodResources('etcd-a', 'a', 100, 100, [], [], 'kube-system', owner_kind='Node')]
+
+    # When
+    mapper = FoamTreeMapper(nodes, pods)
+    findings = {p['name']: p['findings'] for n in mapper.combined()['nodes'] for p in n['pods']}
+
+    # Then — workload findings follow the pod's own ones, only on the targeted pod
+    assert seen == {('default', 'Deployment', 'web'): ['web-1', 'web-2'],
+                    ('staging', 'Deployment', 'web'): ['web-x'],
+                    'nodes': ['a', 'b']}
+    assert findings['web-1'] == ['wl-rule']
+    assert findings['web-2'] == []
+    tree_pod = _.find(mapper.transform('cpu')['groups'][0]['groups'], lambda item: item['label'] == 'web-1')
+    assert tree_pod['findings'] == ['wl-rule']
+
+
+def test_workload_rules_skip_pending_naked_and_static_pods():
+    # Given — the second replica is Pending, so the Deployment runs one pod
+    nodes = [NodeResources('a', 2000, float(bitmath.GB(1).kB))]
+    pods = [_owned('web-1', 'a'), _owned('web-2', None),
+            _owned('debug', 'a', kind=None, owner=None),
+            _owned('etcd-a', 'a', kind='Node', owner=None)]
+
+    # When
+    out = {p['name']: p['findings'] for p in _.head(FoamTreeMapper(nodes, pods).combined()['nodes'])['pods']}
+
+    # Then
+    assert 'single-replica' in out['web-1']
+    assert 'single-replica' not in out['debug']
+    assert 'single-replica' not in out['etcd-a']

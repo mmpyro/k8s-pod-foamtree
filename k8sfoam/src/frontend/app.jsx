@@ -3,7 +3,7 @@
 const { useState, useEffect, useMemo, useRef } = React;
 const { NodeCard, gridLayout, SLOT_GAP, ZONE_HEADER } = window.k8sTreemap;
 const { Scene3D } = window.k8sScene3D;
-const { workloadKey } = window.k8sWorkload;
+const { workloadKey, workloadLabel } = window.k8sWorkload;
 const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
 const { QOS_INFO, QOS_ORDER, NEUTRAL_HUE } = window.k8sQos;
@@ -109,6 +109,8 @@ function toNodes(payload) {
         hasInit: !!p.hasInitContainers,
         // Best-practice rule slugs, decided by the backend.
         findings: p.findings || [],
+        // Controlling workload { kind, name }; null for naked pods and old data.
+        owner: p.owner || null,
         // Effective request (what the scheduler reserves) — init containers
         // run sequentially, so this is max(sum regular, max init), not a sum.
         cpu: p.cpu || 0,
@@ -344,7 +346,7 @@ function App() {
     let replicas = 0;
     for (const n of nodes) {
       for (const p of n.pods) {
-        if (workloadKey(p.name) !== selectedWorkload) continue;
+        if (workloadKey(p) !== selectedWorkload) continue;
         replicas++;
         spread.add(n.name);
       }
@@ -1124,7 +1126,7 @@ function Header({
           {/* Replica spread of the pinned workload — the anti-affinity check. */}
           {workload && (
             <span className="title-chip wl-chip" title={workload.key}>
-              <span className="wl-chip-name">{workload.key}</span>
+              <span className="wl-chip-name">{workloadLabel(workload.key)}</span>
               <span className="wl-chip-meta">
                 {workload.replicas} replica{workload.replicas === 1 ? "" : "s"} · {workload.nodes} node{workload.nodes === 1 ? "" : "s"}
               </span>

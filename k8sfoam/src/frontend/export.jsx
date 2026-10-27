@@ -130,7 +130,7 @@ function cardSvg(node, slot, idx, opts) {
     const dim = queryActive && !nodeDim && !matched;
     // Only a pinned workload is exported; a hover preview is transient.
     // Query scope wins over workload state, as in styles.css.
-    const wl = pinned ? workloadKey(pod.name) : null;
+    const wl = pinned ? workloadKey(pod) : null;
     const peer = !!pinned && !dim && wl === pinned;
     const opacity = dim ? 0.16 : pinned && wl !== pinned ? 0.22 : 1;
     const podHue = colorBy === "qos" ? qosHue(pod.qos) : hue;
@@ -314,7 +314,7 @@ function reportJson({ nodes, totals, context, metric, query, match }) {
       extended: { capacity: n.extCap, used: n.extUsed },
       unschedulable: n.unschedulable, warnings: n.warnings, taints: n.taints, conditions: n.conditions,
       pods: n.pods.map(p => ({
-        name: p.name, namespace: p.namespace, qos: p.qos, labels: p.labels,
+        name: p.name, namespace: p.namespace, owner: p.owner, qos: p.qos, labels: p.labels,
         cpu: p.cpu, mem: p.mem, extended: p.ext, findings: p.findings,
         ...(active ? { matched: match.pods.has(p) } : {}),
         containers: p.containers,

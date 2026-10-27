@@ -317,7 +317,7 @@ function PodBox({
   // Workload identity is cheap to derive and only ever needed here, so it is
   // recomputed rather than cached on the pod — the highlight itself is a plain
   // class toggle, so a re-render costs nothing beyond this string compare.
-  const wl = workloadKey(pod.name);
+  const wl = workloadKey(pod);
   const cls = ["pod-box"];
   if (dim) cls.push("is-dim");
   if (matched) cls.push("is-match");

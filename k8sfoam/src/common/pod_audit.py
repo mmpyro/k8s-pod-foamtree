@@ -1,4 +1,5 @@
 from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.node_topology import SPOT, node_topology
 
 
 # A pod reserving more than this share of a node leaves no room to reschedule
@@ -9,9 +10,25 @@ MONOLITH_SHARE = 0.8
 # leftover capacity on the other axis is effectively stranded.
 RATIO_ASYMMETRY_FACTOR = 4
 
+# A memory limit more than this many times its request lets the node be
+# overcommitted: the scheduler packs by request, the kubelet OOM-kills by usage.
+LIMIT_REQUEST_FACTOR = 4
+
 # Below this share on its dominant axis a pod is too small to strand anything,
 # so an extreme ratio on a tiny sidecar is not worth reporting.
 RATIO_MIN_SHARE = 0.10
+
+# A workload needs this many replicas before their placement can be a single
+# point of failure; with fewer there is nothing to spread.
+SPOF_MIN_REPLICAS = 2
+
+# Controllers whose replicas are interchangeable, so spreading them is the point.
+# A DaemonSet is pinned one per node by design and a Job runs to completion.
+SPOF_KINDS = ('Deployment', 'StatefulSet', 'ReplicaSet')
+
+# Long-running services where one replica means every rollout, drain or eviction
+# is downtime. Counted from the scheduled pods; spec.replicas is never read.
+SINGLE_REPLICA_KINDS = ('Deployment', 'StatefulSet')
 
 
 def _share(requested: float, capacity: float) -> float:
@@ -33,6 +50,10 @@ def pod_findings(pod: PodResources, node: NodeResources) -> list:
         findings.append('missing-requests')
     if any(c.memory_limit is None for c in containers):
         findings.append('missing-limits')
+    # A 0 request or no limit is already reported above, and has no ratio.
+    if any(c.memory and c.memory_limit is not None and c.memory_limit > LIMIT_REQUEST_FACTOR * c.memory
+           for c in containers):
+        findings.append('limit-overcommit')
 
     cpu_share = _share(pod.cpu or 0, node.cpu or 0)
     mem_share = _share(pod.memory or 0, node.memory or 0)
@@ -46,4 +67,50 @@ def pod_findings(pod: PodResources, node: NodeResources) -> list:
         if high >= RATIO_MIN_SHARE and high / low >= RATIO_ASYMMETRY_FACTOR:
             findings.append('ratio-asymmetry')
 
+    # Nothing recreates a pod without a controller after a drain or node failure.
+    # A static pod is owned by its node ('Node'), and the kubelet restarts it.
+    if pod.owner_kind is None:
+        findings.append('naked-pod')
+
     return findings
+
+
+def _spof(pods: list, nodes_by_name: dict, multi_zone: bool) -> list:
+    """Failure domains every replica shares, so losing that one domain loses them all."""
+    findings = []
+    nodes = [nodes_by_name[p.node_name] for p in pods]
+    topology = [node_topology(n.labels) for n in nodes]
+    if len({n.name for n in nodes}) == 1:
+        findings.append('spof-node')
+    elif multi_zone:
+        zones = {t['zone'] for t in topology}
+        if len(zones) == 1 and None not in zones:
+            findings.append('spof-zone')
+    if all(t['capacityType'] == SPOT for t in topology):
+        findings.append('spof-spot')
+    return findings
+
+
+def workload_findings(pods_by_workload: dict, nodes_by_name: dict) -> dict:
+    """Rules that need every replica of a workload at once, in a fixed order.
+
+    `pods_by_workload` maps (namespace, kind, name) to the workload's scheduled
+    pods. Returns {(namespace, pod name): [slug, ...]}; each finding is added to
+    every pod of the workload, after that pod's own pod_findings.
+    """
+    # On a single-zone or unlabelled cluster every workload shares its zone, and
+    # there is no other zone to spread to, so that is not worth reporting.
+    zones = {node_topology(n.labels)['zone'] for n in nodes_by_name.values()} - {None}
+    multi_zone = len(zones) > 1
+
+    result: dict = {}
+    for (namespace, kind, _), pods in pods_by_workload.items():
+        findings = []
+        if kind in SINGLE_REPLICA_KINDS and len(pods) == 1:
+            findings.append('single-replica')
+        if kind in SPOF_KINDS and len(pods) >= SPOF_MIN_REPLICAS:
+            findings += _spof(pods, nodes_by_name, multi_zone)
+        if findings:
+            for pod in pods:
+                result[(namespace, pod.name)] = list(findings)
+    return result

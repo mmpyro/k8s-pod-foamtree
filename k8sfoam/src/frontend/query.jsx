@@ -20,8 +20,9 @@
 
 const QOS_CLASSES = ["guaranteed", "burstable", "besteffort"];
 const HAS_FIELDS = ["init-containers"];
-// Mirrors the slugs the backend emits in each pod's `findings`.
-const AUDIT_FIELDS = ["missing-requests", "missing-limits", "monolith", "ratio-asymmetry"];
+// Pod finding slugs, owned by podaudit.jsx so the audit panel and the grammar
+// can't drift apart.
+const AUDIT_FIELDS = window.k8sPodAudit.FINDING_ORDER;
 // Node warning slugs, owned by nodestatus.jsx so the sidebar legend and the
 // grammar can't drift apart.
 const HEALTH_FIELDS = window.k8sNodeStatus.WARNING_ORDER;
@@ -38,7 +39,7 @@ const TOKEN_HINTS = [
   { form: "node:worker-*", desc: "node name glob" },
   { form: "qos:BestEffort", desc: "QoS class" },
   { form: "has:init-containers", desc: "pods with init containers" },
-  { form: "audit:missing-limits", desc: "pods breaking an audit rule" },
+  { form: "audit:spof-node", desc: "pods breaking an audit rule" },
   { form: "health:not-ready", desc: "nodes with a health warning" },
   { form: "zone:us-east-1a", desc: "nodes in a zone (also region:, pool:, type:)" },
   { form: "capacity:spot", desc: "spot or on-demand nodes" },
