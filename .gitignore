@@ -119,6 +119,9 @@ venv.bak/
 
 # mkdocs documentation
 /site
+/.venv-docs
+# Live demo written by `make docs-demo`
+/docs/demo/
 
 # mypy
 .mypy_cache/

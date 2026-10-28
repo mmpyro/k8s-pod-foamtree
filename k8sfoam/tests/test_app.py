@@ -4,6 +4,8 @@ from k8sfoam.src.app import create_app, main, change_events, DEBOUNCE
 from k8sfoam.src.k8s.k8s_client import DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock
 from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
+from k8sfoam.src.synthetic.client import SyntheticRegistry
+from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP
 
 
 @pytest.fixture
@@ -498,3 +500,87 @@ def test_main_rejects_a_page_size_below_one(page_size):
         # When / Then
         with pytest.raises(SystemExit):
             main()
+
+
+@patch('k8sfoam.src.app.SyntheticRegistry')
+@patch('k8sfoam.src.app.create_app')
+def test_main_serves_synthetic_clusters(create_app, registry):
+    # Given
+    with patch('sys.argv', ['k8sfoams', '--synthetic', '--seed', '7', '--churn-interval', '2.5']):
+        # When
+        main()
+
+    # Then
+    registry.assert_called_once_with(7, 2.5)
+    create_app.assert_called_once_with(page_size=500, watch=True, synthetic=registry.return_value)
+
+
+def test_main_rejects_a_negative_churn_interval():
+    # Given
+    with patch('sys.argv', ['k8sfoams', '--synthetic', '--churn-interval', '-1']):
+        # When / Then
+        with pytest.raises(SystemExit):
+            main()
+
+
+@pytest.fixture(scope='module')
+def synthetic_client():
+    return create_app(synthetic=SyntheticRegistry(churn_interval=0)).test_client()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_synthetic_contexts_replace_the_kubeconfig(k8s_client, synthetic_client):
+    # Given / When
+    response = synthetic_client.get('/contexts')
+
+    # Then
+    assert response.status_code == 200
+    assert [c['context'] for c in response.json] == [SHOP, ML, PLATFORM]
+    k8s_client.assert_not_called()
+
+
+def test_synthetic_resources_per_context(synthetic_client):
+    # Given / When
+    shop = synthetic_client.get('/resources')
+    gpus = synthetic_client.get(f'/resources?context={ML}')
+
+    # Then
+    assert shop.status_code == 200 and len(shop.json['nodes']) == 16
+    assert 'nvidia.com/gpu' in gpus.json['resources']
+
+
+def test_synthetic_simulators(synthetic_client):
+    # Given
+    node = synthetic_client.get('/resources').json['nodes'][0]['name']
+
+    # When
+    drain = synthetic_client.get(f'/simulate/drain/{node}')
+    fit = synthetic_client.post('/simulate/fit', json={'cpu': '500m', 'memory': '1Gi'})
+
+    # Then
+    assert drain.status_code == 200 and drain.json['node'] == node
+    assert fit.status_code == 200 and fit.json['total'] == 16
+
+
+def test_synthetic_unknown_context_is_an_error(synthetic_client):
+    # Given / When
+    response = synthetic_client.get('/resources?context=prod')
+
+    # Then
+    assert response.status_code == 500
+    assert response.data == b'Unknown synthetic context: prod'
+
+
+def test_synthetic_clusters_stream_changes():
+    # Given
+    registry = SyntheticRegistry(churn_interval=0)
+    events = change_events(registry, None)
+
+    # When
+    first = next(events)
+    registry.churn()
+    changed = next(events)
+
+    # Then
+    assert first == 'event: ready\ndata: 0\n\n'
+    assert changed == 'event: changed\ndata: 1\n\n'

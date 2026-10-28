@@ -2,13 +2,15 @@ import argparse
 import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Protocol
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import PodResources
 from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
+from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
+from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 
 # Minimum seconds between two `changed` events; a burst in between becomes one.
 DEBOUNCE = 1.0
@@ -53,7 +55,14 @@ def parse_pod_spec(body) -> PodResources:
                         node_selector=node_selector, tolerations=tolerations)
 
 
-def change_events(registry: CacheRegistry, context: Optional[str]) -> Iterator[str]:
+class Registry(Protocol):
+    """Where the clusters of each context come from: the watch caches, or the synthetic clusters."""
+
+    def get(self, context: Optional[str]) -> Any:
+        """The cluster of `context`, read like a K8sClient; None means the active context."""
+
+
+def change_events(registry: Registry, context: Optional[str]) -> Iterator[str]:
     """Server-Sent Events for one browser tab: `changed` whenever the context's cache changes."""
     cache = registry.get(context)
     seen = cache.version
@@ -84,10 +93,19 @@ def positive_int(value: str) -> int:
     return number
 
 
-def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True) -> Optional[Flask]:
+def non_negative_float(value: str) -> float:
+    number = float(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError(f'must be at least 0, got {value}')
+    return number
+
+
+def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
+               synthetic: Optional[SyntheticRegistry] = None) -> Optional[Flask]:
+    """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read."""
     try:
         app = Flask(__name__, static_url_path='', static_folder='frontend')
-        registry = CacheRegistry(page_size) if watch else None
+        registry: Optional[Registry] = synthetic or (CacheRegistry(page_size) if watch else None)
 
         def cluster(context: Optional[str]) -> Any:
             """Nodes and pods of a context: from its watch cache, or listed right now with --no-watch."""
@@ -165,6 +183,8 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True) -> Option
 
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
+            if synthetic is not None:
+                return jsonify(synthetic.contexts())
             try:
                 k8s_client = K8sClient()
                 return jsonify(k8s_client.get_contexts())
@@ -190,9 +210,18 @@ def main():
                         help='Objects fetched per LIST request')
     parser.add_argument('--no-watch', action='store_true',
                         help='List nodes and pods on every request instead of keeping a watch cache per context')
+    parser.add_argument('--synthetic', action='store_true',
+                        help='Show generated demo clusters instead of the kubeconfig contexts; needs no cluster')
+    parser.add_argument('--seed', type=int, default=DEFAULT_SEED,
+                        help='Seed of the --synthetic clusters; the same seed builds the same clusters')
+    parser.add_argument('--churn-interval', type=non_negative_float, default=DEFAULT_CHURN_INTERVAL,
+                        help='Seconds between random changes to the --synthetic clusters; 0 keeps them still')
     parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
     args = parser.parse_args()
 
-    app = create_app(page_size=args.page_size, watch=not args.no_watch)
+    options = {'page_size': args.page_size, 'watch': not args.no_watch}
+    if args.synthetic:
+        options['synthetic'] = SyntheticRegistry(args.seed, args.churn_interval)
+    app = create_app(**options)
     if app:
         app.run(host=args.host, port=args.port, debug=args.d)

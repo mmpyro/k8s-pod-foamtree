@@ -1,13 +1,22 @@
 name: Publish to PyPI
 
+# Docs-only changes have nothing to publish, and would fail the version-bump check.
 on:
   pull_request:
     branches:
       - main
-      
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
 
 jobs:
   build:
