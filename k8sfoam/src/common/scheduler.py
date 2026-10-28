@@ -1,7 +1,8 @@
 """Dry-run scheduler: the kube-scheduler filter phase, emulated against free allocatable.
 
-Backs three what-if questions — "can this pod fit anywhere?", "where would this
-node's pods go if it were drained?" and "which nodes could be removed?". It deliberately covers only the predicates
+Backs four what-if questions — "can this pod fit anywhere?", "where would this
+node's pods go if it were drained?", "which nodes could be removed?" and "can this
+workload scale out by N replicas?". It deliberately covers only the predicates
 that decide most placements: node condition, cordon, nodeSelector, taints and
 tolerations, pod count, CPU, memory and extended resource requests (GPUs,
 ephemeral-storage, hugepages). Affinity/anti-affinity, topology spread,
@@ -39,6 +40,9 @@ REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'taint',
 # plane is not a node group it manages.
 BLOCKER_ORDER = ('control-plane', 'pending', 'unmanaged')
 CONTROL_PLANE_LABELS = ('node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master')
+
+# Upper bound on the copies one replica simulation places; each copy filters every node.
+MAX_REPLICAS = 100
 
 
 def _allocatable(node: NodeResources) -> dict:
@@ -324,3 +328,52 @@ def simulate_consolidation(nodes: Iterable[NodeResources], pods: Iterable[PodRes
         v.setdefault('conflictWith', None)
 
     return {'total': len(nodes), 'nodes': verdicts, 'plan': plan, 'freed': freed}
+
+
+def simulate_replicas(namespace: str, kind: str, name: str, count: int,
+                      nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> Optional[dict]:
+    """Place `count` more copies of a workload's pod onto the cluster, one after another.
+
+    The workload's first pod by name is the template: its effective requests,
+    nodeSelector and tolerations. Each copy goes to the passing node with the most
+    headroom left, against the room the previous copies left behind. Free capacity
+    only shrinks, so once a copy fits nowhere no later copy would, and placement
+    stops there. The first k placements of a run are the run for k. Returns None
+    when no pod belongs to the workload.
+    """
+    nodes, pods = list(nodes), list(pods)
+    members = [p for p in pods if (p.namespace, p.owner_kind, p.owner_name) == (namespace, kind, name)]
+    if not members:
+        return None
+    template = min(members, key=lambda p: p.name)
+    free = free_capacity(nodes, pods)
+    alloc = {n.name: _allocatable(n) for n in nodes}
+
+    placements: list = []
+    for i in range(count):
+        copy = template._replace(name=f'{name}-sim-{i + 1}', node_name=None)
+        passing = [n for n in nodes if not filter_node(copy, n, free[n.name])]
+        if not passing:
+            break
+        target = max(passing, key=lambda n: (_headroom(copy, alloc[n.name], free[n.name]), n.name))
+        _reserve(free[target.name], copy)
+        placements.append(target.name)
+
+    placed = Counter(placements)
+    # Whether each node could take one more copy: at the stop, why the next replica stays Pending.
+    verdicts = [{'node': n.name, 'replicas': placed[n.name], 'reasons': filter_node(template, n, free[n.name])}
+                for n in nodes]
+    fits = len(placements) == count
+    return {
+        'workload': {'namespace': namespace, 'kind': kind, 'name': name},
+        'template': {'pod': template.name, 'cpu': template.cpu or 0, 'memory': template.memory or 0,
+                     'extended': dict(template.extended or {}), 'nodeSelector': dict(template.node_selector or {}),
+                     'tolerations': list(template.tolerations or [])},
+        'requested': count,
+        'placed': len(placements),
+        'fits': fits,
+        'total': len(nodes),
+        'placements': placements,
+        'nodes': verdicts,
+        'pending': [] if fits else _unschedulable_summary([v['reasons'] for v in verdicts]),
+    }

@@ -2,7 +2,7 @@ import bitmath  # type: ignore
 import pytest
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.common.scheduler import (filter_node, free_capacity, simulate_consolidation, simulate_drain,
-                                          simulate_fit, tolerates, fmt_memory)
+                                          simulate_fit, simulate_replicas, tolerates, fmt_memory)
 
 
 GI = float(bitmath.GiB(1).kB)
@@ -485,3 +485,125 @@ def test_simulate_consolidation_leaves_the_input_pods_bound_where_they_are():
 def test_simulate_consolidation_of_an_empty_cluster():
     assert simulate_consolidation([], []) == {
         'total': 0, 'nodes': [], 'plan': [], 'freed': {'nodes': 0, 'cpu': 0, 'memory': 0.0, 'extended': {}}}
+
+
+def replica(name, node_name=None, cpu=0, memory=0.0, **kw):
+    return pod(name, node_name, cpu, memory, owner_kind='Deployment', owner_name='web', **kw)
+
+
+def replicas(count, nodes, pods):
+    return simulate_replicas('default', 'Deployment', 'web', count, nodes, pods)
+
+
+def test_simulate_replicas_places_each_copy_on_the_most_headroom():
+    # Given
+    nodes = [node('a', cpu=8000), node('b', cpu=6000)]
+    pods = [replica('web-1', 'a', 1000)]
+
+    # When
+    result = replicas(3, nodes, pods)
+
+    # Then — b is emptier at first; once it has taken a copy, a has more room left
+    assert result['placements'] == ['b', 'a', 'b']
+    assert result['fits'] is True
+    assert (result['requested'], result['placed'], result['total']) == (3, 3, 2)
+    assert result['pending'] == []
+    assert {v['node']: v['replicas'] for v in result['nodes']} == {'a': 1, 'b': 2}
+    assert result['workload'] == {'namespace': 'default', 'kind': 'Deployment', 'name': 'web'}
+
+
+def test_simulate_replicas_stop_reports_a_scheduler_tally():
+    # Given
+    nodes = [node('a', cpu=2000), node('b', cpu=2000), node('c', cpu=8000, unschedulable=True)]
+    pods = [replica('web-1', 'a', 1000)]
+
+    # When
+    result = replicas(4, nodes, pods)
+
+    # Then
+    assert result['fits'] is False
+    assert result['placed'] == 3
+    assert result['placements'] == ['b', 'b', 'a']
+    assert result['pending'] == [{'slug': 'cordoned', 'nodes': 1}, {'slug': 'insufficient-cpu', 'nodes': 2}]
+    assert slugs(by_node(result)['c']['reasons']) == ['cordoned']
+
+
+def test_simulate_replicas_honour_node_selector_and_tolerations():
+    # Given
+    toleration = {'key': 'dedicated', 'operator': 'Equal', 'value': 'gpu', 'effect': 'NoSchedule'}
+    nodes = [node('gpu', labels={'pool': 'gpu'}, taints=[{'key': 'dedicated', 'value': 'gpu', 'effect': 'NoSchedule'}]),
+             node('tainted', labels={'pool': 'gpu'}, taints=[{'key': 'other', 'value': None, 'effect': 'NoSchedule'}]),
+             node('general')]
+    pods = [replica('web-1', 'gpu', 100, node_selector={'pool': 'gpu'}, tolerations=[toleration])]
+
+    # When
+    result = replicas(2, nodes, pods)
+
+    # Then
+    assert result['placements'] == ['gpu', 'gpu']
+    assert result['template'] == {'pod': 'web-1', 'cpu': 100, 'memory': 0.0, 'extended': {},
+                                  'nodeSelector': {'pool': 'gpu'}, 'tolerations': [toleration]}
+    verdicts = by_node(result)
+    assert slugs(verdicts['tainted']['reasons']) == ['taint']
+    assert slugs(verdicts['general']['reasons']) == ['node-selector']
+
+
+def test_simulate_replicas_consumes_gpus_across_copies():
+    # Given — one free GPU on each node
+    nodes = [node('g1', extended={GPU: 2}), node('g2', extended={GPU: 1})]
+    pods = [replica('web-1', 'g1', 100, extended={GPU: 1})]
+
+    # When
+    result = replicas(3, nodes, pods)
+
+    # Then
+    assert result['placements'] == ['g2', 'g1']
+    assert result['pending'] == [{'slug': 'insufficient-extended', 'nodes': 2}]
+
+
+def test_simulate_replicas_template_is_the_first_pod_by_name():
+    # Given — a Pending replica has the same spec, so it counts too
+    pods = [replica('web-b', 'a', 2000), replica('web-a', None, 1000)]
+
+    # When
+    result = replicas(1, [node('a')], pods)
+
+    # Then
+    assert result['template']['pod'] == 'web-a'
+    assert result['template']['cpu'] == 1000
+
+
+def test_simulate_replicas_is_prefix_stable():
+    # Given
+    nodes = [node('a', cpu=8000, memory=32 * GI), node('b', cpu=6000), node('c', cpu=3000, memory=8 * GI)]
+    pods = [replica('web-1', 'a', 700, 1.5 * GI), pod('db', 'b', 2500, 6 * GI)]
+
+    # When
+    full = replicas(100, nodes, pods)
+
+    # Then
+    assert full['fits'] is False
+    for count in (1, 5, full['placed'], full['placed'] + 1):
+        assert replicas(count, nodes, pods)['placements'] == full['placements'][:count]
+
+
+def test_simulate_replicas_unknown_workload_returns_none():
+    # Given
+    pods = [replica('web-1', 'a', 100), pod('api-1', 'a', 100, owner_name='api')]
+
+    # Then
+    assert simulate_replicas('default', 'Deployment', 'api', 1, [node('a')], pods) is None
+    assert simulate_replicas('other', 'Deployment', 'web', 1, [node('a')], pods) is None
+    assert simulate_replicas('default', 'StatefulSet', 'web', 1, [node('a')], pods) is None
+
+
+def test_simulate_replicas_leaves_the_input_pods_untouched():
+    # Given
+    pods = [replica('web-1', 'a', 100)]
+    before = list(pods)
+
+    # When
+    replicas(3, [node('a'), node('b')], pods)
+
+    # Then
+    assert pods == before
