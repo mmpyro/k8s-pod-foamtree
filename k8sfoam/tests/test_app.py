@@ -254,6 +254,77 @@ def test_simulate_consolidation_returns_internal_server_error(k8s_client, test_c
     assert response.status_code == 500
 
 
+def replica_cluster():
+    cluster = simulation_cluster()
+    cluster.get_pod_resources.return_value = [PodResources('web-1', 'a', 1000, float(bitmath.GiB(1).kB), [], [], 'default',
+                                                           owner_kind='Deployment', owner_name='web')]
+    return cluster
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_returns_placements(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = replica_cluster()
+
+    # When
+    response = test_client.get('/simulate/replicas/default/Deployment/web?count=2&context=minikube')
+
+    # Then
+    assert response.status_code == 200
+    k8s_client.assert_called_with('minikube', 500)
+    assert response.json['fits'] is True
+    assert response.json['placements'] == ['a', 'a']
+    assert response.json['template']['pod'] == 'web-1'
+
+
+@pytest.mark.parametrize('query', ['?count=0', '?count=101', '?count=abc', '?count=', ''])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_rejects_a_bad_count(k8s_client, query, test_client):
+    # When
+    response = test_client.get(f'/simulate/replicas/default/Deployment/web{query}')
+
+    # Then
+    assert response.status_code == 400
+    assert b'count must be' in response.data
+    k8s_client.assert_not_called()
+
+
+@pytest.mark.parametrize('kind', ['DaemonSet', 'Node'])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_rejects_daemonset_and_static_pods(k8s_client, kind, test_client):
+    # When
+    response = test_client.get(f'/simulate/replicas/kube-system/{kind}/kube-proxy?count=1')
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_unknown_workload_returns_not_found(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = replica_cluster()
+
+    # When
+    response = test_client.get('/simulate/replicas/default/Deployment/ghost?count=1')
+
+    # Then
+    assert response.status_code == 404
+    assert response.data == b'Workload default/Deployment/ghost not found'
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_pod_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.get('/simulate/replicas/default/Deployment/web?count=1')
+
+    # Then
+    assert response.status_code == 500
+
+
 @patch('k8sfoam.src.app.K8sClient')
 def test_should_serve_a_vendor_prefixed_extended_resource(k8s_client, test_client):
     # Given
@@ -588,10 +659,12 @@ def test_synthetic_simulators(synthetic_client):
     # When
     drain = synthetic_client.get(f'/simulate/drain/{node}')
     fit = synthetic_client.post('/simulate/fit', json={'cpu': '500m', 'memory': '1Gi'})
+    replicas = synthetic_client.get('/simulate/replicas/checkout/Deployment/checkout-api?count=6')
 
     # Then
     assert drain.status_code == 200 and drain.json['node'] == node
     assert fit.status_code == 200 and fit.json['total'] == 16
+    assert replicas.status_code == 200 and replicas.json['requested'] == 6
 
 
 def test_synthetic_unknown_context_is_an_error(synthetic_client):
