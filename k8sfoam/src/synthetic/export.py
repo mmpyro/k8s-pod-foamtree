@@ -4,8 +4,8 @@
 
 The site is the regular frontend bundle switched to static mode: instead of the
 HTTP API it reads JSON files holding what each endpoint would have answered.
-Every drain is precomputed; the fit simulator offers FIT_PRESETS only, since an
-arbitrary pod cannot be answered ahead of time.
+Every drain and the consolidation plan are precomputed; the fit simulator offers
+FIT_PRESETS only, since an arbitrary pod cannot be answered ahead of time.
 """
 import argparse
 import json
@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from typing import Any, List
 from k8sfoam.src.app import parse_pod_spec
-from k8sfoam.src.common.scheduler import simulate_drain, simulate_fit
+from k8sfoam.src.common.scheduler import simulate_consolidation, simulate_drain, simulate_fit
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -97,6 +97,7 @@ def export_data(data_dir: Path, seed: int = DEFAULT_SEED) -> None:
         _write(out / 'resources.json', FoamTreeMapper(iter(nodes), pods).combined())
         for node in nodes:
             _write(out / 'drain' / f'{node.name}.json', simulate_drain(node.name, nodes, pods))
+        _write(out / 'consolidation.json', simulate_consolidation(nodes, pods))
         for preset in FIT_PRESETS:
             _write(out / 'fit' / f"{preset['id']}.json", simulate_fit(parse_pod_spec(preset['spec']), nodes, pods))
 

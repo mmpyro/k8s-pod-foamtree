@@ -93,7 +93,7 @@ def test_export_writes_the_dashboard_and_contexts(site):
 
 
 @pytest.mark.parametrize('path', ['demo-shop', 'gke-demo-ml-us-central1-ml-training', 'demo-platform'])
-def test_export_precomputes_every_drain_and_preset(site, path):
+def test_export_precomputes_every_drain_preset_and_consolidation(site, path):
     # Given
     data = site / 'data' / path
 
@@ -105,6 +105,8 @@ def test_export_precomputes_every_drain_and_preset(site, path):
         assert read(data / 'drain' / f"{node['name']}.json")['node'] == node['name']
     for preset in FIT_PRESETS:
         assert read(data / 'fit' / f"{preset['id']}.json")['total'] == len(resources['nodes'])
+    consolidation = read(data / 'consolidation.json')
+    assert [v['node'] for v in consolidation['nodes']] == [n['name'] for n in resources['nodes']]
 
 
 def test_export_lists_presets_with_their_form(site):

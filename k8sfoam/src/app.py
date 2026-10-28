@@ -8,7 +8,7 @@ from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import PodResources
-from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
+from k8sfoam.src.common.scheduler import simulate_consolidation, simulate_fit, simulate_drain
 from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 
@@ -162,6 +162,14 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
             if result is None:
                 return f'Node {node_name} not found', 404
             return jsonify(result)
+
+        @app.route('/simulate/consolidation', methods=['GET'])
+        def simulate_cluster_consolidation():
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                return jsonify(simulate_consolidation(k8s_client.get_node_resources(), k8s_client.get_pod_resources()))
+            except Exception as ex:
+                return str(ex), 500
 
         @app.route('/events', methods=['GET'])
         def get_change_events():
