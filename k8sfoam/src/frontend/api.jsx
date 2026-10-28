@@ -21,6 +21,7 @@ const serverApi = {
     body: JSON.stringify(spec),
   }).then(readJson),
   drain: (ctx, nodeName) => fetch(`/simulate/drain/${encodeURIComponent(nodeName)}${contextParam(ctx)}`).then(readJson),
+  consolidation: ctx => fetch(`/simulate/consolidation${contextParam(ctx)}`).then(readJson),
   // null when the server has no stream; the caller then polls.
   events: ctx => new EventSource(`/events${contextParam(ctx)}`),
   fitPresets: () => Promise.resolve([]),
@@ -50,6 +51,7 @@ function staticApi(base) {
       ? file(ctx, `fit/${encodeURIComponent(presetId)}.json`)
       : Promise.reject(new Error(CUSTOM_FIT))),
     drain: (ctx, nodeName) => file(ctx, `drain/${encodeURIComponent(nodeName)}.json`, `Node ${nodeName} not found`),
+    consolidation: ctx => file(ctx, "consolidation.json"),
     events: () => null,
     fitPresets: () => fetch(`${base}fit-presets.json`).then(readJson),
   };

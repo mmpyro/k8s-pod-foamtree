@@ -223,6 +223,38 @@ def test_simulate_drain_returns_internal_server_error(k8s_client, test_client):
 
 
 @patch('k8sfoam.src.app.K8sClient')
+def test_simulate_consolidation_returns_verdicts_and_plan(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.get('/simulate/consolidation?context=minikube')
+
+    # Then
+    assert response.status_code == 200
+    k8s_client.assert_called_with('minikube', 500)
+    assert response.json['total'] == 2
+    # b is empty, so it goes first; then a's pod has nowhere left to go.
+    assert [step['node'] for step in response.json['plan']] == ['b']
+    verdicts = {v['node']: v for v in response.json['nodes']}
+    assert verdicts['a']['removable'] is True
+    assert verdicts['a']['conflictWith'] == ['b']
+    assert response.json['freed']['cpu'] == 1000
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_consolidation_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_node_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.get('/simulate/consolidation')
+
+    # Then
+    assert response.status_code == 500
+
+
+@patch('k8sfoam.src.app.K8sClient')
 def test_should_serve_a_vendor_prefixed_extended_resource(k8s_client, test_client):
     # Given
     k8s_client_instance = MagicMock()
