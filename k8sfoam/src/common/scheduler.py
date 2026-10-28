@@ -1,7 +1,7 @@
 """Dry-run scheduler: the kube-scheduler filter phase, emulated against free allocatable.
 
-Backs two what-if questions — "can this pod fit anywhere?" and "where would this
-node's pods go if it were drained?". It deliberately covers only the predicates
+Backs three what-if questions — "can this pod fit anywhere?", "where would this
+node's pods go if it were drained?" and "which nodes could be removed?". It deliberately covers only the predicates
 that decide most placements: node condition, cordon, nodeSelector, taints and
 tolerations, pod count, CPU, memory and extended resource requests (GPUs,
 ephemeral-storage, hugepages). Affinity/anti-affinity, topology spread,
@@ -33,6 +33,12 @@ DRAIN_SKIPPED_OWNERS = {'DaemonSet': 'daemonset', 'Node': 'static'}
 # Reason slugs in the order the filter evaluates them — the frontend labels them.
 REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'taint',
                 'insufficient-pods', 'insufficient-cpu', 'insufficient-memory', 'insufficient-extended')
+
+# Why a node cannot be removed even on its own. cluster-autoscaler refuses to
+# scale down a node running a pod no controller would recreate, and the control
+# plane is not a node group it manages.
+BLOCKER_ORDER = ('control-plane', 'pending', 'unmanaged')
+CONTROL_PLANE_LABELS = ('node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master')
 
 
 def _allocatable(node: NodeResources) -> dict:
@@ -191,7 +197,10 @@ def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterabl
     nodes, pods = list(nodes), list(pods)
     if not any(n.name == node_name for n in nodes):
         return None
+    return _drain(node_name, nodes, pods)
 
+
+def _drain(node_name: str, nodes: list, pods: list) -> dict:
     remaining = [n for n in nodes if n.name != node_name]
     free = free_capacity(remaining, pods)
     alloc = {n.name: _allocatable(n) for n in remaining}
@@ -230,3 +239,88 @@ def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterabl
         'pending': pending,
         'skipped': skipped,
     }
+
+
+def _blockers(node: NodeResources, drain: dict) -> list:
+    """Why `node` cannot go even on its own, as {slug, pods}; pods is 0 for node-level blockers."""
+    blockers = []
+    if any(key in (node.labels or {}) for key in CONTROL_PLANE_LABELS):
+        blockers.append({'slug': 'control-plane', 'pods': 0})
+    if drain['pending']:
+        blockers.append({'slug': 'pending', 'pods': len(drain['pending'])})
+    unmanaged = sum(p['unmanaged'] for p in drain['placements'] + drain['pending'])
+    if unmanaged:
+        blockers.append({'slug': 'unmanaged', 'pods': unmanaged})
+    return blockers
+
+
+def _utilisation(node: NodeResources, drain: dict) -> float:
+    """Dominant share of the node's allocatable taken by the pods a drain would move."""
+    moved = drain['placements'] + drain['pending']
+    alloc = _allocatable(node)
+    cpu = sum(p['cpu'] for p in moved) / alloc['cpu'] if alloc['cpu'] else 0.0
+    memory = sum(p['memory'] for p in moved) / alloc['memory'] if alloc['memory'] else 0.0
+    return max(cpu, memory)
+
+
+def _rebind(pods: list, placements: list) -> list:
+    """The pods as they would be bound once a drain's placements are carried out."""
+    moves = {(p['namespace'], p['pod']): p['to'] for p in placements}
+    return [p._replace(node_name=moves[(p.namespace, p.name)]) if (p.namespace, p.name) in moves else p
+            for p in pods]
+
+
+def simulate_consolidation(nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> dict:
+    """Which nodes could be emptied onto the rest of the cluster, alone and together.
+
+    Every node first gets an independent drain verdict. Those cannot be added up —
+    two nodes may each be removable alone but not together — so the removable ones
+    are then drained one after another, least utilised first like cluster-autoscaler,
+    each against the cluster left by the previous steps. Removing a node only takes
+    capacity away, so a node that cannot go alone is never a candidate for the plan.
+    """
+    nodes, pods = list(nodes), list(pods)
+
+    verdicts = []
+    for node in nodes:
+        drain = _drain(node.name, nodes, pods)
+        moved = drain['placements'] + drain['pending']
+        alloc = _allocatable(node)
+        blockers = _blockers(node, drain)
+        verdicts.append({
+            'node': node.name,
+            'removable': not blockers,
+            'blockers': blockers,
+            'evictable': len(moved),
+            'cpu': sum(p['cpu'] for p in moved),
+            'memory': sum(p['memory'] for p in moved),
+            'utilisation': _utilisation(node, drain),
+            'allocatable': {'cpu': alloc['cpu'], 'memory': alloc['memory'], 'extended': alloc['extended']},
+        })
+
+    candidates = sorted((v for v in verdicts if v['removable']), key=lambda v: (v['utilisation'], v['node']))
+    removed: list = []
+    plan, working = [], pods
+    for v in candidates:
+        left = [n for n in nodes if n.name not in removed]
+        drain = _drain(v['node'], left, working)
+        if not drain['fits']:
+            v['conflictWith'] = list(removed)
+            continue
+        removed.append(v['node'])
+        working = _rebind(working, drain['placements'])
+        plan.append({'node': v['node'], 'placements': drain['placements'], 'skipped': drain['skipped'],
+                     'freed': v['allocatable']})
+
+    freed: dict = {'nodes': len(plan), 'cpu': 0, 'memory': 0.0, 'extended': {}}
+    for step in plan:
+        freed['cpu'] += step['freed']['cpu']
+        freed['memory'] += step['freed']['memory']
+        for name, amount in step['freed']['extended'].items():
+            freed['extended'][name] = freed['extended'].get(name, 0) + amount
+
+    for v in verdicts:
+        v['inPlan'] = v['node'] in removed
+        v.setdefault('conflictWith', None)
+
+    return {'total': len(nodes), 'nodes': verdicts, 'plan': plan, 'freed': freed}

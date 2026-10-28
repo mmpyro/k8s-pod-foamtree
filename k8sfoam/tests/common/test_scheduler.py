@@ -1,8 +1,8 @@
 import bitmath  # type: ignore
 import pytest
 from k8sfoam.src.common.dtos import NodeResources, PodResources
-from k8sfoam.src.common.scheduler import (filter_node, free_capacity, simulate_drain, simulate_fit, tolerates,
-                                          fmt_memory)
+from k8sfoam.src.common.scheduler import (filter_node, free_capacity, simulate_consolidation, simulate_drain,
+                                          simulate_fit, tolerates, fmt_memory)
 
 
 GI = float(bitmath.GiB(1).kB)
@@ -349,3 +349,139 @@ def test_simulate_drain_consumes_gpus_as_it_places_pods():
     # Then
     assert [(p['pod'], p['to']) for p in result['placements']] == [('train-a', 'gpu-2')]
     assert [p['pod'] for p in result['pending']] == ['train-b']
+
+
+def by_node(result):
+    return {v['node']: v for v in result['nodes']}
+
+
+def test_simulate_consolidation_plans_removals_least_utilised_first():
+    # Given — every node could go alone, but the cluster runs out of room after two
+    nodes = [node('a'), node('b'), node('c'), node('d')]
+    pods = [pod('p-a', 'a', 500), pod('p-b', 'b', 600), pod('p-c', 'c', 700), pod('p-d', 'd', 3000)]
+
+    # When
+    result = simulate_consolidation(nodes, pods)
+
+    # Then
+    assert result['total'] == 4
+    assert all(v['removable'] for v in result['nodes'])
+    assert [step['node'] for step in result['plan']] == ['a', 'b']
+    # a's pod lands on b, so b's drain carries it along.
+    assert [(p['pod'], p['to']) for p in result['plan'][0]['placements']] == [('p-a', 'b')]
+    assert sorted(p['pod'] for p in result['plan'][1]['placements']) == ['p-a', 'p-b']
+    assert result['freed'] == {'nodes': 2, 'cpu': 8000, 'memory': 32 * GI, 'extended': {}}
+    verdicts = by_node(result)
+    assert [verdicts[n]['inPlan'] for n in 'abcd'] == [True, True, False, False]
+    assert verdicts['c']['conflictWith'] == ['a', 'b']
+    assert verdicts['a']['conflictWith'] is None
+
+
+def test_simulate_consolidation_flags_nodes_removable_alone_but_not_together():
+    # Given — any one node's pod fits in the others' headroom, two do not
+    nodes = [node('a'), node('b'), node('c')]
+    pods = [pod('p-a', 'a', 2000), pod('p-b', 'b', 2000), pod('p-c', 'c', 2000)]
+
+    # When
+    result = simulate_consolidation(nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert all(v['removable'] for v in verdicts.values())
+    assert [step['node'] for step in result['plan']] == ['a']
+    assert verdicts['b']['conflictWith'] == ['a']
+    assert verdicts['c']['conflictWith'] == ['a']
+
+
+def test_simulate_consolidation_blocks_a_node_running_a_naked_pod():
+    # Given
+    nodes = [node('a'), node('b')]
+    pods = [pod('debug', 'a', 100, owner_kind=None)]
+
+    # When
+    result = simulate_consolidation(nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert verdicts['a']['removable'] is False
+    assert verdicts['a']['blockers'] == [{'slug': 'unmanaged', 'pods': 1}]
+    assert [step['node'] for step in result['plan']] == ['b']
+
+
+def test_simulate_consolidation_blocks_a_node_whose_pods_would_go_pending():
+    # Given
+    nodes = [node('a'), node('b', cpu=2000)]
+    pods = [pod('big', 'a', 3000)]
+
+    # When
+    result = simulate_consolidation(nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert verdicts['a']['blockers'] == [{'slug': 'pending', 'pods': 1}]
+    assert verdicts['a']['evictable'] == 1
+    assert verdicts['a']['cpu'] == 3000
+    assert verdicts['b']['removable'] is True
+
+
+def test_simulate_consolidation_blocks_control_plane_nodes():
+    # Given — only static pods, which a drain leaves alone
+    nodes = [node('cp', labels={'node-role.kubernetes.io/control-plane': ''}), node('worker')]
+    pods = [pod('kube-apiserver', 'cp', 250, owner_kind='Node')]
+
+    # When
+    result = simulate_consolidation(nodes, pods)
+
+    # Then
+    assert by_node(result)['cp']['blockers'] == [{'slug': 'control-plane', 'pods': 0}]
+    assert [step['node'] for step in result['plan']] == ['worker']
+
+
+def test_simulate_consolidation_does_not_count_daemonset_and_static_pods():
+    # Given
+    nodes = [node('a'), node('b')]
+    pods = [pod('fluentd', 'a', 100, owner_kind='DaemonSet'), pod('kube-proxy', 'a', 100, owner_kind='Node'),
+            pod('web', 'b', 1000)]
+
+    # When
+    result = simulate_consolidation(nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert verdicts['a']['removable'] is True
+    assert verdicts['a']['evictable'] == 0
+    assert result['plan'][0]['node'] == 'a'
+    assert [s['reason'] for s in result['plan'][0]['skipped']] == ['daemonset', 'static']
+
+
+def test_simulate_consolidation_consumes_gpus_across_steps():
+    # Given — gpu-3 has two free GPUs, one per training pod
+    nodes = [node('gpu-1', extended={GPU: 1}), node('gpu-2', extended={GPU: 1}), node('gpu-3', extended={GPU: 2})]
+    pods = [pod('train-a', 'gpu-1', 100, extended={GPU: 1}), pod('train-b', 'gpu-2', 100, extended={GPU: 1}),
+            pod('web', 'gpu-3', 2000)]
+
+    # When
+    result = simulate_consolidation(nodes, pods)
+
+    # Then
+    assert [step['node'] for step in result['plan']] == ['gpu-1', 'gpu-2']
+    assert [p['to'] for step in result['plan'] for p in step['placements']] == ['gpu-3', 'gpu-3']
+    assert result['freed']['extended'] == {GPU: 2}
+    assert by_node(result)['gpu-3']['conflictWith'] == ['gpu-1', 'gpu-2']
+
+
+def test_simulate_consolidation_leaves_the_input_pods_bound_where_they_are():
+    # Given
+    nodes = [node('a'), node('b')]
+    pods = [pod('web', 'a', 100)]
+
+    # When
+    simulate_consolidation(nodes, pods)
+
+    # Then
+    assert pods[0].node_name == 'a'
+
+
+def test_simulate_consolidation_of_an_empty_cluster():
+    assert simulate_consolidation([], []) == {
+        'total': 0, 'nodes': [], 'plan': [], 'freed': {'nodes': 0, 'cpu': 0, 'memory': 0.0, 'extended': {}}}
