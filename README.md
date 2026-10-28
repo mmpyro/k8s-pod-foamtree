@@ -1,394 +1,58 @@
 # k8s-pod-foamtree
 
 <p align="center">
-  <img src="images/logo.png" alt="k8sfoams logo">
+  <img src="docs/images/logo.png" alt="k8sfoams logo">
 </p>
 
 **k8sfoams** is a local, read-only dashboard that answers one question: *where is my cluster's requested CPU and memory actually going, and how much room is left on each node?*
 
 It visualizes **resource requests** — what the scheduler reserves — not live usage. That makes it a tool for spotting over-requesting pods and idle headroom, not a performance monitor. It runs on your laptop, reads *~/.kube/config* (or `$KUBECONFIG`) with the standard Kubernetes client, and needs no in-cluster deployment and no metrics-server.
 
-## How it works
-
-1. Lists nodes (`status.capacity`) and all non-terminated pods. Pods in `Succeeded`/`Failed` are excluded — they still report requests via the API but no longer reserve anything. The first request for a context lists both in pages (`--page-size`, 500 by default) and then keeps the result current in memory with a WATCH. Refreshes and simulations read that cache, so once it is warm they make no API calls, however large the cluster. A context's cache stops after 15 minutes without requests; an open tab in Live mode counts as a request. If the API server becomes unreachable, the dashboard shows the error instead of stale data. `--no-watch` lists on every request instead.
-2. Parses quantities with the Kubernetes client's `parse_quantity` — CPU to millicores, memory to decimal kB. A pod's **effective request** is `max(sum(regular containers), max(init containers))` — init containers run sequentially, so they are maxed, not summed. Native sidecars (init containers with `restartPolicy: Always`) keep running, so they count as regular containers and add to every init container started after them. This is what the scheduler actually reserves.
-3. Nests the result node → pod → container, with CPU, memory and extended requests side by side, and serves it as JSON. The per-resource treemap routes (`/resources/<type>`) also add a synthetic `empty` child per node for free capacity.
-4. A React single-page app fetches every resource of the context in one call (`GET /resources`) and renders. esbuild compiles its `.jsx` files and bundles React into one `bundle.js`, which the Python package ships, so no script is loaded from a CDN. By default the view is *Live*: it keeps a Server-Sent Events stream open (`GET /events?context=`), and the server sends a `changed` event whenever the context's watch cache changes, at most once per second. The browser then fetches again, so scaling a Deployment shows up within a few seconds. A change counts only if it alters what the dashboard shows; status updates that leave the requests, labels and conditions the same don't trigger it. While the stream is reconnecting, or when there is none (`--no-watch`), the view polls every 60 seconds by default instead.
-
-## 2D map
-
-![k8sfoams 2D treemap view](images/k8s-foam-tree.png)
-
-A squarified treemap. Each node is a square box, each pod is a foam inside it. A pod with more than one container is split into sub-foams. The empty foam is unused (free) capacity on that node. Pick **CPU** or **Memory** with the Resource control.
-
-## 3D cubes
-
-![k8sfoams 3D cube view](images/k8s-foam-tree-3d.png)
-
-An isometric view: one plate per node, one cube per pod. A cube encodes both resources at once:
-
-- **width × depth** (footprint) → CPU request
-- **height** → memory request
-- **color** → node
-
-Both dimensions are square-root scaled, so a 10× larger pod is not 10× wider. Because a cube already shows both resources, the CPU/Memory picker is disabled in 3D and a **Zoom** slider takes its place.
-
-Switch views with the sidebar *View* control or the `2D`/`3D` pill in the header. It is client-side state — no flag, no restart. The scene is drawn with WebGL (three.js), so it stays smooth with thousands of pods: drag to orbit, scroll or use the slider to zoom, hover a cube for its pod, click a plate for its node. Where WebGL is turned off the 3D view says so, and the 2D map shows the same data.
-
-## Controls
-
-- **Memory unit**: MiB, GiB (default), or TiB.
-- **Color by**: *Node* (default) gives each node its own hue; *QoS* colors each pod by its QoS class. See [QoS & eviction risk](#qos--eviction-risk).
-- **Group by**: *None* (default), *Zone*, *Region*, *Pool*, *Type* (instance type) or *Capacity* (spot / on-demand). See [Topology](#topology).
-- **Context**: the sidebar lists every context from your kubeconfig, active one first, tagged by provider. **Switching only changes the context inside the k8sfoams web server — your ~/.kube/config file is never modified.**
-- **Refresh**: *Live* (default) updates as the cluster changes; *Interval* polls on the slider's schedule, from 5 to 600 seconds. The slider also sets the fallback polling interval, and is disabled while Live is connected. The header shows *live* when the stream is connected and *reconnecting* while it is down. If live updates are unavailable, a note under the slider says so. The *Refresh now* button fetches immediately in either mode.
-- **Filter**: the header query bar highlights matching pods and dims the rest — nothing is removed from the view. See [Filtering](#filtering) for the full grammar.
-- **Focus**: click a node to open an overlay listing its pods with per-pod CPU/memory and container breakdown.
-
-The URL keeps track of the context, view, resource, colour and grouping modes, memory unit, query and pinned workload, so a link or bookmark reopens the same view. See [Shareable links](#shareable-links).
-
-## Node health
-
-Free capacity on a node that refuses pods is not really free. A node that is cordoned, under pressure, or carrying a `NoSchedule` taint has its **idle foam hatched with diagonal warning stripes** (the plate surface in 3D), gets a warning badge next to the utilization percentage, and lists a **Node health** key in the sidebar counting how many nodes are affected by each reason. A healthy cluster looks exactly as it did before — nothing is added.
-
-| Marker | Reason | Meaning |
-| --- | --- | --- |
-| red | `cordoned` | `spec.unschedulable` is true — someone ran `kubectl cordon` |
-| red | `not ready` | the `Ready` condition is `False` or `Unknown` |
-| amber | `mem pressure`, `disk pressure`, `pid pressure` | the matching kubelet condition is `True` |
-| blue | `tainted` | at least one taint has effect `NoSchedule` or `NoExecute` |
-
-Two rules are worth knowing:
-
-- **`PreferNoSchedule` never marks a node.** It is a soft hint the scheduler is free to ignore, so it is listed in the focus overlay but does not stripe.
-- **The cordon taint is folded into `cordoned`.** Kubernetes adds `node.kubernetes.io/unschedulable:NoSchedule` itself when you cordon; reporting it as a taint too would mark the same node twice for one fact, so it is dropped from the taint list.
-
-The sidebar's **Node health** panel counts nodes per warning. Click a row to highlight those nodes and their pods in 2D and 3D; every other node dims. This sets the query to `health:<warning>`; click the row again to clear it.
-
-Click a node to open the focus overlay: a **Scheduling** section spells out every reason and lists each taint as `key=value` with its effect. Worst reason wins the header pill — a cordoned node under memory pressure reads as `SCHEDULING-DISABLED`, because that is what actually keeps pods off it.
-
-## Topology
-
-Set **Group by** in the sidebar to box nodes by where they run. In 2D each group is a dashed box sized by its share of cluster capacity, with its nodes squarified inside it. In 3D each group is a floor under its plates. Either way the box header shows the group's node count and utilisation. Use it to spot zones that are running hot, pools that are nearly empty, or a workload sitting entirely on spot capacity.
-
-| Mode | Read from (first label present wins) |
-| --- | --- |
-| Zone | `topology.kubernetes.io/zone`, `failure-domain.beta.kubernetes.io/zone` |
-| Region | `topology.kubernetes.io/region`, `failure-domain.beta.kubernetes.io/region` |
-| Pool | `karpenter.sh/nodepool`, `eks.amazonaws.com/nodegroup`, `cloud.google.com/gke-nodepool`, `kubernetes.azure.com/agentpool`, `agentpool` |
-| Type | `node.kubernetes.io/instance-type`, `beta.kubernetes.io/instance-type` |
-| Capacity | `karpenter.sh/capacity-type`, `eks.amazonaws.com/capacityType`, `cloud.google.com/gke-spot=true`, `kubernetes.azure.com/scalesetpriority=spot` — folded to `spot` / `on-demand` |
-
-Nodes without the label share one last group, e.g. *no zone label*, so a local minikube or kind cluster shows a single box. GKE and AKS only label spot nodes, so their unlabelled nodes land in *unknown capacity* instead of being guessed on-demand.
-
-While grouping is on, the sidebar's **Topology** panel lists each group with its CPU %, Memory % and node count. Click a row to highlight that group in 2D and 3D; every other node dims. This sets the query to `zone:<name>` (or `region:`, `pool:`, `type:`, `capacity:`); click the row again to clear it.
-
-## Audit & hygiene
-
-Every pod is checked against the best-practice rules below. Workload rules look at every replica of a Deployment, StatefulSet or ReplicaSet together, and mark each of its pods. A pod that breaks one gets a **small warning glyph in the top-right corner** of its box (hover it for the reasons). The sidebar's **Audit & Hygiene** panel counts the affected pods per rule. Click a row to highlight those pods in 2D and 3D. This sets the query to `audit:<rule>`; click the row again to clear it. A clean cluster reads `No issues found`.
-
-| Marker | Rule | Flagged when |
-| --- | --- | --- |
-| amber | `missing requests` | a regular container requests 0 CPU or 0 memory |
-| blue | `no memory limit` | a regular container sets no `limits.memory` |
-| blue | `limit far above request` (`limit-overcommit`) | a regular container's memory limit is more than 4× its memory request |
-| amber | `monolith` | the pod reserves more than 80% of its node's CPU or memory |
-| blue | `ratio asymmetry` | the pod's share of node CPU and its share of node memory differ by 4× or more, and the larger share is at least 10% |
-| amber | `naked pod` | no controller owns the pod, so a drain or node failure deletes it for good (static pods are not flagged; the kubelet restarts them) |
-| blue | `single replica` | a Deployment or StatefulSet runs exactly one pod |
-| amber | `replicas on one node` (`spof-node`) | a workload with 2 or more replicas has all of them on the same node |
-| amber | `replicas in one zone` (`spof-zone`) | otherwise, all replicas sit in one zone while the cluster has nodes in more than one |
-| amber | `spot-only replicas` (`spof-spot`) | a workload with 2 or more replicas runs only on [spot capacity](#topology) |
-
-These details are worth knowing:
-
-- **Init containers are not audited.** They finish before the app runs, so their requests and limits say nothing about how the pod behaves once it is running.
-- **CPU limits are not required.** Only a missing *memory* limit is flagged. A memory leak without a limit can take the whole node down; a CPU spike without a limit only gets throttled.
-- **Limit overcommit is memory-only.** The scheduler packs nodes by request, so a limit far above the request lets the node promise more memory than it has, and the kubelet OOM-kills by real usage. A container with no request or no limit is already reported by the two rules above and is not counted again. CPU overcommit only throttles, so it is not checked; a CPU limit-to-request rule is a possible follow-up.
-- **Ratio asymmetry ignores small pods.** A sidecar asking for 5% of the CPU and almost no memory has an extreme ratio, but it leaves no meaningful capacity stranded.
-- **Replicas are the pods k8sfoams sees.** Workload rules count scheduled, running pods; `spec.replicas` is not read, so no extra API call is needed. A Deployment scaled to 2 with one pod still Pending reads as a single replica.
-- **Spread rules skip DaemonSets and Jobs.** A DaemonSet runs one pod per node by design, and a Job runs to completion. Zones and capacity types come from the same node labels as [Group by](#topology). A single-zone cluster, or one without zone labels (minikube, kind), never reports `spof-zone`, and a replica on a node without a capacity-type label is not counted as spot.
-
-## QoS & eviction risk
-
-Under memory pressure the kubelet evicts pods by QoS class. Set **Color by → QoS** in the sidebar to color every pod box (2D) and cube (3D) by its class. Node cards and plates turn a neutral slate, so only the pods carry color.
-
-| Color | Class | Eviction order |
-| --- | --- | --- |
-| red | `BestEffort` | first — no container sets any request or limit |
-| amber | `Burstable` | second — requests are set but lower than limits |
-| green | `Guaranteed` | last — every container's requests equal its limits |
-
-The sidebar's **QoS & Eviction Risk** panel counts pods per class, riskiest first. It is shown in either color mode, and a class with no pods still reads `0`. Click a row to highlight those pods; this sets the query to `qos:<Class>`. Click it again to clear.
-
-The class is read from the pod's `status.qosClass`, which the kubelet sets. It is not recomputed from requests and limits. A pod with no reported class renders neutral and is not counted.
-
-## Scheduling simulators
-
-Two dry runs of the kube-scheduler's filter phase, against each node's free **allocatable** capacity (allocatable minus the requests of the pods already bound there). Neither touches the cluster.
-
-**Can I fit this pod?** — the dashed **+** button in the header. Enter a CPU and memory request, optionally extended resources (`nvidia.com/gpu=1, ephemeral-storage=10Gi`), a `nodeSelector` (`zone=a, disk=ssd`) and tolerations (`dedicated=gpu:NoSchedule`, `spot` for any value and effect, `*` for everything). Every node gets a verdict; the ones that cannot take the pod say why, e.g. `Insufficient CPU: requires 4000m, available 1200m`.
-
-**Simulate drain** — open a node and click **Simulate drain**. Its evictable pods are bin-packed onto the other nodes, biggest first, each onto the passing node with the most headroom left. The report lists where each pod lands and which would go `Pending`, with a scheduler-style tally (`0/4 nodes available: 3 insufficient CPU, 1 cordoned`). DaemonSet and static pods stay on the node and are listed separately. Naked pods (no controller) are flagged, because a real drain deletes them for good.
-
-While a result is shown, nodes are outlined in both views — green fits / receives pods, red cannot, grey is the drained node — and a strip above the map summarises it. `Esc` or its `×` clears it.
-
-Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, `NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory, then every extended resource the pod requests against the node's free allocatable (`Insufficient nvidia.com/gpu: requires 1, available 0`; a node that does not advertise a resource has none). A pod that tolerates `node.kubernetes.io/unschedulable` or `not-ready` (every DaemonSet pod does) still fits a cordoned or NotReady node. **Not simulated:** node/pod affinity, topology spread, PodDisruptionBudgets and volume zone binding — so a green verdict is necessary, not sufficient.
-
-## Filtering
-
-The query bar in the header is a **highlighter, not a filter of last resort**: matching pods glow, everything else dims. No pod, node or box ever leaves the layout, so the shape of the cluster stays comparable while you narrow down. Once the query is non-empty and valid, a live counter inside the input reads `N / M pods` (and turns red at `0`).
-
-Type whitespace-separated tokens. **All tokens are ANDed** — a pod must satisfy every one of them:
-
-```
-ns:kube-system qos:Burstable app=frontend
-```
-
-An empty query matches everything. A query that contains a malformed token is **inert**: nothing dims, and the offending tokens are listed under the bar with the reason. Half-typing `ns:` can never blank the view.
-
-### Token reference
-
-| Token | Matches | Notes |
-| --- | --- | --- |
-| `ns:<name>` | pod namespace, exact | case-insensitive (`ns:Kube-System` works) |
-| `node:<glob>` | node the pod is scheduled on | `*` is the only wildcard; anchored (whole name must match); case-insensitive |
-| `qos:<class>` | [QoS class](#qos--eviction-risk): `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
-| `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
-| `audit:<rule>` | pods breaking an [audit rule](#audit--hygiene) | `missing-requests`, `missing-limits`, `limit-overcommit`, `monolith`, `ratio-asymmetry`, `naked-pod`, `single-replica`, `spof-node`, `spof-zone`, `spof-spot` |
-| `health:<warning>` | nodes carrying a health warning, and every pod on them | `cordoned`, `not-ready`, `memory-pressure`, `disk-pressure`, `pid-pressure`, `tainted` |
-| `zone:<glob>` `region:<glob>` `pool:<glob>` `type:<glob>` | nodes with that [topology](#topology) label, and every pod on them | globs like `node:` (`zone:us-east-1*`); a node without the label never matches |
-| `capacity:<type>` | spot or on-demand nodes, and every pod on them | `spot`, `on-demand`; case-insensitive |
-| `key=value` | pod label equals value | key and value are **case-sensitive** (Kubernetes labels are) |
-| `key!=value` | pod label differs from value | a **missing** label counts as unequal, so it matches too |
-| `text` | pod name contains `text` | case-insensitive substring |
-| `"quoted text"` | pod name contains `quoted text` | quotes force literal text — the grammar is skipped |
-
-### Examples
-
-Every pod named like `nginx`, anywhere:
-
-```
-nginx
-```
-
-Pods in `kube-system` that run init containers:
-
-```
-ns:kube-system has:init-containers
-```
-
-Everything the scheduler can evict first, on the worker pool:
-
-```
-qos:BestEffort node:worker-*
-```
-
-Frontend pods that are **not** in production, named like `api`:
-
-```
-app=frontend env!=prod api
-```
-
-One specific node — globs are anchored, so dots are literal, not wildcards:
-
-```
-node:ip-10-0-1-5.ec2.internal
-```
-
-All nodes in an AZ suffix, plus a namespace:
-
-```
-node:*-eu-west-1a ns:payments
-```
-
-Guaranteed pods carrying a label value with a space:
-
-```
-qos:Guaranteed app="my app"
-```
-
-Match a pod name that *looks* like a filter token — leading quotes make the whole token literal text:
-
-```
-"web:1"
-```
-
-Without the quotes, `web:1` is read as an unknown filter prefix and reported as an error.
-
-### Sharp edges
-
-- **`!=` wins over `=`.** `env!=prod` is one inequality, never `env!` equals `prod`.
-- **A filter prefix must be a bare word before `:`.** `app=ns:x` is a label selector for key `app`, value `ns:x` — not a namespace filter.
-- **Only `node:`, `health:` and the topology tokens can dim a node.** Node plates and boxes stay in the layout either way; pod-level terms dim pods, never their node.
-- **A missing label matches `!=`.** `env!=prod` highlights pods with `env: staging` *and* pods with no `env` label at all — the Kubernetes selector semantics.
-- **Every problem is reported at once.** The parser never stops on the first bad token, so a three-error query lists three errors.
-
-### Errors you can hit
-
-| Query | Message |
-| --- | --- |
-| `ns:` | `ns: needs a value` |
-| `qos:Cheap` | `unknown QoS class — use Guaranteed, Burstable or BestEffort` |
-| `has:sidecars` | `unknown has: field — use init-containers` |
-| `capacity:reserved` | `unknown capacity type — use spot or on-demand` |
-| `rack:r1` | `unknown filter — use ns:, node:, qos:, has:, …` |
-| `=frontend` | `label selector needs a key` |
-| `app=` | `label selector needs a value` |
-| `""` | `empty quoted value` |
-| `app="my app` | `unterminated quoted value` |
-
-Focusing the input opens a popover with the same token list; it is replaced by the error list while a token is malformed. The `×` on the right clears the query.
-
-## Export
-
-The download button in the header, next to *Refresh*, saves what you are looking at — for capacity-planning decks, Slack updates and incident reports. Everything is built in the browser; nothing extra is fetched from the cluster.
-
-| Item | 2D map | 3D cubes | Contents |
-| --- | --- | --- | --- |
-| **PNG image** | ✓ | ✓ | The current view at 2× resolution. |
-| **SVG image** | ✓ | — | The 2D map as real vectors (cards, pods, containers, labels). The 3D view is WebGL, so it has no SVG form. |
-| **JSON report** | ✓ | ✓ | Every node (with its topology) and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. Extended resources sit under `extended`, in MiB when byte-sized and as a count otherwise. |
-| **CSV report** | ✓ | ✓ | One row per pod: `context,node,zone,region,node_pool,instance_type,capacity_type,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. One more column per [extended resource](#extended-resources) on the cluster follows `memory_mib`, e.g. `nvidia.com/gpu` or `ephemeral_storage_mib`. |
-| **Copy link** | ✓ | ✓ | Puts a [shareable link](#shareable-links) to the current view on the clipboard; the item reads *copied* to confirm. |
-
-Images keep the current metric, colours, grouping, tweaks, query dimming and pinned workload, and carry a title band with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HHmm.<ext>`. Web fonts are not embedded, so exported images fall back to system fonts.
-
-## Shareable links
-
-The view is encoded in the URL hash, so a link reproduces exactly what the sender saw and any view can be bookmarked:
-
-```
-http://localhost:8080/#ctx=prod&view=3d&groupBy=zone&q=ns%3Apayments
-```
-
-| Parameter | Values | Default |
-| --- | --- | --- |
-| `ctx` | Context name as listed in your kubeconfig (the name, not its position) | the active context |
-| `view` | `2d`, `3d` | `2d` |
-| `metric` | `cpu`, `mem`, or an [extended resource](#extended-resources) such as `nvidia.com/gpu` | `cpu` |
-| `colorBy` | `node`, `qos` | `node` |
-| `groupBy` | `none`, `zone`, `region`, `nodePool`, `instanceType`, `capacityType` | `none` |
-| `memUnit` | `MiB`, `GiB`, `TiB` | `GiB` |
-| `q` | A [query](#filtering), URL-encoded | empty |
-| `wl` | Pinned workload, e.g. `web-api` | none |
-
-- The URL updates as you change the view. Parameters at their default are left out, and `ctx` is always written.
-- The URL is replaced in place, so typing a query does not fill your browser history.
-- Pasting a link into a tab that is already open applies it. A parameter the link leaves out goes back to its default.
-- A context that is not in your kubeconfig falls back to the active one, and a notice above the map says so. A resource the context cannot allocate falls back to CPU, as when switching contexts. Any other unknown value uses its default.
-- A pinned workload that matches no pod in the context is dropped, so it cannot dim the whole map.
-- *Zoom*, *Refresh* and the tweaks panel are not part of the link.
-
-## Extended resources
-
-Besides CPU and memory, the *Resource* picker lists every extended resource a node in the current context can allocate: GPUs and other device-plugin resources (`nvidia.com/gpu`, `amd.com/gpu`), `ephemeral-storage` and HugePages (`hugepages-2Mi`, `hugepages-1Gi`). When there is at least one, the two-button toggle becomes a dropdown. Switching to a context without the selected resource falls back to CPU.
-
-- **2D map.** Nodes are sized by how much of the resource they can allocate, and pods by what they request. Nodes without the resource are hidden, and the header counts them.
-- **Fragmentation.** For devices the header also shows the free units cluster-wide and the largest free block on one node. For example, 6 free GPUs spread 2 + 2 + 2 cannot run a 4-GPU job.
-- **3D cubes.** Cubes keep plotting CPU × Memory. Pods requesting the selected resource stay lit and the rest dim. Plates show `used/allocatable` for it.
-- **Node health.** `stranded devices` marks a node that still has free devices but has 90% or more of its CPU or memory requested, so no pod can reach those devices. Query it with `health:stranded-devices`.
-
-Requests follow the scheduler's rules, including init containers and native sidecars. An extended resource set only as a limit counts as a request of the same size. Node sizes come from `status.allocatable`, for CPU and memory too, so kube- and system-reserved capacity is not drawn as free space.
-
-## HTTP API
-
-| Route | Returns |
-| --- | --- |
-| `GET /` | the dashboard |
-| `GET /healthcheck` | `{"status": "ok"}` |
-| `GET /resources` | what the dashboard fetches on each refresh; optional `?context=<name>`. `{"resources": [...], "nodes": [...]}`: `resources` lists `cpu`, `memory` and every extended resource some node allocates. Each node carries `cpu`, `memory`, `extended`, the [node health](#node-health) fields, `topology` and its `pods`; each pod carries `cpu`, `memory`, `extended`, `namespace`, `labels`, `qos`, `findings`, `owner` (`{kind, name}` of its controlling workload, with a Deployment's ReplicaSet resolved to the Deployment; `null` for a naked pod) and its `containers` (`name`, `init`, `cpu`, `memory`, `extended`). Same units as below. Nodes and pods are listed once per request |
-| `GET /resources/cpu`, `GET /resources/memory` | treemap JSON; optional `?context=<name>`. CPU in millicores, memory in decimal kB. Each node group also carries `unschedulable`, `taints`, `conditions` and a render-ready `warnings` list — see [Node health](#node-health). Each pod group carries a `findings` list — see [Audit & hygiene](#audit--hygiene). Node, pod and container groups carry an `extended` map of every other resource (count, or decimal kB when byte-sized) |
-| `GET /resources/<extended>` | the same treemap JSON for an extended resource some node allocates, e.g. `/resources/nvidia.com/gpu` or `/resources/ephemeral-storage`. Any other name returns `400`, listing the supported ones |
-| `POST /simulate/fit` | per-node fit verdict for a hypothetical pod — see [Scheduling simulators](#scheduling-simulators). Body `{"cpu": "4", "memory": "16Gi", "extended": {"nvidia.com/gpu": "1"}, "nodeSelector": {...}, "tolerations": [...]}`; `400` on a malformed spec |
-| `GET /simulate/drain/<node>` | where the node's evictable pods would land, and which would go `Pending`; `404` for an unknown node |
-| `GET /contexts` | `[{"context": "...", "active": true}]` |
+**[Documentation](https://mmpyro.github.io/k8s-pod-foamtree/)** · **[Live demo](https://mmpyro.github.io/k8s-pod-foamtree/demo/)** — the real dashboard on synthetic clusters, in your browser.
+
+![k8sfoams walkthrough on synthetic data: the 2D map, workload highlighting, grouping by zone, node health, audit, QoS, drain and fit simulations, the 3D view and GPUs](docs/images/k8sfoams-demo.gif)
+
+*A one-minute tour on the [synthetic demo clusters](https://mmpyro.github.io/k8s-pod-foamtree/synthetic-mode/) — run it yourself with `k8sfoams --synthetic`.*
+
+## Features
+
+- **[2D map](https://mmpyro.github.io/k8s-pod-foamtree/map-2d/)** and **[3D cubes](https://mmpyro.github.io/k8s-pod-foamtree/cubes-3d/)** of every node and pod, sized by requests.
+- **[Node health](https://mmpyro.github.io/k8s-pod-foamtree/node-health/)**: free capacity on cordoned, NotReady, pressured or tainted nodes is hatched, because it is not really free.
+- **[Topology](https://mmpyro.github.io/k8s-pod-foamtree/topology/)**: group nodes by zone, region, node pool, instance type or spot / on-demand.
+- **[Audit & hygiene](https://mmpyro.github.io/k8s-pod-foamtree/audit/)**: missing requests or limits, monoliths, naked pods, single replicas, replicas sharing one node, zone or spot pool.
+- **[QoS & eviction risk](https://mmpyro.github.io/k8s-pod-foamtree/qos/)**: color pods by QoS class.
+- **[Scheduling simulators](https://mmpyro.github.io/k8s-pod-foamtree/simulators/)**: "Can I fit this pod?" and "What happens if I drain this node?".
+- **[Filtering](https://mmpyro.github.io/k8s-pod-foamtree/filtering/)**: a query bar that highlights matching pods by namespace, label, QoS, node, topology or finding.
+- **[Extended resources](https://mmpyro.github.io/k8s-pod-foamtree/extended-resources/)**: GPUs, ephemeral storage and HugePages, with fragmentation and stranded devices.
+- **[Export](https://mmpyro.github.io/k8s-pod-foamtree/export/)** to PNG, SVG, JSON or CSV, and **[shareable links](https://mmpyro.github.io/k8s-pod-foamtree/shareable-links/)** to any view.
+- **Live updates** from a watch cache, so scaling a Deployment shows up within seconds.
 
 ## Installation
 
-### Prerequisites
-Install [uv](https://docs.astral.sh/uv/) package manager:
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-### Install from source
-Building the UI from source also needs [Node.js](https://nodejs.org/) 18 or newer; `make run` and `make build` build it with `make web`. The PyPI package already contains the built UI.
-```bash
-# Install dependencies and the package in development mode
-make restore_dev
-
-# Or install without dev dependencies
-make restore
-```
-
-### Install via PyPi
 ```bash
 pip install k8sfoams
 # or with uv
 uv pip install k8sfoams
 ```
 
-## Run k8s-pod-foamtree
-After installation, run the application:
+To install from source, see [Getting started](https://mmpyro.github.io/k8s-pod-foamtree/getting-started/).
+
+## Run
+
 ```bash
-# Using make
-make run
-
-# Or directly
-k8sfoams
-
-# Or with uv run
-uv run k8sfoams
+k8sfoams              # your kubeconfig contexts, at http://127.0.0.1:8080
+k8sfoams --synthetic  # no cluster needed: generated demo clusters that keep changing
 ```
 
-## Command lines arguments
-- host: host IP address on which server listen, default is **127.0.0.1**
-- port: port number on which server listen, default is **8080**
-- d: turn on **debug** mode when server starts
-- page-size: objects fetched per LIST request, default is **500**
-- no-watch: list nodes and pods on every request instead of keeping a watch cache per context
-
-Example:
-```bash
-k8sfoams --host 0.0.0.0 --port 8080 -d
-k8sfoams --page-size 200 --no-watch
-```
+Switching context in the dashboard never modifies your kubeconfig. See the [command-line reference](https://mmpyro.github.io/k8s-pod-foamtree/cli/) for every option and [Synthetic mode](https://mmpyro.github.io/k8s-pod-foamtree/synthetic-mode/) for what the demo clusters contain.
 
 ## Development
 
-### Running tests
 ```bash
-# Run all tests (type checking, linting, security, unit tests)
-make tests
-
-# Run individual test suites
-make unit_tests
-make static_code_analysis
-make check_types
-make bandit
+make restore_dev     # install with dev dependencies
+make run-synthetic   # build the UI and run on the synthetic clusters
+make tests           # type checking, linting, security, unit tests
+make docs-serve      # the docs site with live reload
 ```
 
-### Frontend
-The UI sources are the `.jsx` files in `k8sfoam/src/frontend`; `main.js` lists them in load order. esbuild compiles them into `bundle.js`, which is gitignored.
-```bash
-make web        # npm ci + one build
-npm run watch   # rebuild on every save while the server runs
-```
-
-### CI/CD targets
-For CI/CD environments (GitHub Actions, etc.), use these targets that work with system Python:
-```bash
-make restore_ci   # Install dependencies with --system flag
-make tests_ci     # Run all tests without uv run prefix
-```
-
-### Building the package
-```bash
-make build
-```
-
-### Clean build artifacts
-```bash
-make clean
-```
+See [Development](https://mmpyro.github.io/k8s-pod-foamtree/development/) for the frontend build, the docs and the CI targets.

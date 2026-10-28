@@ -1,0 +1,59 @@
+.k8s-hero {
+  text-align: center;
+  padding: 1rem 0 0.5rem;
+}
+.k8s-hero h1 {
+  margin-bottom: 0.4rem;
+  font-weight: 700;
+}
+.k8s-hero .md-button {
+  margin: 0.25rem;
+}
+
+/* The live dashboard embedded in a page: docs/demo/ in an iframe, in embed mode. */
+.md-typeset .k8sfoam-embed {
+  /* Material gives figures width: fit-content, which shrinks an iframe to its 300px default. */
+  width: 100%;
+  margin: 1.2em 0 1.6em;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  /* The dashboard's own background, so the frame does not flash white while it loads. */
+  background: #07080c;
+}
+.md-typeset .k8sfoam-embed iframe {
+  display: block;
+  width: 100%;
+  height: 34rem;
+  border: 0;
+}
+.md-typeset .k8sfoam-embed.k8sfoam-embed-tall iframe {
+  height: 42rem;
+}
+.md-typeset .k8sfoam-embed figcaption {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  max-width: none;
+  margin: 0;
+  padding: 0.5rem 0.8rem;
+  font-size: 0.7rem;
+  text-align: left;
+  color: var(--md-default-fg-color--light);
+  background: var(--md-code-bg-color);
+}
+.md-typeset .k8sfoam-embed figcaption a {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* "Try it" links that open the demo on a query or view. */
+.k8s-try {
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+/* Clickable nodes in the pipeline diagram. */
+.mermaid .clickable {
+  cursor: pointer;
+}

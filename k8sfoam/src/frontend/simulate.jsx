@@ -3,7 +3,7 @@
 // file is the single place that decides how they read and which nodes the map
 // outlines, so the modal, the drain report and both views agree.
 
-const { useState } = React;
+const { useState, useEffect } = React;
 
 // Ordered the way the backend's filter evaluates them.
 const REASONS = {
@@ -71,22 +71,11 @@ function parseTolerations(text) {
   return { tolerations, errors };
 }
 
-async function readJson(res) {
-  if (res.ok) return res.json();
-  // Flask returns the reason as plain text on 400/404/500.
-  throw new Error((await res.text()) || `status ${res.status}`);
-}
-
-function fetchFit(ctxParam, spec) {
-  return fetch(`/simulate/fit${ctxParam}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(spec),
-  }).then(readJson);
-}
-
-function fetchDrain(ctxParam, nodeName) {
-  return fetch(`/simulate/drain/${encodeURIComponent(nodeName)}${ctxParam}`).then(readJson);
+// The preset whose fields the form holds, or null. Whitespace around the
+// commas of a list field does not make it a different pod.
+function matchPreset(presets, form) {
+  const norm = s => (s || "").split(",").map(t => t.trim()).filter(Boolean).join(",");
+  return presets.find(p => Object.keys(p.form).every(k => norm(p.form[k]) === norm(form[k]))) || null;
 }
 
 // Map verdicts: node name → "ok" | "fail" | "drained".
@@ -125,7 +114,7 @@ function CloseIcon() {
 
 /* ─────────── Can I fit this pod? ─────────── */
 
-function FitModal({ ctxParam, memUnit, fmtMem, onSimulation, onClose }) {
+function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
   const [cpu, setCpu] = useState("500m");
   const [memory, setMemory] = useState("1Gi");
   const [selectorText, setSelectorText] = useState("");
@@ -134,19 +123,39 @@ function FitModal({ ctxParam, memUnit, fmtMem, onSimulation, onClose }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // The static demo can only answer for these pods; the server answers any.
+  const [presets, setPresets] = useState([]);
+
+  useEffect(() => {
+    window.k8sApi.fitPresets().then(setPresets).catch(err => setError(err.message || String(err)));
+  }, []);
 
   const { selector, errors: selErrors } = parseSelector(selectorText);
   const { tolerations, errors: tolErrors } = parseTolerations(tolerationText);
   // Same name=quantity syntax as the selector; quantities are validated server-side.
   const { selector: extended, errors: extErrors } = parseSelector(extendedText);
   const formErrors = [...selErrors, ...tolErrors, ...extErrors];
+  const preset = matchPreset(presets, {
+    cpu, memory, extended: extendedText, nodeSelector: selectorText, tolerations: tolerationText,
+  });
+  const customInDemo = window.k8sApi.isStatic && !preset;
+
+  const applyPreset = (p) => {
+    setCpu(p.form.cpu);
+    setMemory(p.form.memory);
+    setExtendedText(p.form.extended);
+    setSelectorText(p.form.nodeSelector);
+    setTolerationText(p.form.tolerations);
+    setError(null);
+  };
 
   const submit = async (e) => {
     e.preventDefault();
     if (formErrors.length) return;
     setBusy(true);
     try {
-      const res = await fetchFit(ctxParam, { cpu, memory, extended, nodeSelector: selector, tolerations });
+      const spec = { cpu, memory, extended, nodeSelector: selector, tolerations };
+      const res = await window.k8sApi.fit(ctx, spec, preset && preset.id);
       setResult(res);
       setError(null);
       onSimulation(fitSimulation(res));
@@ -172,6 +181,19 @@ function FitModal({ ctxParam, memUnit, fmtMem, onSimulation, onClose }) {
         </div>
 
         <form className="sim-form" onSubmit={submit}>
+          {presets.length > 0 && (
+            <div className="sim-field sim-wide">
+              <span className="ov-label">Demo presets</span>
+              <div className="sim-presets">
+                {presets.map(p => (
+                  <button key={p.id} type="button" className={`sim-preset ${preset && preset.id === p.id ? "sim-preset-on" : ""}`}
+                    onClick={() => applyPreset(p)}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <label className="sim-field">
             <span className="ov-label">CPU request</span>
             <input value={cpu} onChange={e => setCpu(e.target.value)} placeholder="4000m or 4" spellCheck="false" />
@@ -198,7 +220,11 @@ function FitModal({ ctxParam, memUnit, fmtMem, onSimulation, onClose }) {
           <div className="sim-actions sim-wide">
             {formErrors.map((m, i) => <span key={i} className="sim-error">{m}</span>)}
             {error && <span className="sim-error">{error}</span>}
-            <button type="submit" className={`btn-primary ${busy ? "spinning" : ""}`} disabled={busy || formErrors.length > 0}>
+            {customInDemo && !error && (
+              <span className="sim-note">The demo only has answers for the presets — run <code>k8sfoams --synthetic</code> locally to try any pod.</span>
+            )}
+            <button type="submit" className={`btn-primary ${busy ? "spinning" : ""}`}
+              disabled={busy || formErrors.length > 0 || customInDemo}>
               {busy ? "Simulating…" : "Simulate"}
             </button>
           </div>
@@ -243,12 +269,12 @@ function FitModal({ ctxParam, memUnit, fmtMem, onSimulation, onClose }) {
 
 /* ─────────── Simulate drain ─────────── */
 
-function DrainButton({ ctxParam, nodeName, onReport }) {
+function DrainButton({ ctx, nodeName, onReport }) {
   const [busy, setBusy] = useState(false);
   const run = async () => {
     setBusy(true);
     try {
-      onReport({ result: await fetchDrain(ctxParam, nodeName) });
+      onReport({ result: await window.k8sApi.drain(ctx, nodeName) });
     } catch (err) {
       onReport({ error: err.message || String(err) });
     } finally {

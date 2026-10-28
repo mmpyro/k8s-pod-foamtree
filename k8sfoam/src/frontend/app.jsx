@@ -13,6 +13,11 @@ const {
 } = window.k8sResources;
 const { FitModal, DrainButton, DrainReport, drainSimulation } = window.k8sSimulate;
 const { readHash, writeHash } = window.k8sUrlState;
+const api = window.k8sApi;
+
+// ?embed=1 — the dashboard inside a docs page: sidebar collapsed, with a link
+// out to the full-page demo. Separate from the #… view state on purpose.
+const EMBED = new URLSearchParams(window.location.search).get("embed") === "1";
 
 const COLOR_MODES = [
   { id: "node", label: "Node" },
@@ -197,7 +202,7 @@ function App() {
   // Its verdicts outline nodes in both views until cleared.
   const [sim, setSim] = useState(null);
   const [fitOpen, setFitOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
   // Context name the loaded nodes came from; null until the first load.
   const [loadedCtx, setLoadedCtx] = useState(null);
@@ -218,17 +223,14 @@ function App() {
     if (!name) return fallback;
     const idx = list.findIndex(c => c.context === name);
     if (idx !== -1) return idx;
-    setUrlNotice(`Context "${name}" from the link is not in your kubeconfig; showing ${shortContext(list[fallback].context)} instead.`);
+    const where = api.isStatic ? "the demo" : "your kubeconfig";
+    setUrlNotice(`Context "${name}" from the link is not in ${where}; showing ${shortContext(list[fallback].context)} instead.`);
     return fallback;
   };
 
   // Load contexts from server
   useEffect(() => {
-    fetch('/contexts')
-      .then(res => {
-        if (!res.ok) throw new Error('API failed');
-        return res.json();
-      })
+    api.contexts()
       .then(data => {
         if (data && data.length > 0) {
           setContexts(data);
@@ -251,7 +253,6 @@ function App() {
 
   const currentCtx = contexts[contextIdx];
   const ctxName = currentCtx ? currentCtx.context : null;
-  const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
 
   // One load at a time: a request made meanwhile (a change event, a context
   // switch) runs once the current one ends, with the latest context.
@@ -267,9 +268,7 @@ function App() {
     loadingRef.current = true;
     setRefreshing(true);
     try {
-      const res = await fetch(`/resources${ctxParam}`);
-      if (!res.ok) throw new Error(`Resources endpoint returned status ${res.status}`);
-      setNodes(toNodes(await res.json()));
+      setNodes(toNodes(await api.resources(ctxName)));
       setLoadedCtx(ctxName);
       setError(null);
       setLastRefresh(Date.now());
@@ -436,7 +435,11 @@ function App() {
       setLiveStatus("off");
       return;
     }
-    const source = new EventSource(`/events${ctxParam}`);
+    const source = api.events(ctxName);
+    if (!source) {
+      setLiveStatus("off");
+      return;
+    }
     let reconnect = false;
     setLiveStatus("connecting");
     source.addEventListener("ready", () => {
@@ -453,7 +456,7 @@ function App() {
   // Auto-refresh tick — re-fetch live cluster data every refreshInterval
   // seconds, unless the live stream is delivering changes.
   useEffect(() => {
-    if (liveStatus === "live") return;
+    if (liveStatus === "live" || api.isStatic) return;
     const id = setInterval(() => {
       if (contexts.length > 0) loadDataRef.current();
     }, refreshInterval * 1000);
@@ -714,11 +717,11 @@ function App() {
 
       {focused && (
         <FocusOverlay key={focused.name} node={focused} onClose={() => setFocused(null)} metric={metric} memUnit={memUnit}
-          ctxParam={ctxParam} onSimulation={setSim} />
+          ctx={ctxName} onSimulation={setSim} />
       )}
 
       {fitOpen && (
-        <FitModal ctxParam={ctxParam} memUnit={memUnit} fmtMem={fmtMem}
+        <FitModal ctx={ctxName} memUnit={memUnit} fmtMem={fmtMem}
           onSimulation={setSim} onClose={() => setFitOpen(false)} />
       )}
 
@@ -884,17 +887,27 @@ function Sidebar({
       <div className="sidebar-section">
         <div className="section-label">
           <span>Refresh</span>
-          <span className="section-value">{liveStatus === "live" ? "on change" : `${refreshInterval}s`}</span>
+          <span className="section-value">
+            {api.isStatic ? "snapshot" : liveStatus === "live" ? "on change" : `${refreshInterval}s`}
+          </span>
         </div>
-        <div className="seg seg-2">
-          <button className={liveMode ? "seg-on" : ""} onClick={() => setLiveMode(true)}>Live</button>
-          <button className={liveMode ? "" : "seg-on"} onClick={() => setLiveMode(false)}>Interval</button>
-        </div>
-        {/* The slider still sets the fallback while Live is connecting or down. */}
-        <input type="range" min="5" max="600" step="5" value={refreshInterval}
-          disabled={liveStatus === "live"}
-          onChange={e => setRefreshInterval(+e.target.value)} className="slider" />
-        {liveMode && liveStatus === "off" && (
+        {!api.isStatic && (
+          <>
+            <div className="seg seg-2">
+              <button className={liveMode ? "seg-on" : ""} onClick={() => setLiveMode(true)}>Live</button>
+              <button className={liveMode ? "" : "seg-on"} onClick={() => setLiveMode(false)}>Interval</button>
+            </div>
+            {/* The slider still sets the fallback while Live is connecting or down. */}
+            <input type="range" min="5" max="600" step="5" value={refreshInterval}
+              disabled={liveStatus === "live"}
+              onChange={e => setRefreshInterval(+e.target.value)} className="slider" />
+          </>
+        )}
+        {api.isStatic ? (
+          <div className="seg-note">
+            Demo data: a fixed snapshot of a synthetic cluster. Run <code>k8sfoams --synthetic</code> for one that keeps changing.
+          </div>
+        ) : liveMode && liveStatus === "off" && (
           <div className="seg-note">Live updates are unavailable, so the view polls instead.</div>
         )}
         <button className={`btn-primary ${refreshing ? "spinning" : ""}`} onClick={doRefresh}>
@@ -1015,8 +1028,8 @@ function Sidebar({
       <div className="sidebar-footer">
         <div className="footer-row">
           <span className="dot dot-ok" />
-          <span>Cluster connected</span>
-          <span className="footer-tail">Ready</span>
+          <span>{api.isStatic ? "Synthetic demo data" : "Cluster connected"}</span>
+          <span className="footer-tail">{api.isStatic ? "Snapshot" : "Ready"}</span>
         </div>
         <div className="footer-row dim">
           <span>{nodeCount} nodes</span>
@@ -1116,6 +1129,11 @@ function Header({
         <div className="title-row">
           <span className="title-main">{titleMain} Resources</span>
           <span className="title-chip">{contextLabel}</span>
+          {api.isStatic && (
+            <span className="title-chip demo-chip" title="Generated by k8sfoams --synthetic; no real cluster behind it">
+              demo data
+            </span>
+          )}
           {(liveStatus === "live" || liveStatus === "reconnecting") && (
             <span className={`title-chip live-chip live-${liveStatus}`}
               title={liveStatus === "live" ? "Updates as the cluster changes" : "Live stream lost; polling until it reconnects"}>
@@ -1183,8 +1201,24 @@ function Header({
               stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
+        {EMBED && <FullDemoLink />}
       </div>
     </header>
+  );
+}
+
+// Opens the current view full-page in a new tab. The href is read on click,
+// since the view state lands in the hash only after a render.
+function FullDemoLink() {
+  return (
+    <a className="icon-btn full-demo-link" href={window.location.pathname} target="_blank" rel="noopener"
+      title="Open this view in the full demo"
+      onClick={e => { e.currentTarget.href = `${window.location.pathname}${window.location.hash}`; }}>
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <path d="M9 2.5 H13.5 V7 M13.5 2.5 L7.5 8.5 M11.5 9.5 V13.5 H2.5 V4.5 H6.5"
+          stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </a>
   );
 }
 
@@ -1404,7 +1438,7 @@ function TreemapGrid({
 
 /* ─────────── Focus overlay ─────────── */
 
-function FocusOverlay({ node, onClose, metric, memUnit, ctxParam, onSimulation }) {
+function FocusOverlay({ node, onClose, metric, memUnit, ctx, onSimulation }) {
   // Drain report for this node; replaces the workload list while shown.
   const [drain, setDrain] = useState(null);
   const onDrainReport = (report) => {
@@ -1423,7 +1457,7 @@ function FocusOverlay({ node, onClose, metric, memUnit, ctxParam, onSimulation }
             </div>
           </div>
           <div className="overlay-head-tools">
-            <DrainButton ctxParam={ctxParam} nodeName={node.name} onReport={onDrainReport} />
+            <DrainButton ctx={ctx} nodeName={node.name} onReport={onDrainReport} />
             <button className="icon-btn" onClick={onClose}>
               <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
             </button>
