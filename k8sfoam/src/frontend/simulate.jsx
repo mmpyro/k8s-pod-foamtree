@@ -1,9 +1,11 @@
-// Scheduling simulators: "Can I fit this pod?" and "Simulate drain". The
-// backend runs the scheduler filter and sends verdicts with reason slugs; this
-// file is the single place that decides how they read and which nodes the map
-// outlines, so the modal, the drain report and both views agree.
+// Scheduling simulators: "Can I fit this pod?", "Simulate drain" and the
+// consolidation finder. The backend runs the scheduler filter and sends
+// verdicts with reason slugs; this file is the single place that decides how
+// they read and which nodes the map outlines, so the modals, the drain report
+// and both views agree.
 
 const { useState, useEffect } = React;
+const { isBytes } = window.k8sResources;
 
 // Ordered the way the backend's filter evaluates them.
 const REASONS = {
@@ -21,6 +23,19 @@ const SKIP_REASONS = {
   daemonset: "DaemonSet — runs on every node, not evicted",
   static: "static pod — owned by the kubelet, not evicted",
 };
+
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+// Why a node cannot go even on its own, in the backend's order.
+const BLOCKERS = {
+  "control-plane": () => "control-plane node — not part of a node group",
+  "pending": n => `${plural(n, "pod")} would go Pending`,
+  "unmanaged": n => `${plural(n, "naked pod")} — nothing would recreate ${n === 1 ? "it" : "them"}`,
+};
+
+function blockerLabel(b) {
+  return (BLOCKERS[b.slug] || (() => b.slug))(b.pods);
+}
 
 // What the simulator does not model, shown under every result so a green
 // verdict is read as "necessary", not "guaranteed".
@@ -98,6 +113,24 @@ function drainSimulation(result) {
       ? `drain ${result.node}: ${moved} pod${moved === 1 ? "" : "s"} fit`
       : `drain ${result.node}: ${result.pending.length} pending`,
     ok: result.fits,
+    verdicts,
+  };
+}
+
+// Removed nodes read "drained", the ones taking their pods "ok", blocked ones
+// "fail" — even when they take pods too, since why a node stays is the answer.
+function consolidationSimulation(result) {
+  const verdicts = new Map();
+  for (const step of result.plan) {
+    for (const p of step.placements) verdicts.set(p.to, "ok");
+  }
+  for (const v of result.nodes) if (!v.removable) verdicts.set(v.node, "fail");
+  for (const step of result.plan) verdicts.set(step.node, "drained");
+  const n = result.plan.length;
+  return {
+    kind: "consolidation",
+    summary: n ? `${n} of ${result.total} nodes could be removed` : "no node could be removed",
+    ok: n > 0,
     verdicts,
   };
 }
@@ -379,7 +412,159 @@ function DrainReport({ report, memUnit, fmtMem }) {
   );
 }
 
+/* ─────────── Which nodes could be removed? ─────────── */
+
+// `24 CPU / 96 GiB / 2 nvidia.com/gpu` — what removing the planned nodes gives back.
+// Byte-sized extended resources (ephemeral-storage, hugepages) are node disk and
+// memory carve-outs, not capacity anyone scales down for, so they stay out.
+function fmtFreed(freed, memUnit, fmtMem) {
+  const parts = [`${+(freed.cpu / 1000).toFixed(1)} CPU`, `${fmtMem(kbToMib(freed.memory), memUnit, true)} ${memUnit}`];
+  for (const [name, amount] of Object.entries(freed.extended).sort()) {
+    if (amount && !isBytes(name)) parts.push(`${amount} ${name}`);
+  }
+  return parts.join(" / ");
+}
+
+function NodeLine({ v, tone, memUnit, fmtMem, onClick, children }) {
+  return (
+    <div className={`pod-row sim-row sim-row-${tone} ${onClick ? "sim-row-click" : ""}`} onClick={onClick}>
+      <div className="pod-row-name">
+        <code>{v.node}</code>
+        {children}
+      </div>
+      <div className="pod-row-stat" title="Requests of the pods a drain would move">
+        <span className="pod-row-num">{(v.cpu / 1000).toFixed(2)}</span>
+        <span className="pod-row-unit">cores</span>
+      </div>
+      <div className="pod-row-stat" title="Requests of the pods a drain would move">
+        <span className="pod-row-num">{fmtMem(kbToMib(v.memory), memUnit)}</span>
+        <span className="pod-row-unit">{memUnit}</span>
+      </div>
+    </div>
+  );
+}
+
+function PlanStep({ index, step, v, memUnit, fmtMem }) {
+  const [open, setOpen] = useState(false);
+  const moves = step.placements.length;
+  return (
+    <>
+      <NodeLine v={v} tone="ok" memUnit={memUnit} fmtMem={fmtMem} onClick={moves ? () => setOpen(o => !o) : null}>
+        <div className="sim-reasons sim-reasons-ok">
+          <span className="sim-step">{index + 1}</span>
+          <span>{moves ? `${plural(moves, "pod")} move ${open ? "▾" : "▸"}` : "nothing to move"}</span>
+          {step.skipped.length > 0 && <span className="sim-muted">{step.skipped.length} DaemonSet/static stay</span>}
+        </div>
+      </NodeLine>
+      {open && (
+        <div className="pod-rows sim-nested">
+          {step.placements.map(p => (
+            <PodLine key={`${p.namespace}/${p.pod}`} p={p} memUnit={memUnit} fmtMem={fmtMem}>
+              <div className="sim-reasons sim-reasons-ok"><span>→ {p.to}</span></div>
+            </PodLine>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ConsolidationModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let live = true;
+    window.k8sApi.consolidation(ctx)
+      .then(res => {
+        if (!live) return;
+        setResult(res);
+        onSimulation(consolidationSimulation(res));
+      })
+      .catch(err => live && setError(err.message || String(err)));
+    return () => { live = false; };
+  }, [ctx]);
+
+  const byNode = result ? new Map(result.nodes.map(v => [v.node, v])) : new Map();
+  const conflicts = result ? result.nodes.filter(v => v.removable && !v.inPlan) : [];
+  const blocked = result ? result.nodes.filter(v => !v.removable).sort((a, b) => a.node.localeCompare(b.node)) : [];
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="overlay-card sim-card" onClick={e => e.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <div className="overlay-title">Which nodes could be removed?</div>
+            <div className="overlay-sub">Drain every node, then plan a scale-down one node at a time</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
+        </div>
+
+        <div className="overlay-pods">
+          {error && <div className="sim-summary sim-summary-fail">Consolidation finder failed: {error}</div>}
+          {!result && !error && <div className="sim-note">Simulating a drain of every node…</div>}
+
+          {result && (
+            <>
+              <div className={`sim-summary ${result.plan.length ? "sim-summary-ok" : "sim-summary-neutral"}`}>
+                {result.plan.length
+                  ? `${plural(result.plan.length, "node")} of ${result.total} can go, freeing ${fmtFreed(result.freed, memUnit, fmtMem)}.`
+                  : `No node can be removed — every one of the ${result.total} is either needed for headroom or blocked.`}
+              </div>
+
+              {result.plan.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Removal plan · {result.plan.length}</div>
+                  <div className="pod-rows">
+                    {result.plan.map((step, i) => (
+                      <PlanStep key={step.node} index={i} step={step} v={byNode.get(step.node)}
+                        memUnit={memUnit} fmtMem={fmtMem} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {conflicts.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Removable alone, not together · {conflicts.length}</div>
+                  <div className="pod-rows">
+                    {conflicts.map(v => (
+                      <NodeLine key={v.node} v={v} tone="warn" memUnit={memUnit} fmtMem={fmtMem}>
+                        <div className="sim-reasons sim-reasons-warn">
+                          <span title={v.conflictWith.join(", ")}>
+                            its pods no longer fit after removing {plural(v.conflictWith.length, "planned node")} first
+                          </span>
+                        </div>
+                      </NodeLine>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {blocked.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Cannot be removed · {blocked.length}</div>
+                  <div className="pod-rows">
+                    {blocked.map(v => (
+                      <NodeLine key={v.node} v={v} tone="fail" memUnit={memUnit} fmtMem={fmtMem}>
+                        <div className="sim-reasons">
+                          {v.blockers.map(b => <span key={b.slug}>{blockerLabel(b)}</span>)}
+                        </div>
+                      </NodeLine>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <SimCaveat />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 window.k8sSimulate = {
-  REASONS, reasonLabel, parseSelector, parseTolerations, fitSimulation, drainSimulation,
-  FitModal, DrainButton, DrainReport,
+  REASONS, reasonLabel, parseSelector, parseTolerations, fitSimulation, drainSimulation, consolidationSimulation,
+  FitModal, DrainButton, DrainReport, ConsolidationModal,
 };

@@ -11,7 +11,9 @@ const { GROUP_MODES, groupMode, groupNodes } = window.k8sTopology;
 const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
-const { FitModal, DrainButton, DrainReport, drainSimulation } = window.k8sSimulate;
+const { FitModal, DrainButton, DrainReport, ConsolidationModal, drainSimulation } = window.k8sSimulate;
+
+const SIM_KINDS = { fit: "Fit simulation", drain: "Drain simulation", consolidation: "Consolidation" };
 const { readHash, writeHash } = window.k8sUrlState;
 const api = window.k8sApi;
 
@@ -198,10 +200,11 @@ function App() {
   // previews one, so a pinned selection always wins over the pointer.
   const [selectedWorkload, setSelectedWorkload] = useState(initial.workload);
   const [hoveredWorkload, setHoveredWorkload] = useState(null);
-  // Latest fit or drain simulation: { kind, summary, ok, verdicts: Map<node, verdict> }.
+  // Latest fit, drain or consolidation simulation: { kind, summary, ok, verdicts: Map<node, verdict> }.
   // Its verdicts outline nodes in both views until cleared.
   const [sim, setSim] = useState(null);
   const [fitOpen, setFitOpen] = useState(false);
+  const [consolidationOpen, setConsolidationOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
   // Context name the loaded nodes came from; null until the first load.
@@ -477,6 +480,7 @@ function App() {
       setHoveredWorkload(null);
       setSim(null);
       setFitOpen(false);
+      setConsolidationOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -656,19 +660,28 @@ function App() {
           onExport={onExport}
           canExport={nodes.length > 0}
           onFit={() => setFitOpen(true)}
+          onConsolidation={() => setConsolidationOpen(true)}
         />
 
         {/* Active simulation — explains the green/red node outlines. A strip,
             not a header chip: the header title has no room left at laptop widths. */}
         {sim && (
           <div className={`sim-strip ${sim.ok ? "sim-strip-ok" : "sim-strip-fail"}`}>
-            <span className="sim-strip-kind">{sim.kind === "fit" ? "Fit simulation" : "Drain simulation"}</span>
+            <span className="sim-strip-kind">{SIM_KINDS[sim.kind]}</span>
             <span>{sim.summary}</span>
-            <span className="sim-strip-legend">
-              <span className="sim-badge sim-badge-ok">fits</span>
-              <span className="sim-badge sim-badge-fail">no fit</span>
-              {sim.kind === "drain" && <span className="sim-badge sim-badge-drained">drained</span>}
-            </span>
+            {sim.kind === "consolidation" ? (
+              <span className="sim-strip-legend">
+                <span className="sim-badge sim-badge-drained" title="Removed by the plan">drained</span>
+                <span className="sim-badge sim-badge-ok" title="Takes the removed nodes' pods">fits</span>
+                <span className="sim-badge sim-badge-fail" title="Cannot be removed, even alone">no fit</span>
+              </span>
+            ) : (
+              <span className="sim-strip-legend">
+                <span className="sim-badge sim-badge-ok">fits</span>
+                <span className="sim-badge sim-badge-fail">no fit</span>
+                {sim.kind === "drain" && <span className="sim-badge sim-badge-drained">drained</span>}
+              </span>
+            )}
             <button className="wl-chip-clear" onClick={() => setSim(null)} title="Clear simulation (Esc)">×</button>
           </div>
         )}
@@ -723,6 +736,11 @@ function App() {
       {fitOpen && (
         <FitModal ctx={ctxName} memUnit={memUnit} fmtMem={fmtMem}
           onSimulation={setSim} onClose={() => setFitOpen(false)} />
+      )}
+
+      {consolidationOpen && (
+        <ConsolidationModal ctx={ctxName} memUnit={memUnit} fmtMem={fmtMem}
+          onSimulation={setSim} onClose={() => setConsolidationOpen(false)} />
       )}
 
       <TweaksPanel>
@@ -1100,7 +1118,7 @@ function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
 function Header({
   metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
   onMenu, onRefresh, refreshing, liveStatus, workload, onClearWorkload, onExport, canExport,
-  onFit,
+  onFit, onConsolidation,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
@@ -1192,6 +1210,14 @@ function Header({
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
             <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.4 1.6" />
             <path d="M8 5.2 V10.8 M5.2 8 H10.8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button className="icon-btn" onClick={onConsolidation} disabled={!canExport} title="Which nodes could be removed?">
+          {/* A dashed node folding into a solid one — "consolidate". */}
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <rect x="1.5" y="3.5" width="6" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+            <rect x="9.5" y="3.5" width="5" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.2 1.6" />
+            <path d="M11 8 H5.5 M7.2 6.3 L5.5 8 L7.2 9.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
         <ExportMenu is3d={is3d} disabled={!canExport} onExport={onExport} />
