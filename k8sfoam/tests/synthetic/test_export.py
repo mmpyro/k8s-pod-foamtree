@@ -1,5 +1,6 @@
 import json
 import pytest
+from k8sfoam.src.common.scheduler import MAX_REPLICAS
 from k8sfoam.src.synthetic.export import (BUNDLE_TAG, FIT_PRESETS, STATIC_CONFIG, context_path, export_site,
                                           preset_form, static_index)
 from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP
@@ -107,6 +108,24 @@ def test_export_precomputes_every_drain_preset_and_consolidation(site, path):
         assert read(data / 'fit' / f"{preset['id']}.json")['total'] == len(resources['nodes'])
     consolidation = read(data / 'consolidation.json')
     assert [v['node'] for v in consolidation['nodes']] == [n['name'] for n in resources['nodes']]
+    workloads = {(p['namespace'], p['owner']['kind'], p['owner']['name'])
+                 for n in resources['nodes'] for p in n['pods']
+                 if p['owner'] and p['owner']['name'] and p['owner']['kind'] not in ('DaemonSet', 'Node')}
+    assert workloads
+    for namespace, kind, name in workloads:
+        result = read(data / 'replicas' / namespace / kind / f'{name}.json')
+        assert result['requested'] == MAX_REPLICAS
+        assert result['workload'] == {'namespace': namespace, 'kind': kind, 'name': name}
+    assert not (data / 'replicas' / 'kube-system' / 'DaemonSet').exists()
+
+
+def test_export_precomputes_checkout_api_replicas(site):
+    # Given / When
+    result = read(site / 'data' / 'demo-shop' / 'replicas' / 'checkout' / 'Deployment' / 'checkout-api.json')
+
+    # Then
+    assert result['template']['pod'].startswith('checkout-api-')
+    assert result['total'] == 16
 
 
 def test_export_lists_presets_with_their_form(site):

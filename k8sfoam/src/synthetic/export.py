@@ -5,7 +5,9 @@
 The site is the regular frontend bundle switched to static mode: instead of the
 HTTP API it reads JSON files holding what each endpoint would have answered.
 Every drain and the consolidation plan are precomputed; the fit simulator offers
-FIT_PRESETS only, since an arbitrary pod cannot be answered ahead of time.
+FIT_PRESETS only, since an arbitrary pod cannot be answered ahead of time. Each
+workload's replica simulation is stored once with MAX_REPLICAS copies; the
+frontend cuts it down to the count asked for.
 """
 import argparse
 import json
@@ -14,7 +16,8 @@ import shutil
 from pathlib import Path
 from typing import Any, List
 from k8sfoam.src.app import parse_pod_spec
-from k8sfoam.src.common.scheduler import simulate_consolidation, simulate_drain, simulate_fit
+from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_REPLICAS, simulate_consolidation, simulate_drain,
+                                          simulate_fit, simulate_replicas)
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -100,6 +103,11 @@ def export_data(data_dir: Path, seed: int = DEFAULT_SEED) -> None:
         _write(out / 'consolidation.json', simulate_consolidation(nodes, pods))
         for preset in FIT_PRESETS:
             _write(out / 'fit' / f"{preset['id']}.json", simulate_fit(parse_pod_spec(preset['spec']), nodes, pods))
+        workloads = {(p.namespace, p.owner_kind, p.owner_name) for p in pods
+                     if p.owner_kind and p.owner_name and p.owner_kind not in DRAIN_SKIPPED_OWNERS}
+        for namespace, kind, name in sorted(workloads):
+            _write(out / 'replicas' / namespace / kind / f'{name}.json',
+                   simulate_replicas(namespace, kind, name, MAX_REPLICAS, nodes, pods))
 
 
 def export_site(out_dir: Path, seed: int = DEFAULT_SEED, frontend_dir: Path = FRONTEND_DIR) -> None:

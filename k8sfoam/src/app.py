@@ -8,7 +8,8 @@ from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import PodResources
-from k8sfoam.src.common.scheduler import simulate_consolidation, simulate_fit, simulate_drain
+from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_REPLICAS, simulate_consolidation, simulate_drain,
+                                          simulate_fit, simulate_replicas)
 from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 
@@ -53,6 +54,18 @@ def parse_pod_spec(body) -> PodResources:
     tolerations = [{k: t.get(k) for k in ('key', 'operator', 'value', 'effect')} for t in tolerations]
     return PodResources('hypothetical', None, cpu, memory, [], [], extended={k: v for k, v in extended.items() if v},
                         node_selector=node_selector, tolerations=tolerations)
+
+
+def parse_replica_count(value: Optional[str]) -> int:
+    """`count` of a replica simulation. Raises ValueError unless it is 1..MAX_REPLICAS."""
+    message = f'count must be an integer from 1 to {MAX_REPLICAS}, got {value!r}'
+    try:
+        count = int(value or '')
+    except ValueError:
+        raise ValueError(message)
+    if not 1 <= count <= MAX_REPLICAS:
+        raise ValueError(message)
+    return count
 
 
 class Registry(Protocol):
@@ -170,6 +183,25 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
                 return jsonify(simulate_consolidation(k8s_client.get_node_resources(), k8s_client.get_pod_resources()))
             except Exception as ex:
                 return str(ex), 500
+
+        @app.route('/simulate/replicas/<namespace>/<kind>/<name>', methods=['GET'])
+        def simulate_workload_replicas(namespace: str, kind: str, name: str):
+            try:
+                count = parse_replica_count(request.args.get('count'))
+            except ValueError as ex:
+                return str(ex), 400
+            # A DaemonSet runs one pod per matching node and a static pod belongs to its kubelet.
+            if kind in DRAIN_SKIPPED_OWNERS:
+                return f'{kind} pods have no replica count to scale', 400
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                result = simulate_replicas(namespace, kind, name, count,
+                                           k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+            except Exception as ex:
+                return str(ex), 500
+            if result is None:
+                return f'Workload {namespace}/{kind}/{name} not found', 404
+            return jsonify(result)
 
         @app.route('/events', methods=['GET'])
         def get_change_events():
