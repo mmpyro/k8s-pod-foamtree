@@ -11,9 +11,13 @@ const { GROUP_MODES, groupMode, groupNodes } = window.k8sTopology;
 const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
-const { FitModal, DrainButton, DrainReport, ConsolidationModal, drainSimulation } = window.k8sSimulate;
+const {
+  FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal, drainSimulation, scalableWorkload,
+} = window.k8sSimulate;
 
-const SIM_KINDS = { fit: "Fit simulation", drain: "Drain simulation", consolidation: "Consolidation" };
+const SIM_KINDS = {
+  fit: "Fit simulation", drain: "Drain simulation", consolidation: "Consolidation", replicas: "Replica simulation",
+};
 const { readHash, writeHash } = window.k8sUrlState;
 const api = window.k8sApi;
 
@@ -200,11 +204,12 @@ function App() {
   // previews one, so a pinned selection always wins over the pointer.
   const [selectedWorkload, setSelectedWorkload] = useState(initial.workload);
   const [hoveredWorkload, setHoveredWorkload] = useState(null);
-  // Latest fit, drain or consolidation simulation: { kind, summary, ok, verdicts: Map<node, verdict> }.
+  // Latest fit, drain, consolidation or replica simulation: { kind, summary, ok, verdicts: Map<node, verdict> }.
   // Its verdicts outline nodes in both views until cleared.
   const [sim, setSim] = useState(null);
   const [fitOpen, setFitOpen] = useState(false);
   const [consolidationOpen, setConsolidationOpen] = useState(false);
+  const [replicasOpen, setReplicasOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
   // Context name the loaded nodes came from; null until the first load.
@@ -353,7 +358,7 @@ function App() {
         spread.add(n.name);
       }
     }
-    return { key: selectedWorkload, replicas, nodes: spread.size };
+    return { key: selectedWorkload, replicas, nodes: spread.size, scalable: scalableWorkload(selectedWorkload) };
   }, [nodes, selectedWorkload]);
 
   // Resource picker: cpu and memory, then whatever this cluster can allocate.
@@ -481,6 +486,7 @@ function App() {
       setSim(null);
       setFitOpen(false);
       setConsolidationOpen(false);
+      setReplicasOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -661,6 +667,7 @@ function App() {
           canExport={nodes.length > 0}
           onFit={() => setFitOpen(true)}
           onConsolidation={() => setConsolidationOpen(true)}
+          onReplicas={() => setReplicasOpen(true)}
         />
 
         {/* Active simulation — explains the green/red node outlines. A strip,
@@ -741,6 +748,12 @@ function App() {
       {consolidationOpen && (
         <ConsolidationModal ctx={ctxName} memUnit={memUnit} fmtMem={fmtMem}
           onSimulation={setSim} onClose={() => setConsolidationOpen(false)} />
+      )}
+
+      {replicasOpen && workloadStats && workloadStats.scalable && (
+        <ReplicasModal key={workloadStats.key} ctx={ctxName} workload={workloadStats.scalable}
+          current={workloadStats.replicas} memUnit={memUnit} fmtMem={fmtMem}
+          onSimulation={setSim} onClose={() => setReplicasOpen(false)} />
       )}
 
       <TweaksPanel>
@@ -1118,7 +1131,7 @@ function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
 function Header({
   metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
   onMenu, onRefresh, refreshing, liveStatus, workload, onClearWorkload, onExport, canExport,
-  onFit, onConsolidation,
+  onFit, onConsolidation, onReplicas,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
@@ -1166,6 +1179,11 @@ function Header({
               <span className="wl-chip-meta">
                 {workload.replicas} replica{workload.replicas === 1 ? "" : "s"} · {workload.nodes} node{workload.nodes === 1 ? "" : "s"}
               </span>
+              {workload.scalable && (
+                <button className="wl-chip-sim" onClick={onReplicas} title="Can I scale this workload? Simulate more replicas">
+                  +N
+                </button>
+              )}
               <button className="wl-chip-clear" onClick={onClearWorkload} title="Clear selection (Esc)">×</button>
             </span>
           )}

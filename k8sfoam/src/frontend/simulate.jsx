@@ -1,8 +1,8 @@
-// Scheduling simulators: "Can I fit this pod?", "Simulate drain" and the
-// consolidation finder. The backend runs the scheduler filter and sends
-// verdicts with reason slugs; this file is the single place that decides how
-// they read and which nodes the map outlines, so the modals, the drain report
-// and both views agree.
+// Scheduling simulators: "Can I fit this pod?", "Simulate drain", the
+// consolidation finder and "Can I scale this workload?". The backend runs the
+// scheduler filter and sends verdicts with reason slugs; this file is the
+// single place that decides how they read and which nodes the map outlines,
+// so the modals, the drain report and both views agree.
 
 const { useState, useEffect } = React;
 const { isBytes } = window.k8sResources;
@@ -131,6 +131,25 @@ function consolidationSimulation(result) {
     kind: "consolidation",
     summary: n ? `${n} of ${result.total} nodes could be removed` : "no node could be removed",
     ok: n > 0,
+    verdicts,
+  };
+}
+
+// Nodes taking copies read "ok". When the workload cannot grow by the whole
+// count, the nodes that took none could not take one either: "fail".
+function replicasSimulation(result) {
+  const verdicts = new Map();
+  for (const v of result.nodes) {
+    if (v.replicas > 0) verdicts.set(v.node, "ok");
+    else if (!result.fits) verdicts.set(v.node, "fail");
+  }
+  const { name } = result.workload;
+  return {
+    kind: "replicas",
+    summary: result.fits
+      ? `${name} +${result.requested}: all fit`
+      : `${name} +${result.requested}: ${result.placed} fit, ${result.requested - result.placed} pending`,
+    ok: result.fits,
     verdicts,
   };
 }
@@ -564,7 +583,164 @@ function ConsolidationModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
   );
 }
 
+/* ─────────── Can I scale this workload? ─────────── */
+
+// Matches the backend's MAX_REPLICAS; the static demo stores runs of this many copies.
+const MAX_REPLICAS = 100;
+// A DaemonSet runs one pod per matching node and a static pod belongs to its kubelet.
+const UNSCALABLE = ["DaemonSet", "Node"];
+
+// The workload a pinned key names, or null when it has no replica count to scale.
+// Only owned pods have a "namespace/Kind/name" key; a name-only key is a guess.
+function scalableWorkload(key) {
+  const parts = (key || "").split("/");
+  if (parts.length !== 3 || UNSCALABLE.includes(parts[1])) return null;
+  const [namespace, kind, name] = parts;
+  return { namespace, kind, name };
+}
+
+function fmtToleration(t) {
+  if (!t.key) return "*";
+  const kv = t.operator === "Exists" ? t.key : `${t.key}=${t.value || ""}`;
+  return t.effect ? `${kv}:${t.effect}` : kv;
+}
+
+function TemplateLine({ t, memUnit, fmtMem }) {
+  const ext = Object.entries(t.extended).sort().map(([name, v]) =>
+    `${name}=${isBytes(name) ? `${fmtMem(kbToMib(v), memUnit)} ${memUnit}` : v}`);
+  const selector = Object.entries(t.nodeSelector).map(([k, v]) => `${k}=${v}`);
+  return (
+    <div className="sim-template">
+      <span>copies of <code>{t.pod}</code></span>
+      <span>requests <code>{(t.cpu / 1000).toFixed(2)} cores · {fmtMem(kbToMib(t.memory), memUnit)} {memUnit}</code></span>
+      {ext.length > 0 && <span>extended <code>{ext.join(", ")}</code></span>}
+      {selector.length > 0 && <span>nodeSelector <code>{selector.join(", ")}</code></span>}
+      {t.tolerations.length > 0 && <span>tolerations <code>{t.tolerations.map(fmtToleration).join(", ")}</code></span>}
+    </div>
+  );
+}
+
+function replicasHeadline(r, current) {
+  const name = r.workload.name;
+  if (r.fits) {
+    const lead = r.requested === 1 ? "1 more replica fits" : `All ${r.requested} more replicas fit`;
+    return `${lead} — ${name} can scale from ${current} to ${current + r.requested}.`;
+  }
+  if (r.placed === 0) return `No more replicas fit — replica ${current + 1} of ${name} would stay Pending.`;
+  return `Only ${r.placed} of ${r.requested} more replicas fit — ${name} can grow from ${current} to ` +
+    `${current + r.placed}, and replica ${current + r.placed + 1} would stay Pending.`;
+}
+
+function ReplicasModal({ ctx, workload, current, memUnit, fmtMem, onSimulation, onClose }) {
+  // Asking to double the workload answers the common question without typing.
+  const initial = Math.min(Math.max(current, 1), MAX_REPLICAS);
+  const [countText, setCountText] = useState(String(initial));
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const count = Number(countText);
+  const valid = Number.isInteger(count) && count >= 1 && count <= MAX_REPLICAS;
+
+  const run = async (n) => {
+    setBusy(true);
+    try {
+      const res = await window.k8sApi.replicas(ctx, workload, n);
+      setResult(res);
+      setError(null);
+      onSimulation(replicasSimulation(res));
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => { run(initial); }, []);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (valid) run(count);
+  };
+
+  const landing = result
+    ? result.nodes.filter(v => v.replicas > 0).sort((a, b) => (b.replicas - a.replicas) || a.node.localeCompare(b.node))
+    : [];
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="overlay-card sim-card" onClick={e => e.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <div className="overlay-title">Can I scale {workload.name}?</div>
+            <div className="overlay-sub">
+              {workload.namespace}/{workload.kind} · {plural(current, "replica")} now · copy its pod and place each copy in turn
+            </div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
+        </div>
+
+        <form className="sim-form" onSubmit={submit}>
+          <label className="sim-field">
+            <span className="ov-label">More replicas</span>
+            <input type="number" min="1" max={MAX_REPLICAS} step="1" value={countText}
+              onChange={e => setCountText(e.target.value)} />
+          </label>
+          <div className="sim-actions">
+            {!valid && <span className="sim-error">Enter a whole number from 1 to {MAX_REPLICAS}</span>}
+            {error && <span className="sim-error">{error}</span>}
+            <button type="submit" className={`btn-primary ${busy ? "spinning" : ""}`} disabled={busy || !valid}>
+              {busy ? "Simulating…" : "Simulate"}
+            </button>
+          </div>
+        </form>
+
+        {result && (
+          <div className="overlay-pods">
+            <TemplateLine t={result.template} memUnit={memUnit} fmtMem={fmtMem} />
+            <div className={`sim-summary ${result.fits ? "sim-summary-ok" : "sim-summary-fail"}`}>
+              {replicasHeadline(result, current)}
+            </div>
+
+            {!result.fits && (
+              <div className="sim-group">
+                <div className="ov-section-title">Where it stops</div>
+                <div className="sim-reasons">
+                  <span>
+                    {result.total === 0
+                      ? "the cluster has no nodes"
+                      : `0/${result.total} nodes available: ` +
+                        result.pending.map(x => `${x.nodes} ${reasonLabel(x.slug)}`).join(", ")}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {landing.length > 0 && (
+              <div className="sim-group">
+                <div className="ov-section-title">Where they land · {plural(landing.length, "node")}</div>
+                <div className="pod-rows">
+                  {landing.map(v => (
+                    <div key={v.node} className="pod-row sim-row sim-row-ok">
+                      <div className="pod-row-name"><code>{v.node}</code></div>
+                      <div className="pod-row-stat">
+                        <span className="pod-row-num">+{v.replicas}</span>
+                        <span className="pod-row-unit">{v.replicas === 1 ? "replica" : "replicas"}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <SimCaveat />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 window.k8sSimulate = {
   REASONS, reasonLabel, parseSelector, parseTolerations, fitSimulation, drainSimulation, consolidationSimulation,
-  FitModal, DrainButton, DrainReport, ConsolidationModal,
+  replicasSimulation, scalableWorkload, FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal,
 };
