@@ -2,7 +2,7 @@ from collections import defaultdict
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.common.node_status import node_warnings, stranded_devices
 from k8sfoam.src.common.node_topology import node_topology
-from k8sfoam.src.common.pod_audit import pod_findings
+from k8sfoam.src.common.pod_audit import pod_findings, workload_findings
 from typing import Callable, Iterator
 
 
@@ -21,6 +21,20 @@ class FoamTreeMapper():
         self.__pods_by_node: dict = defaultdict(list)
         for pod in pod_resources:
             self.__pods_by_node[pod.node_name].append(pod)
+        self.__workload_findings = workload_findings(self.__pods_by_workload(), {n.name: n for n in self.__nodes})
+
+    def __pods_by_workload(self) -> dict:
+        """Scheduled pods grouped by (namespace, kind, name) of their workload.
+
+        Pending pods reserve nothing on any node, so they never count as a replica.
+        Static and naked pods have no workload to share.
+        """
+        groups: dict = defaultdict(list)
+        for node in self.__nodes:
+            for pod in self.__pods_by_node.get(node.name, []):
+                if pod.owner_kind not in (None, 'Node') and pod.owner_name:
+                    groups[(pod.namespace, pod.owner_kind, pod.owner_name)].append(pod)
+        return groups
 
     def __build_pod_groups(self, pod, value: Callable) -> list:
         """Build FoamTree child groups for a single pod."""
@@ -53,8 +67,9 @@ class FoamTreeMapper():
             'labels': pod.labels or {},
             'qos': pod.qos_class,
             'hasInitContainers': len(pod.init_containers) > 0,
-            'findings': pod_findings(pod, node),
+            'findings': pod_findings(pod, node) + self.__workload_findings.get((pod.namespace, pod.name), []),
             'extended': dict(pod.extended or {}),
+            'owner': {'kind': pod.owner_kind, 'name': pod.owner_name} if pod.owner_kind else None,
         }
 
     def __node_usage(self, node) -> dict:
@@ -105,6 +120,25 @@ class FoamTreeMapper():
             foam_node = {'label': node.name, 'weight': value(node), 'groups': foam_pods, **self.__node_metadata(node)}
             result['groups'].append(foam_node)
         return result
+
+    def __container(self, c, init: bool) -> dict:
+        return {'name': c.name, 'init': init, 'cpu': c.cpu or 0, 'memory': c.memory or 0,
+                'extended': dict(c.extended or {})}
+
+    def combined(self) -> dict:
+        """Every node with cpu, memory and extended resources side by side, plus available_resources()."""
+        nodes = []
+        for node in self.__nodes:
+            pods = []
+            for pod in self.__pods_by_node.get(node.name, []):
+                containers = [self.__container(c, False) for c in pod.containers]
+                containers += [self.__container(c, True) for c in pod.init_containers
+                               if c.cpu or c.memory or any((c.extended or {}).values())]
+                pods.append({'name': pod.name, 'cpu': pod.cpu or 0, 'memory': pod.memory or 0,
+                             'containers': containers, **self.__pod_metadata(pod, node)})
+            nodes.append({'name': node.name, 'cpu': node.cpu or 0, 'memory': node.memory or 0,
+                          'pods': pods, **self.__node_metadata(node)})
+        return {'resources': self.available_resources(), 'nodes': nodes}
 
     def transform_cpu_resources_to_foamtree(self) -> dict:
         return self.transform('cpu')

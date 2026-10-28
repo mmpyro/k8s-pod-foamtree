@@ -3,7 +3,7 @@
 const { useState, useEffect, useMemo, useRef } = React;
 const { NodeCard, gridLayout, SLOT_GAP, ZONE_HEADER } = window.k8sTreemap;
 const { Scene3D } = window.k8sScene3D;
-const { workloadKey } = window.k8sWorkload;
+const { workloadKey, workloadLabel } = window.k8sWorkload;
 const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
 const { QOS_INFO, QOS_ORDER, NEUTRAL_HUE } = window.k8sQos;
@@ -12,6 +12,12 @@ const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
 const { FitModal, DrainButton, DrainReport, drainSimulation } = window.k8sSimulate;
+const { readHash, writeHash } = window.k8sUrlState;
+const api = window.k8sApi;
+
+// ?embed=1 — the dashboard inside a docs page: sidebar collapsed, with a link
+// out to the full-page demo. Separate from the #… view state on purpose.
+const EMBED = new URLSearchParams(window.location.search).get("embed") === "1";
 
 const COLOR_MODES = [
   { id: "node", label: "Node" },
@@ -38,6 +44,30 @@ const VIEWS = [
   { id: "3d", label: "3D Cubes", icon: "cube" },
 ];
 
+const MEM_UNITS = ["MiB", "GiB", "TiB"];
+
+// What the view shows with nothing in the URL; also what writeHash leaves out.
+const URL_DEFAULTS = {
+  view: "2d", metric: "cpu", colorBy: "node", groupBy: "none", memUnit: "GiB", query: "", workload: null,
+};
+
+// Hash values checked against what the UI offers; anything else is its default.
+// The metric is kept as is: only loaded data can tell whether it exists, and
+// App falls back to CPU once it does.
+function linkState(raw) {
+  const pick = (v, ids, field) => (ids.includes(v) ? v : URL_DEFAULTS[field]);
+  return {
+    ctx: raw.ctx || null,
+    view: pick(raw.view, VIEWS.map(v => v.id), "view"),
+    metric: raw.metric || URL_DEFAULTS.metric,
+    colorBy: pick(raw.colorBy, COLOR_MODES.map(c => c.id), "colorBy"),
+    groupBy: pick(raw.groupBy, GROUP_MODES.map(g => g.id), "groupBy"),
+    memUnit: pick(raw.memUnit, MEM_UNITS, "memUnit"),
+    query: raw.query || URL_DEFAULTS.query,
+    workload: raw.workload || URL_DEFAULTS.workload,
+  };
+}
+
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "colorScheme": "spectrum",
   "nodeStyle": "gradient",
@@ -46,7 +76,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "#7c5cff"
 }/*EDITMODE-END*/;
 
-// Backend memory weights are decimal kB (1 kB = 1000 bytes),
+// Backend memory values are decimal kB (1 kB = 1000 bytes),
 // so MiB = kB * 1000 / 1024^2 — not a plain /1024, which would treat kB as KiB.
 function kbToMib(kb) {
   return (kb * 1000) / (1024 * 1024);
@@ -60,102 +90,59 @@ function extOf(extended) {
   return out;
 }
 
-// Merge separate CPU and Memory data structures from backend into rich unified structures.
-// Extended resources ride on both payloads, so they are read off the CPU one.
-function mergeResources(cpuData, memData) {
-  const cpuGroups = cpuData.groups || [];
-  const memGroups = memData.groups || [];
-
-  const memNodesMap = new Map();
-  for (const mg of memGroups) {
-    memNodesMap.set(mg.label, mg);
-  }
-
-  return cpuGroups.map((cg, idx) => {
-    const mg = memNodesMap.get(cg.label) || { weight: 0, groups: [] };
-
-    // Group pods by label
-    const cpuPods = cg.groups || [];
-    const memPods = mg.groups || [];
-
-    const memPodsMap = new Map();
-    for (const mp of memPods) {
-      memPodsMap.set(mp.label, mp);
-    }
-
-    const pods = [];
+// Node objects the views share, from the GET /resources payload: memory and
+// byte-sized extended resources converted to MiB, pod requests summed per node.
+function toNodes(payload) {
+  return (payload.nodes || []).map((n, idx) => {
     let cpuUsed = 0;
     let memUsed = 0;
     const extUsed = {};
 
-    for (const cp of cpuPods) {
-      if (cp.label === 'empty') continue;
-
-      const mp = memPodsMap.get(cp.label) || { weight: 0, groups: [] };
-
-      // Group containers by label
-      const cpuConts = cp.groups || [];
-      const memConts = mp.groups || [];
-      const memContsMap = new Map();
-      for (const mc of memConts) {
-        memContsMap.set(mc.label, mc);
-      }
-
-      const containers = cpuConts.map(cc => {
-        const mc = memContsMap.get(cc.label) || { weight: 0 };
-        return {
-          name: cc.label,
-          // Backend marks init containers with a grey color hint
-          init: !!cc.color,
-          cpu: cc.weight || 0,
-          // Convert memory from kB to MiB
-          mem: kbToMib(mc.weight || 0),
-          ext: extOf(cc.extended)
-        };
-      });
-
-      const podCpu = cp.weight || 0;
-      const podMem = mp.weight || 0;
-
-      cpuUsed += podCpu;
-      memUsed += podMem;
-      const podExt = extOf(cp.extended);
+    const pods = (n.pods || []).map(p => {
+      const podExt = extOf(p.extended);
+      cpuUsed += p.cpu || 0;
+      memUsed += p.memory || 0;
       for (const [name, v] of Object.entries(podExt)) extUsed[name] = (extUsed[name] || 0) + v;
 
-      pods.push({
-        name: cp.label,
-        shortName: cp.label.split('-')[0],
-        // Selector metadata for the query bar. Absent on an older backend, so
-        // every field falls back to a value that simply never matches.
-        namespace: cp.namespace || "",
-        labels: cp.labels || {},
-        qos: cp.qos || "",
-        hasInit: !!cp.hasInitContainers,
+      return {
+        name: p.name,
+        shortName: p.name.split('-')[0],
+        // Selector metadata for the query bar.
+        namespace: p.namespace || "",
+        labels: p.labels || {},
+        qos: p.qos || "",
+        hasInit: !!p.hasInitContainers,
         // Best-practice rule slugs, decided by the backend.
-        findings: cp.findings || [],
+        findings: p.findings || [],
+        // Controlling workload { kind, name }; null for naked pods and old data.
+        owner: p.owner || null,
         // Effective request (what the scheduler reserves) — init containers
         // run sequentially, so this is max(sum regular, max init), not a sum.
-        cpu: podCpu,
-        // Convert memory from kB to MiB
-        mem: kbToMib(podMem),
+        cpu: p.cpu || 0,
+        mem: kbToMib(p.memory || 0),
         ext: podExt,
-        containers
-      });
-    }
+        containers: (p.containers || []).map(c => ({
+          name: c.name,
+          init: !!c.init,
+          cpu: c.cpu || 0,
+          mem: kbToMib(c.memory || 0),
+          ext: extOf(c.extended)
+        }))
+      };
+    });
 
-    // Convert node capacity from kB to MiB
-    const memCapacity = kbToMib(mg.weight || 0);
+    const cpuCapacity = n.cpu || 0;
+    const memCapacity = kbToMib(n.memory || 0);
     const convertedMemUsed = kbToMib(memUsed);
-    // Placement labels from the backend; null wherever the node is unlabelled,
-    // and an empty object on an older backend.
-    const topo = cg.topology || {};
-    const extCap = extOf(cg.extended);
+    // Placement labels from the backend; null wherever the node is unlabelled.
+    const topo = n.topology || {};
+    const extCap = extOf(n.extended);
     const extFree = {};
     for (const [name, cap] of Object.entries(extCap)) extFree[name] = Math.max(0, cap - (extUsed[name] || 0));
 
     return {
       id: `node-${idx}`,
-      name: cg.label,
+      name: n.name,
       topology: {
         zone: topo.zone || null,
         region: topo.region || null,
@@ -163,71 +150,94 @@ function mergeResources(cpuData, memData) {
         nodePool: topo.nodePool || null,
         capacityType: topo.capacityType || null,
       },
-      cpuCapacity: cg.weight || 0,
-      memCapacity: memCapacity,
+      cpuCapacity,
+      memCapacity,
       cpuUsed,
       memUsed: convertedMemUsed,
-      cpuFree: Math.max(0, (cg.weight || 0) - cpuUsed),
+      cpuFree: Math.max(0, cpuCapacity - cpuUsed),
       memFree: Math.max(0, memCapacity - convertedMemUsed),
       extCap,
       extUsed,
       extFree,
       pods,
-      // Node health from the backend. Absent on an older backend, so every
-      // field falls back to what a plainly healthy node would report.
-      warnings: cg.warnings || [],
-      taints: cg.taints || [],
-      conditions: cg.conditions || {},
-      unschedulable: !!cg.unschedulable,
-      status: statusOf(cg.warnings || [])
+      // Node health from the backend.
+      warnings: n.warnings || [],
+      taints: n.taints || [],
+      conditions: n.conditions || {},
+      unschedulable: !!n.unschedulable,
+      status: statusOf(n.warnings || [])
     };
   });
 }
 
 function App() {
   const [tw, setTweak] = useTweaks(TWEAK_DEFAULTS);
+  // The view a link opened with, read once.
+  const [initial] = useState(() => linkState(readHash(window.location.hash)));
 
-  const [view, setView] = useState("2d");
+  const [view, setView] = useState(initial.view);
   const [zoom, setZoom] = useState(0.7);
-  const [metric, setMetric] = useState("cpu");
-  const [colorBy, setColorBy] = useState("node");
+  const [metric, setMetric] = useState(initial.metric);
+  const [colorBy, setColorBy] = useState(initial.colorBy);
   // "none" keeps the flat map; any other mode boxes nodes by that topology label.
-  const [groupBy, setGroupBy] = useState("none");
-  const [memUnit, setMemUnit] = useState("GiB");
+  const [groupBy, setGroupBy] = useState(initial.groupBy);
+  const [memUnit, setMemUnit] = useState(initial.memUnit);
   const [refreshInterval, setRefreshInterval] = useState(60);
+  // Live: refetch when the server's watch cache reports a change (/events).
+  // Polling every refreshInterval stays on whenever the stream is not live.
+  const [liveMode, setLiveMode] = useState(true);
+  // "connecting" | "live" | "reconnecting" | "off" (no stream: polling only).
+  const [liveStatus, setLiveStatus] = useState("off");
   const [contexts, setContexts] = useState([]);
   const [contextIdx, setContextIdx] = useState(0);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initial.query);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(Date.now());
   const [focused, setFocused] = useState(null);
   // Cross-node workload highlighting. A click pins a workload; hover only
   // previews one, so a pinned selection always wins over the pointer.
-  const [selectedWorkload, setSelectedWorkload] = useState(null);
+  const [selectedWorkload, setSelectedWorkload] = useState(initial.workload);
   const [hoveredWorkload, setHoveredWorkload] = useState(null);
   // Latest fit or drain simulation: { kind, summary, ok, verdicts: Map<node, verdict> }.
   // Its verdicts outline nodes in both views until cleared.
   const [sim, setSim] = useState(null);
   const [fitOpen, setFitOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
+  // Context name the loaded nodes came from; null until the first load.
+  const [loadedCtx, setLoadedCtx] = useState(null);
   const [error, setError] = useState(null);
   const [exportError, setExportError] = useState(null);
+  // Why the view differs from the link that opened it, e.g. an unknown context.
+  const [urlNotice, setUrlNotice] = useState(null);
   const gridWrapRef = useRef(null);
   const captureRef = useRef(null);
+  // Set by a link that switches context, so the switch keeps the link's pin.
+  const keepPinRef = useRef(false);
+  // Context whose data a link's pinned workload is still to be checked against.
+  const pinCheckRef = useRef(null);
+
+  // Index of the context a link names. An unknown name keeps `fallback` and
+  // says so, rather than leaving the link's recipient on an empty view.
+  const resolveContext = (list, name, fallback) => {
+    if (!name) return fallback;
+    const idx = list.findIndex(c => c.context === name);
+    if (idx !== -1) return idx;
+    const where = api.isStatic ? "the demo" : "your kubeconfig";
+    setUrlNotice(`Context "${name}" from the link is not in ${where}; showing ${shortContext(list[fallback].context)} instead.`);
+    return fallback;
+  };
 
   // Load contexts from server
   useEffect(() => {
-    fetch('/contexts')
-      .then(res => {
-        if (!res.ok) throw new Error('API failed');
-        return res.json();
-      })
+    api.contexts()
       .then(data => {
         if (data && data.length > 0) {
           setContexts(data);
           const activeIdx = data.findIndex(c => c.active);
-          setContextIdx(activeIdx !== -1 ? activeIdx : 0);
+          const idx = resolveContext(data, initial.ctx, activeIdx !== -1 ? activeIdx : 0);
+          setContextIdx(idx);
+          if (initial.workload) pinCheckRef.current = data[idx].context;
         } else {
           console.warn("No contexts config found");
           setContexts([]);
@@ -242,33 +252,36 @@ function App() {
   }, []);
 
   const currentCtx = contexts[contextIdx];
-  const ctxParam = currentCtx ? `?context=${encodeURIComponent(currentCtx.context)}` : '';
+  const ctxName = currentCtx ? currentCtx.context : null;
+
+  // One load at a time: a request made meanwhile (a change event, a context
+  // switch) runs once the current one ends, with the latest context.
+  const loadingRef = useRef(false);
+  const reloadRef = useRef(false);
 
   // Fetch cluster resource data
   const loadData = async () => {
+    if (loadingRef.current) {
+      reloadRef.current = true;
+      return;
+    }
+    loadingRef.current = true;
     setRefreshing(true);
     try {
-
-      const [cpuRes, memRes] = await Promise.all([
-        fetch(`/resources/cpu${ctxParam}`).then(r => {
-          if (!r.ok) throw new Error(`CPU resources endpoint returned status ${r.status}`);
-          return r.json();
-        }),
-        fetch(`/resources/memory${ctxParam}`).then(r => {
-          if (!r.ok) throw new Error(`Memory resources endpoint returned status ${r.status}`);
-          return r.json();
-        })
-      ]);
-
-      const merged = mergeResources(cpuRes, memRes);
-      setNodes(merged);
+      setNodes(toNodes(await api.resources(ctxName)));
+      setLoadedCtx(ctxName);
       setError(null);
       setLastRefresh(Date.now());
     } catch (err) {
       console.error("Error loading resources from live cluster:", err);
       setError(err.message || String(err));
     } finally {
+      loadingRef.current = false;
       setRefreshing(false);
+      if (reloadRef.current) {
+        reloadRef.current = false;
+        loadDataRef.current();
+      }
     }
   };
 
@@ -280,12 +293,18 @@ function App() {
 
   // Switching context swaps the whole data set, so a workload pinned in the
   // previous cluster is meaningless in the new one: it would match nothing and
-  // dim every pod on screen with no pod glowing to explain why.
+  // dim every pod on screen with no pod glowing to explain why. Resolving the
+  // first context is not a switch, and a link that switches brings its own pin.
+  const prevCtxRef = useRef(null);
   useEffect(() => {
-    setSelectedWorkload(null);
+    const prev = prevCtxRef.current;
+    prevCtxRef.current = ctxName;
+    if (prev === null || prev === ctxName) return;
+    if (keepPinRef.current) keepPinRef.current = false;
+    else setSelectedWorkload(null);
     setHoveredWorkload(null);
     setSim(null);
-  }, [contextIdx]);
+  }, [ctxName]);
 
   // Keep a stable ref to the latest loadData so the auto-refresh interval
   // always calls the current closure without re-subscribing each render.
@@ -326,7 +345,7 @@ function App() {
     let replicas = 0;
     for (const n of nodes) {
       for (const p of n.pods) {
-        if (workloadKey(p.name) !== selectedWorkload) continue;
+        if (workloadKey(p) !== selectedWorkload) continue;
         replicas++;
         spread.add(n.name);
       }
@@ -339,10 +358,60 @@ function App() {
   const metrics = useMemo(() => [...BASE_METRICS, ...extended.map(resourceMeta)], [extended]);
 
   // A context without GPUs cannot show a GPU map; fall back instead of
-  // drawing an empty grid. Skipped while nothing is loaded yet.
+  // drawing an empty grid. Skipped while nothing is loaded yet, and while the
+  // data on screen still belongs to the previous context.
   useEffect(() => {
-    if (nodes.length > 0 && !metrics.some(m => m.id === metric)) setMetric("cpu");
-  }, [metrics, nodes.length]);
+    if (nodes.length > 0 && loadedCtx === ctxName && !metrics.some(m => m.id === metric)) setMetric("cpu");
+  }, [metrics, nodes.length, metric, loadedCtx, ctxName]);
+
+  // A link can pin a workload the cluster no longer runs, which would dim every
+  // pod; once its context has loaded, drop such a pin.
+  useEffect(() => {
+    if (pinCheckRef.current === null || loadedCtx !== pinCheckRef.current) return;
+    pinCheckRef.current = null;
+    if (workloadStats && workloadStats.replicas === 0) setSelectedWorkload(null);
+  }, [loadedCtx, workloadStats]);
+
+  // Applies a link pasted into an open tab. Every field is set, so keys the
+  // link leaves out go back to their defaults.
+  const applyLink = (link) => {
+    setView(link.view);
+    setMetric(link.metric);
+    setColorBy(link.colorBy);
+    setGroupBy(link.groupBy);
+    setMemUnit(link.memUnit);
+    setQuery(link.query);
+    setSelectedWorkload(link.workload);
+    setUrlNotice(null);
+    if (contexts.length === 0) return;
+    const idx = resolveContext(contexts, link.ctx, contextIdx);
+    keepPinRef.current = idx !== contextIdx;
+    setContextIdx(idx);
+    pinCheckRef.current = link.workload ? contexts[idx].context : null;
+  };
+  const applyLinkRef = useRef(applyLink);
+  applyLinkRef.current = applyLink;
+
+  // replaceState fires no hashchange, so only an edited or pasted URL lands here.
+  useEffect(() => {
+    const onHash = () => applyLinkRef.current(linkState(readHash(window.location.hash)));
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  // Mirror the view into the URL. Replace, not push: typing a query must not
+  // flood history. Waits for /contexts, so an incoming link is applied before
+  // anything is written over it.
+  useEffect(() => {
+    if (!ctxName) return;
+    const hash = writeHash(
+      { ctx: ctxName, view, metric, colorBy, groupBy, memUnit, query, workload: selectedWorkload },
+      URL_DEFAULTS,
+    );
+    if (hash === window.location.hash) return;
+    const { pathname, search } = window.location;
+    window.history.replaceState(null, "", `${pathname}${search}${hash}`);
+  }, [ctxName, view, metric, colorBy, groupBy, memUnit, query, selectedWorkload]);
 
   // Totals
   const totals = useMemo(() => {
@@ -359,13 +428,40 @@ function App() {
     return t;
   }, [nodes]);
 
-  // Auto-refresh tick — re-fetch live cluster data every refreshInterval seconds.
+  // Live updates. The browser reconnects a dropped stream by itself; it gives
+  // up (CLOSED) only when the server refuses it, e.g. a 404 under --no-watch.
   useEffect(() => {
+    if (!liveMode || contexts.length === 0) {
+      setLiveStatus("off");
+      return;
+    }
+    const source = api.events(ctxName);
+    if (!source) {
+      setLiveStatus("off");
+      return;
+    }
+    let reconnect = false;
+    setLiveStatus("connecting");
+    source.addEventListener("ready", () => {
+      setLiveStatus("live");
+      // The context switch already loaded once; a reconnect may have missed changes.
+      if (reconnect) loadDataRef.current();
+      reconnect = true;
+    });
+    source.addEventListener("changed", () => loadDataRef.current());
+    source.onerror = () => setLiveStatus(source.readyState === EventSource.CLOSED ? "off" : "reconnecting");
+    return () => source.close();
+  }, [liveMode, contextIdx, contexts.length]);
+
+  // Auto-refresh tick — re-fetch live cluster data every refreshInterval
+  // seconds, unless the live stream is delivering changes.
+  useEffect(() => {
+    if (liveStatus === "live" || api.isStatic) return;
     const id = setInterval(() => {
       if (contexts.length > 0) loadDataRef.current();
     }, refreshInterval * 1000);
     return () => clearInterval(id);
-  }, [refreshInterval, contexts.length]);
+  }, [refreshInterval, contexts.length, liveStatus]);
 
   // React fires no mouseleave when the hovered pod unmounts — a refresh
   // dropping the pod or a view switch both do that — so a stale preview would
@@ -437,6 +533,10 @@ function App() {
     const ctx = contexts[contextIdx] ? contexts[contextIdx].context : "";
     try {
       setExportError(null);
+      if (kind === "link") {
+        await copyText(window.location.href);
+        return true;
+      }
       if (kind === "json") {
         const body = k.reportJson({ nodes, totals, context: ctx, metric, query, match });
         k.download(new Blob([body], { type: "application/json" }), k.fileName(ctx, "report", "json"));
@@ -504,6 +604,7 @@ function App() {
         metric={metric} setMetric={setMetric} metrics={metrics} totals={totals}
         memUnit={memUnit} setMemUnit={setMemUnit}
         refreshInterval={refreshInterval} setRefreshInterval={setRefreshInterval}
+        liveMode={liveMode} setLiveMode={setLiveMode} liveStatus={liveStatus}
         contexts={contexts}
         contextIdx={contextIdx} setContextIdx={setContextIdx}
         doRefresh={loadData} refreshing={refreshing}
@@ -529,6 +630,12 @@ function App() {
             <span>Export failed: {exportError}</span>
           </div>
         )}
+        {urlNotice && (
+          <div className="error-banner notice-banner">
+            <span>{urlNotice}</span>
+            <button onClick={() => setUrlNotice(null)} title="Dismiss">×</button>
+          </div>
+        )}
 
         <Header
           metric={metric}
@@ -543,6 +650,7 @@ function App() {
           onMenu={() => setSidebarOpen(s => !s)}
           onRefresh={loadData}
           refreshing={refreshing}
+          liveStatus={liveStatus}
           workload={workloadStats}
           onClearWorkload={() => setSelectedWorkload(null)}
           onExport={onExport}
@@ -609,11 +717,11 @@ function App() {
 
       {focused && (
         <FocusOverlay key={focused.name} node={focused} onClose={() => setFocused(null)} metric={metric} memUnit={memUnit}
-          ctxParam={ctxParam} onSimulation={setSim} />
+          ctx={ctxName} onSimulation={setSim} />
       )}
 
       {fitOpen && (
-        <FitModal ctxParam={ctxParam} memUnit={memUnit} fmtMem={fmtMem}
+        <FitModal ctx={ctxName} memUnit={memUnit} fmtMem={fmtMem}
           onSimulation={setSim} onClose={() => setFitOpen(false)} />
       )}
 
@@ -655,7 +763,7 @@ function App() {
 
 function Sidebar({
   open, onToggle, view, setView, zoom, setZoom, metric, setMetric, metrics, totals, memUnit, setMemUnit,
-  refreshInterval, setRefreshInterval,
+  refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
   audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery
 }) {
@@ -779,10 +887,29 @@ function Sidebar({
       <div className="sidebar-section">
         <div className="section-label">
           <span>Refresh</span>
-          <span className="section-value">{refreshInterval}s</span>
+          <span className="section-value">
+            {api.isStatic ? "snapshot" : liveStatus === "live" ? "on change" : `${refreshInterval}s`}
+          </span>
         </div>
-        <input type="range" min="5" max="600" step="5" value={refreshInterval}
-          onChange={e => setRefreshInterval(+e.target.value)} className="slider" />
+        {!api.isStatic && (
+          <>
+            <div className="seg seg-2">
+              <button className={liveMode ? "seg-on" : ""} onClick={() => setLiveMode(true)}>Live</button>
+              <button className={liveMode ? "" : "seg-on"} onClick={() => setLiveMode(false)}>Interval</button>
+            </div>
+            {/* The slider still sets the fallback while Live is connecting or down. */}
+            <input type="range" min="5" max="600" step="5" value={refreshInterval}
+              disabled={liveStatus === "live"}
+              onChange={e => setRefreshInterval(+e.target.value)} className="slider" />
+          </>
+        )}
+        {api.isStatic ? (
+          <div className="seg-note">
+            Demo data: a fixed snapshot of a synthetic cluster. Run <code>k8sfoams --synthetic</code> for one that keeps changing.
+          </div>
+        ) : liveMode && liveStatus === "off" && (
+          <div className="seg-note">Live updates are unavailable, so the view polls instead.</div>
+        )}
         <button className={`btn-primary ${refreshing ? "spinning" : ""}`} onClick={doRefresh}>
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
@@ -795,7 +922,7 @@ function Sidebar({
       <div className="sidebar-section">
         <div className="section-label">Memory unit</div>
         <div className="seg seg-3">
-          {["MiB", "GiB", "TiB"].map(u => (
+          {MEM_UNITS.map(u => (
             <button key={u} className={memUnit === u ? "seg-on" : ""} onClick={() => setMemUnit(u)}>{u}</button>
           ))}
         </div>
@@ -901,8 +1028,8 @@ function Sidebar({
       <div className="sidebar-footer">
         <div className="footer-row">
           <span className="dot dot-ok" />
-          <span>Cluster connected</span>
-          <span className="footer-tail">Ready</span>
+          <span>{api.isStatic ? "Synthetic demo data" : "Cluster connected"}</span>
+          <span className="footer-tail">{api.isStatic ? "Snapshot" : "Ready"}</span>
         </div>
         <div className="footer-row dim">
           <span>{nodeCount} nodes</span>
@@ -972,7 +1099,7 @@ function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
 
 function Header({
   metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
-  onMenu, onRefresh, refreshing, workload, onClearWorkload, onExport, canExport,
+  onMenu, onRefresh, refreshing, liveStatus, workload, onClearWorkload, onExport, canExport,
   onFit,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
@@ -1002,10 +1129,22 @@ function Header({
         <div className="title-row">
           <span className="title-main">{titleMain} Resources</span>
           <span className="title-chip">{contextLabel}</span>
+          {api.isStatic && (
+            <span className="title-chip demo-chip" title="Generated by k8sfoams --synthetic; no real cluster behind it">
+              demo data
+            </span>
+          )}
+          {(liveStatus === "live" || liveStatus === "reconnecting") && (
+            <span className={`title-chip live-chip live-${liveStatus}`}
+              title={liveStatus === "live" ? "Updates as the cluster changes" : "Live stream lost; polling until it reconnects"}>
+              <span className="live-dot" />
+              {liveStatus}
+            </span>
+          )}
           {/* Replica spread of the pinned workload — the anti-affinity check. */}
           {workload && (
             <span className="title-chip wl-chip" title={workload.key}>
-              <span className="wl-chip-name">{workload.key}</span>
+              <span className="wl-chip-name">{workloadLabel(workload.key)}</span>
               <span className="wl-chip-meta">
                 {workload.replicas} replica{workload.replicas === 1 ? "" : "s"} · {workload.nodes} node{workload.nodes === 1 ? "" : "s"}
               </span>
@@ -1062,8 +1201,24 @@ function Header({
               stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
+        {EMBED && <FullDemoLink />}
       </div>
     </header>
+  );
+}
+
+// Opens the current view full-page in a new tab. The href is read on click,
+// since the view state lands in the hash only after a render.
+function FullDemoLink() {
+  return (
+    <a className="icon-btn full-demo-link" href={window.location.pathname} target="_blank" rel="noopener"
+      title="Open this view in the full demo"
+      onClick={e => { e.currentTarget.href = `${window.location.pathname}${window.location.hash}`; }}>
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <path d="M9 2.5 H13.5 V7 M13.5 2.5 L7.5 8.5 M11.5 9.5 V13.5 H2.5 V4.5 H6.5"
+          stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </a>
   );
 }
 
@@ -1072,13 +1227,31 @@ const EXPORTS = [
   { id: "svg", label: "SVG image", hint: "vector, 2D only", only2d: true },
   { id: "json", label: "JSON report", hint: "nodes, pods, containers" },
   { id: "csv", label: "CSV report", hint: "one row per pod" },
+  { id: "link", label: "Copy link", hint: "current view", divider: true },
 ];
 
 // Download menu next to Refresh. Images capture the current view; reports
-// are the same in both views.
+// are the same in both views. Copy link keeps the menu open to confirm.
 function ExportMenu({ is3d, disabled, onExport }) {
   const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
   const ref = useRef(null);
+
+  useEffect(() => {
+    if (!copied) return;
+    const id = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(id);
+  }, [copied]);
+
+  const onItem = async (id) => {
+    if (id !== "link") {
+      setOpen(false);
+      onExport(id);
+      return;
+    }
+    if (await onExport(id)) setCopied(true);
+    else setOpen(false);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -1105,13 +1278,17 @@ function ExportMenu({ is3d, disabled, onExport }) {
           <div className="query-hint-title">Export {is3d ? "3D view" : "2D map"}</div>
           {EXPORTS.map(x => {
             const off = x.only2d && is3d;
+            const done = x.id === "link" && copied;
             return (
-              <button key={x.id} role="menuitem" className="export-item" disabled={off}
-                title={off ? "The 3D view is WebGL; switch to 2D for vector SVG" : undefined}
-                onClick={() => { setOpen(false); onExport(x.id); }}>
-                <span>{x.label}</span>
-                <span className="export-hint">{off ? "2D only" : x.hint}</span>
-              </button>
+              <React.Fragment key={x.id}>
+                {x.divider && <div className="export-sep" />}
+                <button role="menuitem" className="export-item" disabled={off}
+                  title={off ? "The 3D view is WebGL; switch to 2D for vector SVG" : undefined}
+                  onClick={() => onItem(x.id)}>
+                  <span>{x.label}</span>
+                  <span className={`export-hint ${done ? "export-hint-ok" : ""}`}>{off ? "2D only" : done ? "copied" : x.hint}</span>
+                </button>
+              </React.Fragment>
             );
           })}
         </div>
@@ -1261,7 +1438,7 @@ function TreemapGrid({
 
 /* ─────────── Focus overlay ─────────── */
 
-function FocusOverlay({ node, onClose, metric, memUnit, ctxParam, onSimulation }) {
+function FocusOverlay({ node, onClose, metric, memUnit, ctx, onSimulation }) {
   // Drain report for this node; replaces the workload list while shown.
   const [drain, setDrain] = useState(null);
   const onDrainReport = (report) => {
@@ -1280,7 +1457,7 @@ function FocusOverlay({ node, onClose, metric, memUnit, ctxParam, onSimulation }
             </div>
           </div>
           <div className="overlay-head-tools">
-            <DrainButton ctxParam={ctxParam} nodeName={node.name} onReport={onDrainReport} />
+            <DrainButton ctx={ctx} nodeName={node.name} onReport={onDrainReport} />
             <button className="icon-btn" onClick={onClose}>
               <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
             </button>
@@ -1468,6 +1645,22 @@ function topologyLine(node) {
   const t = node.topology || {};
   return [t.instanceType, t.zone || t.region, t.nodePool, t.capacityType]
     .filter(Boolean).map(v => `${v} · `).join("");
+}
+
+// navigator.clipboard exists only in secure contexts (https, localhost), so
+// plain http on a LAN address falls back to the legacy copy command.
+async function copyText(s) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(s);
+  const ta = document.createElement("textarea");
+  ta.value = s;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  if (!ok) throw new Error("the clipboard is unavailable; copy the address bar instead");
 }
 
 function shortContext(ctx) {

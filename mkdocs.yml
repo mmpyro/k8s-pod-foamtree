@@ -1,0 +1,115 @@
+site_name: k8sfoams
+site_description: A local, read-only dashboard of where your Kubernetes cluster's requested CPU, memory and GPUs go.
+site_url: https://mmpyro.github.io/k8s-pod-foamtree/
+repo_url: https://github.com/mmpyro/k8s-pod-foamtree
+repo_name: mmpyro/k8s-pod-foamtree
+edit_uri: edit/main/docs/
+copyright: Apache-2.0 licensed
+
+docs_dir: docs
+# docs/demo/ is written by `make docs-demo` and copied as is: it is the
+# dashboard itself, not documentation.
+exclude_docs: |
+  requirements.txt
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Live demo: demo/index.html
+  - Synthetic mode: synthetic-mode.md
+  - How it works: concepts.md
+  - Features:
+      - 2D map: map-2d.md
+      - 3D cubes: cubes-3d.md
+      - Controls: controls.md
+      - Node health: node-health.md
+      - Topology: topology.md
+      - Audit & hygiene: audit.md
+      - QoS & eviction risk: qos.md
+      - Scheduling simulators: simulators.md
+      - Filtering: filtering.md
+      - Extended resources: extended-resources.md
+      - Export: export.md
+      - Shareable links: shareable-links.md
+  - Reference:
+      - Command line: cli.md
+      - HTTP API: http-api.md
+  - Development: development.md
+
+theme:
+  name: material
+  logo: images/logo.png
+  favicon: images/logo.png
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - navigation.tabs
+    - navigation.top
+    - navigation.footer
+    - navigation.instant
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+
+extra_css:
+  - stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - def_list
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - toc:
+      permalink: true
+      # GitHub-style anchors, so `#…` links work on github.com and on the site.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn

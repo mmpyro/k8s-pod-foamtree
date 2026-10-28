@@ -1,9 +1,20 @@
 from unittest.mock import MagicMock
 
 
+def create_list(items, next_page=None, resource_version='1') -> MagicMock:
+    """One page of a LIST response; next_page is its continue token. A bare
+    MagicMock token is truthy, so paging would never stop; the last page must carry None."""
+    page = MagicMock()
+    page.items = items
+    page.metadata._continue = next_page
+    page.metadata.resource_version = resource_version
+    return page
+
+
 def create_pod(name: str, node_name: str, containers=[], init_containers=None,
                namespace='default', labels=None, qos_class='Burstable', node_selector=None,
-               tolerations=None, owner_kind='ReplicaSet', annotations=None) -> MagicMock:
+               tolerations=None, owner_kind='ReplicaSet', annotations=None, phase='Running',
+               owner_name=None) -> MagicMock:
     pod = MagicMock()
     metadata = MagicMock()
     metadata.name = name
@@ -13,7 +24,7 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     metadata.labels = labels
     metadata.annotations = annotations
     # owner_kind=None builds a naked pod with no controller to recreate it.
-    metadata.owner_references = [create_owner(owner_kind)] if owner_kind else None
+    metadata.owner_references = [create_owner(owner_kind, owner_name)] if owner_kind else None
     spec = MagicMock()
     spec.node_name = node_name
     spec.node_selector = node_selector
@@ -22,15 +33,18 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     spec.init_containers = init_containers
     status = MagicMock()
     status.qos_class = qos_class
+    status.phase = phase
     pod.metadata = metadata
     pod.spec = spec
     pod.status = status
     return pod
 
 
-def create_owner(kind: str, controller: bool = True) -> MagicMock:
+def create_owner(kind: str, name=None, controller: bool = True) -> MagicMock:
     owner = MagicMock()
     owner.kind = kind
+    # Set after construction: MagicMock(name=...) names the mock, not the attribute.
+    owner.name = name
     owner.controller = controller
     return owner
 

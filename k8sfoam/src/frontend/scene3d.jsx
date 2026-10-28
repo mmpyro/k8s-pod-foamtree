@@ -296,7 +296,7 @@ function layout(nodes, groupBy) {
     const cell = PLATE / per;
     pods.forEach((pod, j) => {
       cubes.push({
-        pod, node, nodeIdx: idx, wl: workloadKey(pod.name),
+        pod, node, nodeIdx: idx, wl: workloadKey(pod),
         w: Math.min(cell * 0.86, footprint(pod.cpu)), h: tall(pod.mem),
         x: x - PLATE / 2 + cell * ((j % per) + 0.5),
         z: z - PLATE / 2 + cell * (Math.floor(j / per) + 0.5),
@@ -516,7 +516,7 @@ function Scene3D({
         hoverFrame = 0;
         const hit = pick(e);
         setTip(hit ? { ...hit, x: e.clientX, y: e.clientY } : null);
-        props.current.onPodHover(hit && hit.pod ? workloadKey(hit.pod.name) : null);
+        props.current.onPodHover(hit && hit.pod ? workloadKey(hit.pod) : null);
       });
     };
     const onLeave = () => { setTip(null); props.current.onPodHover(null); };
@@ -525,7 +525,7 @@ function Scene3D({
     const onUp = e => {
       if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
       const hit = pick(e);
-      if (hit && hit.pod) props.current.onPodSelect(workloadKey(hit.pod.name));
+      if (hit && hit.pod) props.current.onPodSelect(workloadKey(hit.pod));
       else if (hit && hit.node) props.current.onFocus(hit.node);
     };
     const el = renderer.domElement;
