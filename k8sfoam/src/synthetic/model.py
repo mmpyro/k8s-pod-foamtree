@@ -73,6 +73,28 @@ class NodePool:
     ephemeral_storage: str = '95Gi'
 
 
+# The model builds every node and pod itself, so these fields are always set,
+# though newer kubernetes clients type them all as Optional.
+def _name(obj) -> str:
+    return obj.metadata.name
+
+
+def _labels(obj) -> Dict[str, str]:
+    return obj.metadata.labels
+
+
+def _node_spec(node) -> V1NodeSpec:
+    return node.spec
+
+
+def _conditions(node) -> List[V1NodeCondition]:
+    return node.status.conditions
+
+
+def _node_of(pod) -> str:
+    return pod.spec.node_name
+
+
 def _quantities(resources: Dict[str, str]) -> Dict[str, Decimal]:
     return {name: parse_quantity(q) for name, q in resources.items()}
 
@@ -209,28 +231,29 @@ class ClusterModel():
         return names
 
     def node(self, name: str) -> V1Node:
-        return next(n for n in self.nodes if n.metadata.name == name)
+        return next(n for n in self.nodes if _name(n) == name)
 
     def cordon(self, name: str) -> None:
-        self.node(name).spec.unschedulable = True
+        _node_spec(self.node(name)).unschedulable = True
 
     def set_condition(self, name: str, condition: str, status: bool) -> None:
-        for c in self.node(name).status.conditions:
+        for c in _conditions(self.node(name)):
             if c.type == condition:
                 c.status = 'True' if status else 'False'
 
     def __ready(self, node: V1Node) -> bool:
-        return all(c.status == 'True' for c in node.status.conditions if c.type == 'Ready')
+        return all(c.status == 'True' for c in _conditions(node) if c.type == 'Ready')
 
     # ---- placement ---------------------------------------------------------
 
     def __eligible(self, node: V1Node, w: Workload) -> bool:
-        labels = node.metadata.labels
+        labels = _labels(node)
         if any(labels.get(k) != v for k, v in w.node_selector.items()):
             return False
-        if node.spec.unschedulable and not any(tolerates(t, CORDON_TAINT) for t in w.tolerations):
+        spec = _node_spec(node)
+        if spec.unschedulable and not any(tolerates(t, CORDON_TAINT) for t in w.tolerations):
             return False
-        for taint in node.spec.taints or []:
+        for taint in spec.taints or []:
             as_dict = {'key': taint.key, 'value': taint.value, 'effect': taint.effect}
             if taint.effect in FILTER_EFFECTS and not any(tolerates(t, as_dict) for t in w.tolerations):
                 return False
@@ -244,11 +267,11 @@ class ClusterModel():
         """Least-allocated, minus a penalty for each sibling replica on the node and in
         its zone (kube-scheduler's default spreading), plus jitter so the layout is not
         perfectly even."""
-        name = node.metadata.name
+        name = _name(node)
         alloc, free = self.__alloc[name], self.__free[name]
         shares = [float((free[k] - demand.get(k, Decimal(0))) / alloc[k]) for k in ('cpu', 'memory') if alloc[k]]
-        zone = node.metadata.labels.get(ZONE)
-        siblings = [p.spec.node_name for p in self.__pods_of[key]]
+        zone = _labels(node).get(ZONE)
+        siblings = [_node_of(p) for p in self.__pods_of[key]]
         same_node = siblings.count(name)
         same_zone = sum(1 for s in siblings if self.__zone[s] == zone)
         return min(shares, default=0.0) - 0.5 * same_node - 0.1 * same_zone + self.rng.uniform(0, 0.15)
@@ -316,11 +339,11 @@ class ClusterModel():
     def __place(self, w: Workload, key: int) -> Optional[V1Pod]:
         """Bind one more replica of `w` to the best node it fits on; None when it would stay Pending."""
         demand = effective_requests(w)
-        candidates = [n for n in self.nodes if self.__eligible(n, w) and self.__fits(n.metadata.name, demand)]
+        candidates = [n for n in self.nodes if self.__eligible(n, w) and self.__fits(_name(n), demand)]
         if not candidates:
             return None
         target = max(candidates, key=lambda n: self.__score(n, key, demand))
-        return self.__bind(w, key, target.metadata.name, demand)
+        return self.__bind(w, key, _name(target), demand)
 
     def deploy(self, w: Workload) -> List[V1Pod]:
         """Add a workload and place its pods: one per eligible node for a DaemonSet, `replicas` otherwise."""
@@ -333,7 +356,7 @@ class ClusterModel():
             demand = effective_requests(w)
             for node in self.nodes:
                 if self.__eligible(node, w):
-                    self.__bind(w, key, node.metadata.name, demand)
+                    self.__bind(w, key, _name(node), demand)
         else:
             for _ in range(w.replicas):
                 self.__place(w, key)
@@ -343,7 +366,7 @@ class ClusterModel():
         return list(self.__pods_of[self.workloads.index(w)])
 
     def __remove(self, key: int, pod: V1Pod) -> None:
-        self.__reserve(pod.spec.node_name, effective_requests(self.workloads[key]), -1)
+        self.__reserve(_node_of(pod), effective_requests(self.workloads[key]), -1)
         self.pods.remove(pod)
         self.__pods_of[key].remove(pod)
         if self.workloads[key].kind == 'StatefulSet':
@@ -362,7 +385,7 @@ class ClusterModel():
             name, self.__flapping = self.__flapping, None
             self.set_condition(name, 'Ready', True)
             return f'node {name} Ready again'
-        healthy = [n.metadata.name for n in self.nodes if self.__ready(n) and not n.spec.unschedulable]
+        healthy = [_name(n) for n in self.nodes if self.__ready(n) and not _node_spec(n).unschedulable]
         if healthy and self.rng.random() < 0.1:
             self.__flapping = self.rng.choice(healthy)
             self.set_condition(self.__flapping, 'Ready', False)
