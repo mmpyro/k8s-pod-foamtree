@@ -66,9 +66,32 @@ and so is a node running a naked pod.
 
 [Try it on demo-shop](demo/index.html){ .k8s-try target=_blank } (click the two-node button in the header).
 
+## Can I scale this workload?
+
+Instead of typing a pod shape into *Can I fit this pod?*, start from a real one. Click a pod to pin its workload, then
+click **+N** on the workload chip in the header. The workload's pod is the template: its effective requests, extended
+resources, `nodeSelector` and tolerations, shown at the top of the result. Copies are then placed one after another,
+each on the passing node with the most headroom left, against the room the previous copies left behind.
+
+The simulation first asks whether the workload could double, so the answer is two clicks away. Type any count up to
+100 and **Simulate** again. The headline says how far the workload can grow, e.g. *Only 87 of 100 more replicas fit —
+checkout-api can grow from 3 to 90, and replica 91 would stay Pending*. **Where it stops** gives the scheduler-style
+tally for that replica (`0/16 nodes available: 1 cordoned, 3 untolerated taint, 12 insufficient CPU`), and **Where they
+land** counts the copies per node. On the map, nodes taking copies are green; when not every copy fits, the rest are
+red.
+
+DaemonSets and static pods have no replica count, so their chip has no **+N**. Neither do naked pods, which have no
+workload to scale.
+
+On demo-shop, `checkout-api` doubles easily. `search-indexer` is pinned to one node by a `kubernetes.io/hostname`
+`nodeSelector`, so it only takes four more copies before every node turns it away.
+
+[Try it on demo-shop](demo/index.html#wl=checkout%2FDeployment%2Fcheckout-api){ .k8s-try target=_blank } (click
+**+N** on the `checkout-api` chip).
+
 ## Reading the result
 
-While a result is shown, nodes are outlined in both views — green fits / receives pods, red cannot, grey is the drained
+While a result is shown, nodes are outlined in both views — green fits / receives pods or copies, red cannot, grey is the drained
 (or planned-for-removal) node — and a strip above the map summarises it. `Esc` or its `×` clears it.
 
 Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, `NoSchedule`/`NoExecute` taints vs.
