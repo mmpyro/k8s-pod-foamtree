@@ -1,7 +1,7 @@
 # Scheduling simulators
 
-Two dry runs of the kube-scheduler's filter phase, against each node's free **allocatable** capacity (allocatable minus
-the requests of the pods already bound there). Neither touches the cluster.
+Dry runs of the kube-scheduler's filter phase, against each node's free **allocatable** capacity (allocatable minus
+the requests of the pods already bound there). None of them touches the cluster.
 
 <figure class="k8sfoam-embed k8sfoam-embed-tall">
   <iframe src="../demo/index.html?embed=1#ctx=gke_demo-ml_us-central1_ml-training&metric=nvidia.com%2Fgpu" loading="lazy" title="k8sfoams demo of the GPU cluster for the scheduling simulators"></iframe>
@@ -41,10 +41,35 @@ Every node of every demo cluster has its drain precomputed. On demo-shop, most d
 [Try it on demo-shop](demo/index.html#q=search-indexer){ .k8s-try target=_blank } (click the highlighted node, then
 *Simulate drain*).
 
+## Which nodes could be removed?
+
+The two-node button in the header, next to the dashed **+**. It answers the question cluster-autoscaler and Karpenter
+ask before scaling down — and shows why they do not when you think they should.
+
+It works in two passes:
+
+1. **Alone.** Every node gets a drain simulation against the cluster as it is. A node **cannot be removed** if any of
+   its pods would go `Pending`, if it runs a naked pod (cluster-autoscaler refuses to delete a pod no controller would
+   recreate), or if it is labelled as a control-plane node.
+2. **Together.** Per-node verdicts cannot simply be added up: two nodes may each fit on the rest of the cluster, but
+   not both at once. So the removable nodes are drained again one after another, least utilised first like
+   cluster-autoscaler, each against the cluster the previous steps left behind — the pods they moved now count
+   against the nodes that took them. Nodes that still fit form the **removal plan**; the others are listed as
+   **removable alone, not together**.
+
+The summary adds up what the plan frees, e.g. *7 nodes of 16 can go, freeing 51.4 CPU / 188 GiB* (GPUs and other
+device counts are included). Each plan step expands to the pods it moves and where they land. On the map, planned
+nodes are grey, the nodes taking their pods green and the blocked ones red.
+
+On demo-shop, seven nodes can go. The `search-indexer` and analytics nodes from the drain example above are blocked,
+and so is a node running a naked pod.
+
+[Try it on demo-shop](demo/index.html){ .k8s-try target=_blank } (click the two-node button in the header).
+
 ## Reading the result
 
 While a result is shown, nodes are outlined in both views — green fits / receives pods, red cannot, grey is the drained
-node — and a strip above the map summarises it. `Esc` or its `×` clears it.
+(or planned-for-removal) node — and a strip above the map summarises it. `Esc` or its `×` clears it.
 
 Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, `NoSchedule`/`NoExecute` taints vs.
 tolerations, pod count, CPU, memory, then every extended resource the pod requests against the node's free allocatable
