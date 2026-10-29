@@ -204,7 +204,8 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def simulate_node_drain(node_name: str):
             try:
                 k8s_client = cluster(request.args.get('context'))
-                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources(),
+                                        k8s_client.get_disruption_budgets())
             except Exception as ex:
                 return str(ex), 500
             if result is None:
@@ -215,7 +216,8 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def simulate_cluster_consolidation():
             try:
                 k8s_client = cluster(request.args.get('context'))
-                return jsonify(simulate_consolidation(k8s_client.get_node_resources(), k8s_client.get_pod_resources()))
+                return jsonify(simulate_consolidation(k8s_client.get_node_resources(), k8s_client.get_pod_resources(),
+                                                      k8s_client.get_disruption_budgets()))
             except Exception as ex:
                 return str(ex), 500
 

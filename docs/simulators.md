@@ -36,12 +36,21 @@ onto the passing node with the most headroom left. The report lists where each p
 with a scheduler-style tally (`0/4 nodes available: 3 insufficient CPU, 1 cordoned`). DaemonSet and static pods stay on
 the node and are listed separately. Naked pods (no controller) are flagged, because a real drain deletes them for good.
 
+PodDisruptionBudgets are honoured the way `kubectl drain` meets them: pods are evicted in the same biggest-first
+order, and each eviction uses up one of `status.disruptionsAllowed` of every budget in the pod's namespace whose
+selector matches it. Several evictions from one drain draw on the same budget. Once a budget is used up, its other
+pods are listed under **Blocked by PDB** and stay on the node: `kubectl drain` would keep retrying them. When the
+server may not list PDBs (a `403` from RBAC), the report says *PodDisruptionBudgets not checked* instead of failing.
+
 Every node of every demo cluster has its drain precomputed. On demo-shop, most drains fit, but two do not:
 
 - the node running both `search-indexer` replicas: they are pinned to it with a `kubernetes.io/hostname`
   `nodeSelector`, so both go `Pending`;
 - the analytics node: the `warehouse` pod may only run in the analytics node group, which has no other node, and
   no other node has the 52Gi of memory it requests free anyway.
+
+And three drains fit but are blocked: `catalog-db` has a PodDisruptionBudget with `minAvailable: 3` over its three
+replicas, so none of the nodes running one can be drained.
 
 [Try it on demo-shop](demo/index.html#q=search-indexer){ .k8s-try target=_blank } (click the highlighted node, then
 *Simulate drain*).
@@ -54,8 +63,9 @@ ask before scaling down — and shows why they do not when you think they should
 It works in two passes:
 
 1. **Alone.** Every node gets a drain simulation against the cluster as it is. A node **cannot be removed** if any of
-   its pods would go `Pending`, if it runs a naked pod (cluster-autoscaler refuses to delete a pod no controller would
-   recreate), or if it is labelled as a control-plane node.
+   its pods would go `Pending`, if a PodDisruptionBudget holds one of its pods, if it runs a naked pod
+   (cluster-autoscaler refuses to delete a pod no controller would recreate), or if it is labelled as a control-plane
+   node.
 2. **Together.** Per-node verdicts cannot simply be added up: two nodes may each fit on the rest of the cluster, but
    not both at once. So the removable nodes are drained again one after another, least utilised first like
    cluster-autoscaler, each against the cluster the previous steps left behind — the pods they moved now count
@@ -67,7 +77,7 @@ device counts are included). Each plan step expands to the pods it moves and whe
 nodes are grey, the nodes taking their pods green and the blocked ones red.
 
 On demo-shop, seven nodes can go. The `search-indexer` and analytics nodes from the drain example above are blocked,
-and so is a node running a naked pod.
+and so are the three `catalog-db` nodes held by its PodDisruptionBudget (one of them also runs a naked pod).
 
 [Try it on demo-shop](demo/index.html){ .k8s-try target=_blank } (click the two-node button in the header).
 
@@ -138,6 +148,5 @@ Drains and replica copies see the pods they have already placed, so a workload w
 at most one copy per node, a zone-spread workload's copies fill the zones evenly, and two evicted replicas never land
 on the same node.
 
-**Not simulated:** PodDisruptionBudgets, a non-empty `namespaceSelector` on pod affinity terms (it
-needs namespace labels, so only the listed namespaces, or the pod's own, count) and volume zone binding — so a green
-verdict is necessary, not sufficient.
+**Not simulated:** a non-empty `namespaceSelector` on pod affinity terms (it needs namespace labels, so only the
+listed namespaces, or the pod's own, count) and volume zone binding — so a green verdict is necessary, not sufficient.

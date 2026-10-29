@@ -1,8 +1,10 @@
 import bitmath  # type: ignore
 import pytest
-from k8sfoam.src.k8s.k8s_client import K8sClient, core_v1, list_all, DEFAULT_PAGE_SIZE
+from kubernetes.client.exceptions import ApiException  # type: ignore
+from k8sfoam.src.common.dtos import DisruptionBudget
+from k8sfoam.src.k8s.k8s_client import K8sClient, api_client, core_v1, policy_v1, list_all, DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock, call
-from k8sfoam.tests.common.mocks import create_node, create_pod, create_container, create_list
+from k8sfoam.tests.common.mocks import create_node, create_pod, create_container, create_list, create_pdb
 from pydash import py_ as _  # type: ignore
 
 POD_SELECTOR = 'status.phase!=Succeeded,status.phase!=Failed'
@@ -10,7 +12,64 @@ POD_SELECTOR = 'status.phase!=Succeeded,status.phase!=Failed'
 
 @pytest.fixture(autouse=True)
 def fresh_client_cache():
+    api_client.cache_clear()
     core_v1.cache_clear()
+    policy_v1.cache_clear()
+
+
+@patch('k8sfoam.src.k8s.k8s_client.config')
+@patch('k8sfoam.src.k8s.k8s_client.client')
+def test_should_return_disruption_budgets(client, config):
+    # Given
+    policy = client.PolicyV1Api.return_value
+    policy.list_pod_disruption_budget_for_all_namespaces.return_value = create_list([
+        create_pdb('db-pdb', 'shop', {'app': 'db'}, disruptions_allowed=1),
+        create_pdb('nothing', 'shop', selector=False, disruptions_allowed=0)])
+
+    # When
+    budgets = K8sClient('prod').get_disruption_budgets()
+
+    # Then
+    policy.list_pod_disruption_budget_for_all_namespaces.assert_called_once_with(limit=DEFAULT_PAGE_SIZE,
+                                                                                 _continue=None)
+    assert budgets == [
+        DisruptionBudget('db-pdb', 'shop', {'matchLabels': {'app': 'db'}, 'matchExpressions': []}, 1),
+        DisruptionBudget('nothing', 'shop', None, 0)]
+
+
+@pytest.mark.parametrize('status', [403, 404])
+@patch('k8sfoam.src.k8s.k8s_client.config')
+@patch('k8sfoam.src.k8s.k8s_client.client')
+def test_disruption_budgets_are_not_checked_without_access(client, config, status):
+    # Given — RBAC denies listing PDBs, or the cluster serves no policy/v1
+    client.PolicyV1Api.return_value.list_pod_disruption_budget_for_all_namespaces.side_effect = \
+        ApiException(status=status)
+
+    # When / Then
+    assert K8sClient('prod').get_disruption_budgets() is None
+
+
+@patch('k8sfoam.src.k8s.k8s_client.config')
+@patch('k8sfoam.src.k8s.k8s_client.client')
+def test_disruption_budgets_raise_other_api_errors(client, config):
+    # Given
+    client.PolicyV1Api.return_value.list_pod_disruption_budget_for_all_namespaces.side_effect = \
+        ApiException(status=500)
+
+    # When / Then
+    with pytest.raises(ApiException):
+        K8sClient('prod').get_disruption_budgets()
+
+
+@patch('k8sfoam.src.k8s.k8s_client.config')
+@patch('k8sfoam.src.k8s.k8s_client.client')
+def test_core_and_policy_clients_share_one_api_client(client, config):
+    # When
+    core_v1('prod')
+    policy_v1('prod')
+
+    # Then — the kubeconfig's exec plugin runs once per context
+    config.new_client_from_config.assert_called_once_with(context='prod')
 
 
 @patch('k8sfoam.src.k8s.k8s_client.config')

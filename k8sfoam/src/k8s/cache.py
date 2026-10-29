@@ -5,9 +5,9 @@ from typing import Any, Callable, Dict, List, Optional
 from kubernetes import watch  # type: ignore
 from kubernetes.client.rest import ApiException  # type: ignore
 from urllib3.exceptions import HTTPError
-from k8sfoam.src.k8s.k8s_client import core_v1, list_all, ACTIVE_POD_SELECTOR
+from k8sfoam.src.k8s.k8s_client import core_v1, list_all, list_disruption_budgets, ACTIVE_POD_SELECTOR
 from k8sfoam.src.utils.extractors import ResourcesExtractor
-from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources
 
 log = logging.getLogger(__name__)
 
@@ -188,6 +188,8 @@ class ClusterCache():
 
     def __init__(self, context: Optional[str], page_size: int):
         v1_client = core_v1(context)
+        self.__context = context
+        self.__page_size = page_size
         self.__changed = threading.Condition()
         self.__version = 0
         self.__nodes = node_informer(v1_client, page_size, on_change=self.__bump)
@@ -230,6 +232,10 @@ class ClusterCache():
 
     def get_pod_resources(self) -> List[PodResources]:
         return self.__read(self.__pods)
+
+    def get_disruption_budgets(self) -> Optional[List[DisruptionBudget]]:
+        """Listed per call rather than watched: only drain-based simulations read them."""
+        return list_disruption_budgets(self.__context, self.__page_size)
 
     def __read(self, informer: Informer) -> List[Any]:
         try:

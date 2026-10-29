@@ -1,4 +1,6 @@
 from unittest.mock import MagicMock
+from kubernetes.client import (V1LabelSelector, V1ObjectMeta, V1PodDisruptionBudget,  # type: ignore
+                               V1PodDisruptionBudgetSpec, V1PodDisruptionBudgetStatus)
 
 
 def create_list(items, next_page=None, resource_version='1') -> MagicMock:
@@ -89,6 +91,15 @@ def create_condition(type: str, status: str) -> MagicMock:
     condition.type = type
     condition.status = status
     return condition
+
+
+def create_pdb(name: str, namespace: str = 'default', match_labels=None, disruptions_allowed: int = 1,
+               selector: bool = True) -> V1PodDisruptionBudget:
+    return V1PodDisruptionBudget(
+        metadata=V1ObjectMeta(name=name, namespace=namespace),
+        spec=V1PodDisruptionBudgetSpec(selector=V1LabelSelector(match_labels=match_labels) if selector else None),
+        status=V1PodDisruptionBudgetStatus(current_healthy=0, desired_healthy=0, expected_pods=0,
+                                           disruptions_allowed=disruptions_allowed))
 
 
 def create_node(name: str, cpu: str, memory: str, unschedulable=None, taints=None,
