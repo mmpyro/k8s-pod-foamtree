@@ -30,6 +30,23 @@ def test_should_extract_pod_resources_with_single_container_pod():
     assert pod_resources.init_containers == []
 
 
+def test_should_extract_the_scheduling_gates_of_an_unbound_pod():
+    # Given
+    gate = MagicMock()
+    gate.name = 'kueue.x-k8s.io/admission'
+    gated = create_pod('import', None, containers=[create_container('import', '1', '1G')], scheduling_gates=[gate])
+    plain = create_pod('web', 'node-1', containers=[create_container('web', '1', '1G')])
+
+    # When
+    extractor = ResourcesExtractor()
+    gated_resources, plain_resources = (extractor.extract_pod_requested_resources(p) for p in (gated, plain))
+
+    # Then
+    assert gated_resources.node_name is None
+    assert gated_resources.scheduling_gates == ['kueue.x-k8s.io/admission']
+    assert plain_resources.scheduling_gates == []
+
+
 def test_should_extract_pod_resources_with_multi_container_pod():
     # Given
     extractor = ResourcesExtractor()

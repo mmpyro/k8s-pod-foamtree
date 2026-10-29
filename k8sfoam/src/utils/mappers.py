@@ -126,7 +126,11 @@ class FoamTreeMapper():
                 'extended': dict(c.extended or {})}
 
     def combined(self) -> dict:
-        """Every node with cpu, memory and extended resources side by side, plus available_resources()."""
+        """Every node with cpu, memory and extended resources side by side, plus available_resources().
+
+        `pendingPods` counts the unbound pods the scheduler is trying to place,
+        i.e. without schedulingGates; the pending simulation says where they would go.
+        """
         nodes = []
         for node in self.__nodes:
             pods = []
@@ -138,7 +142,8 @@ class FoamTreeMapper():
                              'containers': containers, **self.__pod_metadata(pod, node)})
             nodes.append({'name': node.name, 'cpu': node.cpu or 0, 'memory': node.memory or 0,
                           'pods': pods, **self.__node_metadata(node)})
-        return {'resources': self.available_resources(), 'nodes': nodes}
+        pending = sum(1 for pod in self.__pods_by_node.get(None, []) if not pod.scheduling_gates)
+        return {'resources': self.available_resources(), 'nodes': nodes, 'pendingPods': pending}
 
     def transform_cpu_resources_to_foamtree(self) -> dict:
         return self.transform('cpu')

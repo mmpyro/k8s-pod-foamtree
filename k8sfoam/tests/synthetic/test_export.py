@@ -112,6 +112,9 @@ def test_export_precomputes_every_drain_preset_and_consolidation(site, path):
         assert read(data / 'fit' / f"{preset['id']}.json")['total'] == len(resources['nodes'])
     consolidation = read(data / 'consolidation.json')
     assert [v['node'] for v in consolidation['nodes']] == [n['name'] for n in resources['nodes']]
+    pending = read(data / 'pending.json')
+    assert pending['total'] == resources['pendingPods']
+    assert pending['hypotheticalNodes'] == []
     workloads = {(p['namespace'], p['owner']['kind'], p['owner']['name'])
                  for n in resources['nodes'] for p in n['pods']
                  if p['owner'] and p['owner']['name'] and p['owner']['kind'] not in ('DaemonSet', 'Node')}

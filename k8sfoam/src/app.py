@@ -9,7 +9,8 @@ from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_EXTRA_NODES, MAX_REPLICAS, UnknownTemplate,
-                                          simulate_consolidation, simulate_drain, simulate_fit, simulate_replicas)
+                                          simulate_consolidation, simulate_drain, simulate_fit, simulate_pending,
+                                          simulate_replicas)
 from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 
@@ -305,6 +306,20 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
             if result is None:
                 return f'Node {node_name} not found', 404
             return jsonify(result)
+
+        @app.route('/simulate/pending', methods=['POST'])
+        def simulate_pending_pods():
+            try:
+                extra = parse_simulation_body(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                return jsonify(simulate_pending(k8s_client.get_node_resources(), k8s_client.get_pod_resources(), extra))
+            except UnknownTemplate as ex:
+                return str(ex), 400
+            except Exception as ex:
+                return str(ex), 500
 
         @app.route('/simulate/consolidation', methods=['GET'])
         def simulate_cluster_consolidation():

@@ -1,8 +1,8 @@
 """Dry-run scheduler: the kube-scheduler filter phase, emulated against free allocatable.
 
-Backs four what-if questions — "can this pod fit anywhere?", "where would this
-node's pods go if it were drained?", "which nodes could be removed?" and "can this
-workload scale out by N replicas?". It deliberately covers only the predicates
+Backs five what-if questions — "can this pod fit anywhere?", "where would this
+node's pods go if it were drained?", "which nodes could be removed?", "can this
+workload scale out by N replicas?" and "where would the Pending pods go?". It deliberately covers only the predicates
 that decide most placements: node condition, cordon, nodeSelector, required node
 affinity, taints and tolerations, pod count, CPU, memory and extended resource
 requests (GPUs, ephemeral-storage, hugepages), DoNotSchedule topology spread, and
@@ -12,7 +12,7 @@ binding are out of scope, so a "fits" verdict is necessary rather than sufficien
 Preferred affinity terms and ScheduleAnyway spread constraints only score nodes,
 so they never filter one out.
 
-Fit and drain also take hypothetical nodes — copies of an existing node or a
+Fit, drain and pending also take hypothetical nodes — copies of an existing node or a
 custom shape — to compare node shapes before changing a node group.
 
 Units follow the rest of the backend: CPU in millicores, memory and byte-sized
@@ -621,6 +621,61 @@ def _headroom(pod: PodResources, alloc: dict, free: dict) -> float:
     return min(cpu, memory)
 
 
+def _biggest_first(pods: list, alloc: dict) -> list:
+    """First-fit decreasing order: by dominant share of the largest node, then by name."""
+    max_cpu = max((a['cpu'] for a in alloc.values()), default=0) or 1
+    max_memory = max((a['memory'] for a in alloc.values()), default=0) or 1
+    return sorted(pods, key=lambda p: (-max((p.cpu or 0) / max_cpu, (p.memory or 0) / max_memory), p.name))
+
+
+def _bind_best(pod: PodResources, nodes: list, free: dict, placement: Placement, alloc: dict) -> tuple:
+    """Bind `pod` to the passing node with the most headroom left: (node name, []), or (None, reasons per node)."""
+    verdicts = [(n, filter_node(pod, n, free[n.name], placement)) for n in nodes]
+    passing = [n for n, reasons in verdicts if not reasons]
+    if not passing:
+        return None, [reasons for _, reasons in verdicts]
+    target = max(passing, key=lambda n: (_headroom(pod, alloc[n.name], free[n.name]), n.name))
+    _reserve(free[target.name], pod)
+    placement.place(pod, target.name)
+    return target.name, []
+
+
+def simulate_pending(nodes: Iterable[NodeResources], pods: Iterable[PodResources], extra: Iterable[dict] = ()) -> dict:
+    """Where the pods waiting for a node would go, packed like a drain's evicted pods.
+
+    Biggest first, each on the passing node with the most headroom left. Pods
+    held back by schedulingGates are listed, not simulated: the scheduler does
+    not look at them until every gate is removed. `extra` are
+    hypothetical_nodes() specs added to the cluster for this run.
+    """
+    all_nodes, all_pods, fake, described = _with_hypothetical(list(extra), list(nodes), list(pods))
+    free = free_capacity(all_nodes, all_pods)
+    placement = Placement(all_nodes, all_pods)
+    alloc = {n.name: _allocatable(n) for n in all_nodes}
+
+    unbound = [p for p in all_pods if p.node_name is None]
+    gated = [{'pod': p.name, 'namespace': p.namespace, 'gates': list(p.scheduling_gates)}
+             for p in unbound if p.scheduling_gates]
+    placements, pending = [], []
+    for pod in _biggest_first([p for p in unbound if not p.scheduling_gates], alloc):
+        entry = {'pod': pod.name, 'namespace': pod.namespace, 'cpu': pod.cpu or 0, 'memory': pod.memory or 0}
+        target, rejections = _bind_best(pod, all_nodes, free, placement, alloc)
+        if target is None:
+            pending.append({**entry, 'reasons': _unschedulable_summary(rejections)})
+        else:
+            placements.append({**entry, 'to': target, 'hypothetical': target in fake})
+
+    return {
+        'fits': not pending,
+        'total': len(placements) + len(pending),
+        'nodes': len(all_nodes),
+        'placements': placements,
+        'pending': pending,
+        'gated': sorted(gated, key=lambda g: (g['namespace'], g['pod'])),
+        'hypotheticalNodes': described,
+    }
+
+
 def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterable[PodResources],
                    pdbs: Optional[Iterable[DisruptionBudget]] = None, extra: Iterable[dict] = ()) -> Optional[dict]:
     """Re-place every evictable pod of `node_name` onto the rest of the cluster.
@@ -654,14 +709,10 @@ def _drain(node_name: str, nodes: list, pods: list, pdbs: Optional[list] = None,
         else:
             evicted.append(pod)
 
-    max_cpu = max((a['cpu'] for a in alloc.values()), default=0) or 1
-    max_memory = max((a['memory'] for a in alloc.values()), default=0) or 1
-    evicted.sort(key=lambda p: (-max((p.cpu or 0) / max_cpu, (p.memory or 0) / max_memory), p.name))
-
     # Evictions from one drain draw on the same budgets; they refill only once the pods are healthy elsewhere.
     allowance = {(b.namespace, b.name): b.disruptions_allowed for b in pdbs or []}
     placements, pending, blocked = [], [], []
-    for pod in evicted:
+    for pod in _biggest_first(evicted, alloc):
         budgets = [b for b in pdbs or []
                    if b.namespace == pod.namespace and label_selector_matches(b.selector, pod.labels or {})]
         exhausted = next((b for b in budgets if allowance[(b.namespace, b.name)] < 1), None)
@@ -674,15 +725,11 @@ def _drain(node_name: str, nodes: list, pods: list, pdbs: Optional[list] = None,
         entry = {'pod': pod.name, 'namespace': pod.namespace, 'cpu': pod.cpu or 0, 'memory': pod.memory or 0,
                  # A naked pod is deleted by the drain and nothing recreates it.
                  'unmanaged': pod.owner_kind is None}
-        verdicts = [(n, filter_node(pod, n, free[n.name], placement)) for n in remaining]
-        passing = [n for n, reasons in verdicts if not reasons]
-        if not passing:
-            pending.append({**entry, 'reasons': _unschedulable_summary([r for _, r in verdicts])})
+        target, rejections = _bind_best(pod, remaining, free, placement, alloc)
+        if target is None:
+            pending.append({**entry, 'reasons': _unschedulable_summary(rejections)})
             continue
-        target = max(passing, key=lambda n: (_headroom(pod, alloc[n.name], free[n.name]), n.name))
-        _reserve(free[target.name], pod)
-        placement.place(pod, target.name)
-        placements.append({**entry, 'to': target.name, 'hypothetical': target.name in fake})
+        placements.append({**entry, 'to': target, 'hypothetical': target in fake})
 
     return {
         'node': node_name,
