@@ -5,8 +5,10 @@ from pydash import py_ as _  # type: ignore
 from k8sfoam.tests.common.mocks import (create_container, create_pod, create_node, create_taint, create_condition,
                                         create_toleration)
 from unittest.mock import MagicMock
-from kubernetes.client import (V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorRequirement,  # type: ignore
-                               V1NodeSelectorTerm, V1PreferredSchedulingTerm)
+from kubernetes.client import (V1Affinity, V1LabelSelector, V1LabelSelectorRequirement,  # type: ignore
+                               V1NodeAffinity, V1NodeSelector, V1NodeSelectorRequirement, V1NodeSelectorTerm,
+                               V1PodAffinity, V1PodAffinityTerm, V1PodAntiAffinity, V1PreferredSchedulingTerm,
+                               V1WeightedPodAffinityTerm)
 
 
 def test_should_extract_pod_resources_with_single_container_pod():
@@ -533,6 +535,40 @@ def test_should_extract_no_node_affinity_when_none_is_required(affinity):
 
     # Then
     assert result.node_affinity == []
+    assert result.pod_affinity == []
+    assert result.pod_anti_affinity == []
+
+
+def test_should_extract_required_pod_affinity_and_anti_affinity():
+    # Given
+    zone_term = V1PodAffinityTerm(
+        topology_key='topology.kubernetes.io/zone',
+        label_selector=V1LabelSelector(match_labels={'app': 'cache'}, match_expressions=[
+            V1LabelSelectorRequirement(key='tier', operator='NotIn', values=['batch'])]),
+        namespaces=['shop'])
+    host_term = V1PodAffinityTerm(topology_key='kubernetes.io/hostname',
+                                  label_selector=V1LabelSelector(match_labels={'app': 'web'}),
+                                  namespace_selector=V1LabelSelector())
+    affinity = V1Affinity(
+        pod_affinity=V1PodAffinity(required_during_scheduling_ignored_during_execution=[zone_term]),
+        pod_anti_affinity=V1PodAntiAffinity(
+            required_during_scheduling_ignored_during_execution=[host_term],
+            preferred_during_scheduling_ignored_during_execution=[
+                V1WeightedPodAffinityTerm(weight=1, pod_affinity_term=zone_term)]))
+    pod = create_pod('web', 'node', containers=[create_container('app', '100m', '100Mi')], affinity=affinity)
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert result.pod_affinity == [{
+        'labelSelector': {'matchLabels': {'app': 'cache'},
+                          'matchExpressions': [{'key': 'tier', 'operator': 'NotIn', 'values': ['batch']}]},
+        'namespaces': ['shop'], 'namespaceSelector': None, 'topologyKey': 'topology.kubernetes.io/zone'}]
+    assert result.pod_anti_affinity == [{
+        'labelSelector': {'matchLabels': {'app': 'web'}, 'matchExpressions': []},
+        'namespaces': [], 'namespaceSelector': {'matchLabels': {}, 'matchExpressions': []},
+        'topologyKey': 'kubernetes.io/hostname'}]
 
 
 @pytest.mark.parametrize('owner_kind, annotations, expected', [

@@ -18,6 +18,8 @@ const REASONS = {
   "insufficient-cpu":    { label: "insufficient CPU" },
   "insufficient-memory": { label: "insufficient memory" },
   "insufficient-extended": { label: "insufficient extended resource" },
+  "pod-affinity":        { label: "pod affinity unmet" },
+  "pod-anti-affinity":   { label: "pod anti-affinity conflict" },
 };
 
 const SKIP_REASONS = {
@@ -41,8 +43,8 @@ function blockerLabel(b) {
 // What the simulator does not model, shown under every result so a green
 // verdict is read as "necessary", not "guaranteed".
 const CAVEAT = "Filter phase only: CPU, memory, extended resources (GPUs, ephemeral-storage, hugepages), " +
-  "pod count, cordon, readiness, nodeSelector, required node affinity and taints. " +
-  "Pod affinity, topology spread, PDBs and volume zones are not simulated.";
+  "pod count, cordon, readiness, nodeSelector, taints, and required node and pod (anti-)affinity. " +
+  "Topology spread, PDBs and volume zones are not simulated.";
 
 function reasonLabel(slug) {
   return (REASONS[slug] || { label: slug }).label;
@@ -135,6 +137,18 @@ function fmtNodeAffinity(terms) {
     ? `${r.key} ${r.operator} (${r.values.join(",")})`
     : r.values && r.values.length ? `${r.key} ${r.operator} ${r.values[0]}` : `${r.key} ${r.operator}`;
   return terms.map(t => [...(t.matchExpressions || []), ...(t.matchFields || [])].map(fmt).join(", ")).join(" or ");
+}
+
+// `app=web per kubernetes.io/hostname; ...` — what each pod affinity term selects, and over which domain.
+function fmtPodTerms(terms) {
+  return terms.map(t => {
+    const s = t.labelSelector;
+    const parts = s ? [
+      ...Object.entries(s.matchLabels || {}).map(([k, v]) => `${k}=${v}`),
+      ...(s.matchExpressions || []).map(r => `${r.key} ${r.operator}${r.values && r.values.length ? ` (${r.values.join(",")})` : ""}`),
+    ] : [];
+    return `${parts.join(", ") || "any pod"} per ${t.topologyKey}`;
+  }).join("; ");
 }
 
 // The preset whose fields the form holds, or null. Whitespace around the
@@ -676,6 +690,8 @@ function TemplateLine({ t, memUnit, fmtMem }) {
       {ext.length > 0 && <span>extended <code>{ext.join(", ")}</code></span>}
       {selector.length > 0 && <span>nodeSelector <code>{selector.join(", ")}</code></span>}
       {(t.nodeAffinity || []).length > 0 && <span>node affinity <code>{fmtNodeAffinity(t.nodeAffinity)}</code></span>}
+      {(t.podAffinity || []).length > 0 && <span>pod affinity <code>{fmtPodTerms(t.podAffinity)}</code></span>}
+      {(t.podAntiAffinity || []).length > 0 && <span>pod anti-affinity <code>{fmtPodTerms(t.podAntiAffinity)}</code></span>}
       {t.tolerations.length > 0 && <span>tolerations <code>{t.tolerations.map(fmtToleration).join(", ")}</code></span>}
     </div>
   );

@@ -75,7 +75,7 @@ and so is a node running a naked pod.
 
 Instead of typing a pod shape into *Can I fit this pod?*, start from a real one. Click a pod to pin its workload, then
 click **+N** on the workload chip in the header. The workload's pod is the template: its effective requests, extended
-resources, `nodeSelector` and tolerations, shown at the top of the result. Copies are then placed one after another,
+resources, `nodeSelector`, node and pod affinity, and tolerations, shown at the top of the result. Copies are then placed one after another,
 each on the passing node with the most headroom left, against the room the previous copies left behind.
 
 The simulation first asks whether the workload could double, so the answer is two clicks away. Type any count up to
@@ -100,15 +100,30 @@ While a result is shown, nodes are outlined in both views — green fits / recei
 (or planned-for-removal) node — and a strip above the map summarises it. `Esc` or its `×` clears it.
 
 Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, required node affinity,
-`NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory, then every extended resource the pod requests
+`NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory, every extended resource the pod requests
 against the node's free allocatable (`Insufficient nvidia.com/gpu: requires 1, available 0`; a node that does not
-advertise a resource has none). A pod that tolerates `node.kubernetes.io/unschedulable` or `not-ready` (every
-DaemonSet pod does) still fits a cordoned or NotReady node.
+advertise a resource has none), then required pod affinity and anti-affinity. A pod that tolerates
+`node.kubernetes.io/unschedulable` or `not-ready` (every DaemonSet pod does) still fits a cordoned or NotReady node.
 
 Node affinity is the pod's `requiredDuringSchedulingIgnoredDuringExecution` `nodeSelectorTerms`: the terms are ORed,
 the expressions inside a term ANDed, with the operators `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt` and `Lt`, and
 `matchFields` on `metadata.name`. Drains, the consolidation finder and replica copies all honour it. Preferred terms
 only score nodes, so they are ignored.
 
-**Not simulated:** pod affinity, topology spread, PodDisruptionBudgets and volume zone binding — so a green verdict is
-necessary, not sufficient.
+Pod affinity and anti-affinity are the required `podAffinity` / `podAntiAffinity` terms. A term selects pods by
+`labelSelector` in the pod's own namespace, in the listed `namespaces`, or in every namespace with an empty
+`namespaceSelector: {}`, and compares the nodes by `topologyKey`. Both directions are checked, like kube-scheduler:
+
+- **affinity:** every term needs a selected pod in the node's domain (same zone, same host, ...), e.g. `Pod affinity: no
+  pod matching app=cache in the same topology.kubernetes.io/zone`. A node without the topology label is rejected. The
+  first pod of a group with affinity to itself may go anywhere, or it would stay Pending forever.
+- **anti-affinity:** no selected pod may run in the node's domain (`Pod anti-affinity: shop/web-1 matches app=web in
+  the same kubernetes.io/hostname`), and no pod already running there may have an anti-affinity term selecting the
+  incoming pod (`Pod anti-affinity: shop/db-0 repels it in the same kubernetes.io/hostname`).
+
+Drains and replica copies see the pods they have already placed, so a workload with hostname anti-affinity grows by
+at most one copy per node, and two evicted replicas never land on the same node.
+
+**Not simulated:** topology spread, PodDisruptionBudgets, a non-empty `namespaceSelector` on pod affinity terms (it
+needs namespace labels, so only the listed namespaces, or the pod's own, count) and volume zone binding — so a green
+verdict is necessary, not sufficient.

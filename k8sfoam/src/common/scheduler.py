@@ -5,10 +5,11 @@ node's pods go if it were drained?", "which nodes could be removed?" and "can th
 workload scale out by N replicas?". It deliberately covers only the predicates
 that decide most placements: node condition, cordon, nodeSelector, required node
 affinity, taints and tolerations, pod count, CPU, memory and extended resource
-requests (GPUs, ephemeral-storage, hugepages). Inter-pod affinity/anti-affinity,
-topology spread, PodDisruptionBudgets and volume zone binding are out of scope,
-so a "fits" verdict is necessary rather than sufficient. Preferred affinity terms
-only score nodes, so they never filter one out.
+requests (GPUs, ephemeral-storage, hugepages), and required inter-pod affinity and
+anti-affinity. Topology spread, PodDisruptionBudgets, namespaceSelector on pod
+affinity terms and volume zone binding are out of scope, so a "fits" verdict is
+necessary rather than sufficient. Preferred affinity terms only score nodes, so
+they never filter one out.
 
 Units follow the rest of the backend: CPU in millicores, memory and byte-sized
 extended resources in decimal kB, other extended resources as plain counts.
@@ -34,7 +35,8 @@ DRAIN_SKIPPED_OWNERS = {'DaemonSet': 'daemonset', 'Node': 'static'}
 
 # Reason slugs in the order the filter evaluates them — the frontend labels them.
 REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'node-affinity', 'taint',
-                'insufficient-pods', 'insufficient-cpu', 'insufficient-memory', 'insufficient-extended')
+                'insufficient-pods', 'insufficient-cpu', 'insufficient-memory', 'insufficient-extended',
+                'pod-affinity', 'pod-anti-affinity')
 
 # Why a node cannot be removed even on its own. cluster-autoscaler refuses to
 # scale down a node running a pod no controller would recreate, and the control
@@ -166,12 +168,178 @@ def _fmt_terms(terms: list) -> str:
     return ' or '.join(_fmt_term(t) for t in terms)
 
 
+def _selects_everything(selector: Optional[dict]) -> bool:
+    return selector is not None and not selector.get('matchLabels') and not selector.get('matchExpressions')
+
+
+def label_selector_matches(selector: Optional[dict], labels: dict) -> bool:
+    """A LabelSelector; None matches no pod, an empty one every pod."""
+    if selector is None:
+        return False
+    if any(labels.get(k) != v for k, v in (selector.get('matchLabels') or {}).items()):
+        return False
+    return all(requirement_matches(r, labels.get(r['key'])) for r in selector.get('matchExpressions') or [])
+
+
+def pod_term_matches(term: dict, owner_namespace: str, pod: PodResources) -> bool:
+    """Whether `pod` is one the PodAffinityTerm of a pod in `owner_namespace` selects.
+
+    No namespaces and no namespaceSelector mean the owner's namespace; an empty
+    namespaceSelector means every namespace. A non-empty namespaceSelector needs
+    namespace labels, which are not read, so only the listed namespaces count.
+    """
+    if not _selects_everything(term.get('namespaceSelector')):
+        if pod.namespace not in (term.get('namespaces') or [owner_namespace]):
+            return False
+    return label_selector_matches(term.get('labelSelector'), pod.labels or {})
+
+
+def _fmt_selector(term: dict) -> str:
+    selector = term.get('labelSelector')
+    if selector is None:
+        return 'no labels'
+    parts = [f'{k}={v}' for k, v in (selector.get('matchLabels') or {}).items()]
+    parts += [_fmt_requirement(r) for r in selector.get('matchExpressions') or []]
+    return ', '.join(parts) or 'any labels'
+
+
+class _Domains():
+    """Where the pods one incoming pod's inter-pod rules care about run, by (topologyKey, value)."""
+
+    def __init__(self, pod: PodResources):
+        self.pod = pod
+        # Domains holding a pod that matches every affinity term, as kube-scheduler counts them.
+        self.affine: set = set()
+        self.any_affine = False
+        # Domain → the first pod there that one of the incoming pod's anti-affinity terms selects.
+        self.repelled: dict = {}
+        # topologyKey → value → the first pod there whose own anti-affinity term selects the incoming pod.
+        self.repelling: dict = {}
+
+    def add(self, sample: PodResources, members: list) -> None:
+        """Account for `members`, (pod, node labels) pairs alike to `sample` in namespace, labels and anti-affinity."""
+        pod = self.pod
+        affinity = pod.pod_affinity or []
+        affine = bool(affinity) and all(pod_term_matches(t, pod.namespace, sample) for t in affinity)
+        repelled = [t['topologyKey'] for t in pod.pod_anti_affinity or [] if pod_term_matches(t, pod.namespace, sample)]
+        repelling = [t['topologyKey'] for t in sample.pod_anti_affinity or []
+                     if pod_term_matches(t, sample.namespace, pod)]
+        if not (affine or repelled or repelling):
+            return
+        self.any_affine = self.any_affine or affine
+        for other, labels in members:
+            if affine:
+                self.affine.update((t['topologyKey'], labels[t['topologyKey']]) for t in affinity
+                                   if t['topologyKey'] in labels)
+            for key in repelled:
+                if key in labels:
+                    self.repelled.setdefault((key, labels[key]), other)
+            for key in repelling:
+                if key in labels:
+                    self.repelling.setdefault(key, {}).setdefault(labels[key], other)
+
+
+def _likeness(pod: PodResources) -> tuple:
+    """Pods with the same key look the same to every inter-pod term, e.g. replicas of one workload."""
+    return pod.namespace, frozenset((pod.labels or {}).items()), repr(pod.pod_anti_affinity or [])
+
+
+class Placement():
+    """Which pod runs on which node, for the inter-pod affinity predicates.
+
+    A simulation calls place() for every pod it binds, so the next pod sees it.
+    Bound pods are grouped by likeness, so a term is matched once per group
+    rather than once per pod. The per-pod domain index is built on first use and
+    then kept up to date as pods are placed.
+    """
+
+    def __init__(self, nodes: Iterable[NodeResources], pods: Iterable[PodResources]):
+        self.__labels = {n.name: n.labels or {} for n in nodes}
+        self.__pods = [p for p in pods if p.node_name in self.__labels]
+        self.__has_anti_affinity = any(p.pod_anti_affinity for p in self.__pods)
+        self.__groups: Optional[dict] = None
+        self.__domains: dict = {}
+
+    @property
+    def has_anti_affinity(self) -> bool:
+        return self.__has_anti_affinity
+
+    def __grouped(self) -> dict:
+        """likeness → (sample pod, [(pod, node labels)]); built on first use, as most pods carry no terms."""
+        if self.__groups is None:
+            self.__groups = {}
+            for p in self.__pods:
+                self.__join(self.__groups, p)
+        return self.__groups
+
+    def __join(self, groups: dict, pod: PodResources) -> None:
+        groups.setdefault(_likeness(pod), (pod, []))[1].append((pod, self.__labels[pod.node_name]))
+
+    def place(self, pod: PodResources, node_name: str) -> None:
+        bound = pod._replace(node_name=node_name)
+        self.__pods.append(bound)
+        self.__has_anti_affinity = self.__has_anti_affinity or bool(pod.pod_anti_affinity)
+        if self.__groups is None:
+            return
+        self.__join(self.__groups, bound)
+        for domains in self.__domains.values():
+            domains.add(bound, [(bound, self.__labels[node_name])])
+
+    def domains(self, pod: PodResources) -> _Domains:
+        key = (*_likeness(pod), repr(pod.pod_affinity or []))
+        domains = self.__domains.get(key)
+        if domains is None:
+            domains = _Domains(pod)
+            for sample, members in self.__grouped().values():
+                domains.add(sample, members)
+            self.__domains[key] = domains
+        return domains
+
+
+def _inter_pod_reasons(pod: PodResources, node: NodeResources, placement: Placement) -> list:
+    if not (pod.pod_affinity or pod.pod_anti_affinity or placement.has_anti_affinity):
+        return []
+    domains = placement.domains(pod)
+    labels = node.labels or {}
+    reasons = []
+
+    affinity = pod.pod_affinity or []
+    missing = [t['topologyKey'] for t in affinity if t['topologyKey'] not in labels]
+    unmet = [t for t in affinity if (t['topologyKey'], labels.get(t['topologyKey'])) not in domains.affine]
+    # The first pod of a group with affinity to itself would otherwise stay Pending forever.
+    first = not domains.any_affine and all(pod_term_matches(t, pod.namespace, pod) for t in affinity)
+    if missing:
+        reasons.append(_reason('pod-affinity', f'Pod affinity: node has no {missing[0]} label'))
+    elif unmet and not first:
+        t = unmet[0]
+        reasons.append(_reason('pod-affinity',
+                               f"Pod affinity: no pod matching {_fmt_selector(t)} in the same {t['topologyKey']}"))
+
+    for t in pod.pod_anti_affinity or []:
+        key = t['topologyKey']
+        other = domains.repelled.get((key, labels[key])) if key in labels else None
+        if other is not None:
+            reasons.append(_reason('pod-anti-affinity', f'Pod anti-affinity: {other.namespace}/{other.name} '
+                                                        f'matches {_fmt_selector(t)} in the same {key}'))
+            return reasons
+    for key, by_value in domains.repelling.items():
+        other = by_value.get(labels[key]) if key in labels else None
+        if other is not None:
+            reasons.append(_reason('pod-anti-affinity',
+                                   f'Pod anti-affinity: {other.namespace}/{other.name} repels it in the same {key}'))
+            break
+    return reasons
+
+
 def _reason(slug: str, message: str) -> dict:
     return {'slug': slug, 'message': message}
 
 
-def filter_node(pod: PodResources, node: NodeResources, free: dict) -> list:
-    """Why `pod` cannot be placed on `node`, in filter order. Empty means it fits."""
+def filter_node(pod: PodResources, node: NodeResources, free: dict, placement: Optional[Placement] = None) -> list:
+    """Why `pod` cannot be placed on `node`, in filter order. Empty means it fits.
+
+    Without a `placement`, the inter-pod predicates see a cluster with no other pods.
+    """
     reasons = []
 
     if node.unschedulable and not _tolerated(pod, CORDON_TAINT):
@@ -210,6 +378,7 @@ def filter_node(pod: PodResources, node: NodeResources, free: dict) -> list:
                                    f'Insufficient {name}: requires {fmt_extended(name, amount)}, '
                                    f'available {fmt_extended(name, available)}'))
 
+    reasons.extend(_inter_pod_reasons(pod, node, placement if placement is not None else Placement([node], [])))
     return reasons
 
 
@@ -221,11 +390,12 @@ def _public_free(free: dict) -> dict:
 
 def simulate_fit(pod: PodResources, nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> dict:
     """Verdict per node for one hypothetical pod, against the cluster as it is now."""
-    nodes = list(nodes)
+    nodes, pods = list(nodes), list(pods)
     free = free_capacity(nodes, pods)
+    placement = Placement(nodes, pods)
     results = []
     for node in nodes:
-        reasons = filter_node(pod, node, free[node.name])
+        reasons = filter_node(pod, node, free[node.name], placement)
         results.append({'node': node.name, 'fits': not reasons, 'reasons': reasons,
                         'free': _public_free(free[node.name])})
     return {'fits': sum(r['fits'] for r in results), 'total': len(results), 'nodes': results}
@@ -261,6 +431,7 @@ def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterabl
 def _drain(node_name: str, nodes: list, pods: list) -> dict:
     remaining = [n for n in nodes if n.name != node_name]
     free = free_capacity(remaining, pods)
+    placement = Placement(remaining, pods)
     alloc = {n.name: _allocatable(n) for n in remaining}
 
     skipped, evicted = [], []
@@ -280,13 +451,14 @@ def _drain(node_name: str, nodes: list, pods: list) -> dict:
         entry = {'pod': pod.name, 'namespace': pod.namespace, 'cpu': pod.cpu or 0, 'memory': pod.memory or 0,
                  # A naked pod is deleted by the drain and nothing recreates it.
                  'unmanaged': pod.owner_kind is None}
-        verdicts = [(n, filter_node(pod, n, free[n.name])) for n in remaining]
+        verdicts = [(n, filter_node(pod, n, free[n.name], placement)) for n in remaining]
         passing = [n for n, reasons in verdicts if not reasons]
         if not passing:
             pending.append({**entry, 'reasons': _unschedulable_summary([r for _, r in verdicts])})
             continue
         target = max(passing, key=lambda n: (_headroom(pod, alloc[n.name], free[n.name]), n.name))
         _reserve(free[target.name], pod)
+        placement.place(pod, target.name)
         placements.append({**entry, 'to': target.name})
 
     return {
@@ -389,11 +561,11 @@ def simulate_replicas(namespace: str, kind: str, name: str, count: int,
     """Place `count` more copies of a workload's pod onto the cluster, one after another.
 
     The workload's first pod by name is the template: its effective requests,
-    nodeSelector and tolerations. Each copy goes to the passing node with the most
-    headroom left, against the room the previous copies left behind. Free capacity
-    only shrinks, so once a copy fits nowhere no later copy would, and placement
-    stops there. The first k placements of a run are the run for k. Returns None
-    when no pod belongs to the workload.
+    nodeSelector, node and pod affinity, and tolerations. Each copy goes to the
+    passing node with the most headroom left, against the room and the pods the
+    previous copies left behind. A copy that fits nowhere changes nothing, so no
+    later copy would fit either, and placement stops there. The first k placements
+    of a run are the run for k. Returns None when no pod belongs to the workload.
     """
     nodes, pods = list(nodes), list(pods)
     members = [p for p in pods if (p.namespace, p.owner_kind, p.owner_name) == (namespace, kind, name)]
@@ -401,29 +573,33 @@ def simulate_replicas(namespace: str, kind: str, name: str, count: int,
         return None
     template = min(members, key=lambda p: p.name)
     free = free_capacity(nodes, pods)
+    placement = Placement(nodes, pods)
     alloc = {n.name: _allocatable(n) for n in nodes}
 
     placements: list = []
     for i in range(count):
         copy = template._replace(name=f'{name}-sim-{i + 1}', node_name=None)
-        passing = [n for n in nodes if not filter_node(copy, n, free[n.name])]
+        passing = [n for n in nodes if not filter_node(copy, n, free[n.name], placement)]
         if not passing:
             break
         target = max(passing, key=lambda n: (_headroom(copy, alloc[n.name], free[n.name]), n.name))
         _reserve(free[target.name], copy)
+        placement.place(copy, target.name)
         placements.append(target.name)
 
     placed = Counter(placements)
     # Whether each node could take one more copy: at the stop, why the next replica stays Pending.
-    verdicts = [{'node': n.name, 'replicas': placed[n.name], 'reasons': filter_node(template, n, free[n.name])}
-                for n in nodes]
+    verdicts = [{'node': n.name, 'replicas': placed[n.name],
+                 'reasons': filter_node(template, n, free[n.name], placement)} for n in nodes]
     fits = len(placements) == count
     return {
         'workload': {'namespace': namespace, 'kind': kind, 'name': name},
         'template': {'pod': template.name, 'cpu': template.cpu or 0, 'memory': template.memory or 0,
                      'extended': dict(template.extended or {}), 'nodeSelector': dict(template.node_selector or {}),
                      'tolerations': list(template.tolerations or []),
-                     'nodeAffinity': list(template.node_affinity or [])},
+                     'nodeAffinity': list(template.node_affinity or []),
+                     'podAffinity': list(template.pod_affinity or []),
+                     'podAntiAffinity': list(template.pod_anti_affinity or [])},
         'requested': count,
         'placed': len(placements),
         'fits': fits,
