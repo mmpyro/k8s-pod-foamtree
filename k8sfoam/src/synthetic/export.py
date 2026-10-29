@@ -109,12 +109,12 @@ def export_data(data_dir: Path, seed: int = DEFAULT_SEED) -> None:
            [{'id': p['id'], 'label': p['label'], 'form': preset_form(p['spec'])} for p in FIT_PRESETS])
     for c in contexts:
         cluster = registry.get(c['context'])
-        nodes, pods = cluster.get_node_resources(), cluster.get_pod_resources()
+        nodes, pods, pdbs = cluster.get_node_resources(), cluster.get_pod_resources(), cluster.get_disruption_budgets()
         out = data_dir / context_path(c['context'])
         _write(out / 'resources.json', FoamTreeMapper(iter(nodes), pods).combined())
         for node in nodes:
-            _write(out / 'drain' / f'{node.name}.json', simulate_drain(node.name, nodes, pods))
-        _write(out / 'consolidation.json', simulate_consolidation(nodes, pods))
+            _write(out / 'drain' / f'{node.name}.json', simulate_drain(node.name, nodes, pods, pdbs))
+        _write(out / 'consolidation.json', simulate_consolidation(nodes, pods, pdbs))
         for preset in FIT_PRESETS:
             _write(out / 'fit' / f"{preset['id']}.json", simulate_fit(parse_pod_spec(preset['spec']), nodes, pods))
         workloads = {(p.namespace, p.owner_kind, p.owner_name) for p in pods

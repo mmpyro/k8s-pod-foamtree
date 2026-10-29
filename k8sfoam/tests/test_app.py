@@ -3,7 +3,7 @@ import bitmath  # type: ignore
 from k8sfoam.src.app import create_app, main, change_events, DEBOUNCE
 from k8sfoam.src.k8s.k8s_client import DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock
-from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
+from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources, ContainerResources
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP
 
@@ -119,6 +119,7 @@ def simulation_cluster():
                                                            NodeResources('b', 1000, float(bitmath.GiB(16).kB))]
     k8s_client_instance.get_pod_resources.return_value = [PodResources('web', 'a', 1000, float(bitmath.GiB(1).kB), [], [],
                                                                        owner_kind='ReplicaSet')]
+    k8s_client_instance.get_disruption_budgets.return_value = []
     return k8s_client_instance
 
 
@@ -229,6 +230,45 @@ def test_simulate_drain_returns_placements(k8s_client, test_client):
     assert response.status_code == 200
     assert response.json['fits'] is True
     assert response.json['placements'][0]['to'] == 'b'
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_honours_disruption_budgets(k8s_client, test_client):
+    # Given
+    cluster = simulation_cluster()
+    cluster.get_pod_resources.return_value = [
+        PodResources('db-0', 'a', 100, float(bitmath.GiB(1).kB), [], [], 'default', labels={'app': 'db'},
+                     owner_kind='StatefulSet', owner_name='db')]
+    cluster.get_disruption_budgets.return_value = [
+        DisruptionBudget('db-pdb', 'default', {'matchLabels': {'app': 'db'}, 'matchExpressions': []}, 0)]
+    k8s_client.return_value = cluster
+
+    # When
+    drain = test_client.get('/simulate/drain/a')
+    consolidation = test_client.get('/simulate/consolidation')
+
+    # Then
+    assert drain.status_code == 200
+    assert drain.json['pdbsChecked'] is True
+    assert drain.json['blocked'] == [{'pod': 'db-0', 'namespace': 'default', 'pdb': 'db-pdb',
+                                      'disruptionsAllowed': 0}]
+    verdicts = {v['node']: v for v in consolidation.json['nodes']}
+    assert verdicts['a']['blockers'] == [{'slug': 'pdb', 'pods': 1}]
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_says_when_disruption_budgets_were_not_checked(k8s_client, test_client):
+    # Given — RBAC denied listing PDBs
+    cluster = simulation_cluster()
+    cluster.get_disruption_budgets.return_value = None
+    k8s_client.return_value = cluster
+
+    # When
+    response = test_client.get('/simulate/drain/a')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['pdbsChecked'] is False
 
 
 @patch('k8sfoam.src.app.K8sClient')

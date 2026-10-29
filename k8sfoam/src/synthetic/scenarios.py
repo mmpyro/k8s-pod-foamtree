@@ -110,6 +110,8 @@ def shop(seed: int = DEFAULT_SEED) -> ClusterModel:
     m.deploy(Workload('catalog', 'catalog-db', 'StatefulSet', [
         Container('postgres', cpu='2', memory='8Gi', cpu_limit='2', memory_limit='8Gi',
                   extended={'ephemeral-storage': '10Gi'})], replicas=3))
+    # minAvailable equal to the replica count: no node running a replica can be drained.
+    m.add_budget('catalog', 'catalog-db', {'app': 'catalog-db'}, min_available=3)
     m.deploy(_web('cart', 'cart-api', 4, '200m', '256Mi', '512Mi'))
     # A cache that only runs on spot capacity (spof-spot).
     m.deploy(Workload('cart', 'cart-redis', 'StatefulSet', [

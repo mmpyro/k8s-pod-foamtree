@@ -1,7 +1,7 @@
 import bitmath  # type: ignore
 import pytest
 from collections import Counter
-from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources
 from k8sfoam.src.common.scheduler import (filter_node, free_capacity, simulate_consolidation, simulate_drain,
                                           simulate_fit, simulate_replicas, tolerates, fmt_memory)
 
@@ -484,6 +484,68 @@ def test_simulate_replicas_spread_copies_evenly_across_zones():
     assert Counter(zone_of[n] for n in ['a1', *result['placements']]) == {'a': 2, 'b': 2, 'c': 2}
 
 
+def budget(name, allowed, namespace='default', **match_labels):
+    return DisruptionBudget(name, namespace, {'matchLabels': match_labels, 'matchExpressions': []}, allowed)
+
+
+def test_simulate_drain_blocks_pods_beyond_the_disruption_budget():
+    # Given — the budget allows one eviction, two matching pods sit on the node
+    nodes = [node('a'), node('b')]
+    pods = [pod('db-0', 'a', 1000, labels={'app': 'db'}), pod('db-1', 'a', 500, labels={'app': 'db'}),
+            pod('web', 'a', 100, labels={'app': 'web'})]
+
+    # When
+    result = simulate_drain('a', nodes, pods, [budget('db-pdb', 1, app='db')])
+
+    # Then — the bigger pod goes first and uses the budget up
+    assert result['pdbsChecked'] is True
+    assert [p['pod'] for p in result['placements']] == ['db-0', 'web']
+    assert result['blocked'] == [{'pod': 'db-1', 'namespace': 'default', 'pdb': 'db-pdb', 'disruptionsAllowed': 1}]
+    assert result['fits'] is True
+
+
+def test_simulate_drain_without_a_matching_budget_evicts_everything():
+    # Given — a budget for another namespace and one for other labels
+    nodes = [node('a'), node('b')]
+    pods = [pod('db-0', 'a', labels={'app': 'db'})]
+    pdbs = [budget('other-ns', 0, namespace='other', app='db'), budget('web-pdb', 0, app='web')]
+
+    # When
+    with_budgets = simulate_drain('a', nodes, pods, pdbs)
+    none = simulate_drain('a', nodes, pods, [])
+
+    # Then
+    for result in (with_budgets, none):
+        assert result['blocked'] == []
+        assert result['pdbsChecked'] is True
+        assert [p['pod'] for p in result['placements']] == ['db-0']
+
+
+def test_simulate_drain_reports_pdbs_not_checked_when_they_could_not_be_read():
+    # When
+    result = simulate_drain('a', [node('a'), node('b')], [pod('db-0', 'a', labels={'app': 'db'})], None)
+
+    # Then
+    assert result['pdbsChecked'] is False
+    assert result['blocked'] == []
+
+
+def test_simulate_consolidation_blocks_a_node_with_pods_held_by_a_budget():
+    # Given
+    nodes = [node('a'), node('b')]
+    pods = [pod('db-0', 'a', 100, labels={'app': 'db'})]
+
+    # When
+    result = simulate_consolidation(nodes, pods, [budget('db-pdb', 0, app='db')])
+
+    # Then
+    verdicts = by_node(result)
+    assert verdicts['a']['removable'] is False
+    assert verdicts['a']['blockers'] == [{'slug': 'pdb', 'pods': 1}]
+    assert [step['node'] for step in result['plan']] == ['b']
+    assert result['pdbsChecked'] is True
+
+
 def test_untolerated_blocking_taint_is_reported_and_prefer_no_schedule_ignored():
     # Given
     n = node('a', taints=[{'key': 'dedicated', 'value': 'gpu', 'effect': 'NoSchedule'},
@@ -832,8 +894,9 @@ def test_simulate_consolidation_leaves_the_input_pods_bound_where_they_are():
 
 
 def test_simulate_consolidation_of_an_empty_cluster():
-    assert simulate_consolidation([], []) == {
-        'total': 0, 'nodes': [], 'plan': [], 'freed': {'nodes': 0, 'cpu': 0, 'memory': 0.0, 'extended': {}}}
+    assert simulate_consolidation([], [], []) == {
+        'total': 0, 'nodes': [], 'plan': [], 'freed': {'nodes': 0, 'cpu': 0, 'memory': 0.0, 'extended': {}},
+        'pdbsChecked': True}
 
 
 def replica(name, node_name=None, cpu=0, memory=0.0, **kw):

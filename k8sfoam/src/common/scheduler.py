@@ -6,17 +6,18 @@ workload scale out by N replicas?". It deliberately covers only the predicates
 that decide most placements: node condition, cordon, nodeSelector, required node
 affinity, taints and tolerations, pod count, CPU, memory and extended resource
 requests (GPUs, ephemeral-storage, hugepages), DoNotSchedule topology spread, and
-required inter-pod affinity and anti-affinity. PodDisruptionBudgets,
-namespaceSelector on pod affinity terms and volume zone binding are out of scope,
-so a "fits" verdict is necessary rather than sufficient. Preferred affinity terms
-and ScheduleAnyway spread constraints only score nodes, so they never filter one out.
+required inter-pod affinity and anti-affinity. Drains also honour
+PodDisruptionBudgets. namespaceSelector on pod affinity terms and volume zone
+binding are out of scope, so a "fits" verdict is necessary rather than sufficient.
+Preferred affinity terms and ScheduleAnyway spread constraints only score nodes,
+so they never filter one out.
 
 Units follow the rest of the backend: CPU in millicores, memory and byte-sized
 extended resources in decimal kB, other extended resources as plain counts.
 """
 from collections import Counter
 from typing import Iterable, Optional
-from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources
 from k8sfoam.src.common.resources import is_bytes
 
 
@@ -41,7 +42,7 @@ REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'node-affinity', 'tain
 # Why a node cannot be removed even on its own. cluster-autoscaler refuses to
 # scale down a node running a pod no controller would recreate, and the control
 # plane is not a node group it manages.
-BLOCKER_ORDER = ('control-plane', 'pending', 'unmanaged')
+BLOCKER_ORDER = ('control-plane', 'pending', 'pdb', 'unmanaged')
 CONTROL_PLANE_LABELS = ('node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master')
 
 # Upper bound on the copies one replica simulation places; each copy filters every node.
@@ -518,20 +519,23 @@ def _headroom(pod: PodResources, alloc: dict, free: dict) -> float:
     return min(cpu, memory)
 
 
-def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> Optional[dict]:
+def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterable[PodResources],
+                   pdbs: Optional[Iterable[DisruptionBudget]] = None) -> Optional[dict]:
     """Re-place every evictable pod of `node_name` onto the rest of the cluster.
 
     First-fit decreasing: the biggest pods (by dominant share) are placed first,
-    each on the passing node with the most headroom left afterwards. Returns None
-    when the node does not exist.
+    each on the passing node with the most headroom left afterwards. In that order,
+    each eviction draws on the PodDisruptionBudgets selecting the pod; once one is
+    used up, its remaining pods are blocked and stay. `pdbs` None means they could
+    not be read, and the result says so. Returns None when the node does not exist.
     """
     nodes, pods = list(nodes), list(pods)
     if not any(n.name == node_name for n in nodes):
         return None
-    return _drain(node_name, nodes, pods)
+    return _drain(node_name, nodes, pods, list(pdbs) if pdbs is not None else None)
 
 
-def _drain(node_name: str, nodes: list, pods: list) -> dict:
+def _drain(node_name: str, nodes: list, pods: list, pdbs: Optional[list] = None) -> dict:
     remaining = [n for n in nodes if n.name != node_name]
     free = free_capacity(remaining, pods)
     placement = Placement(remaining, pods)
@@ -549,8 +553,19 @@ def _drain(node_name: str, nodes: list, pods: list) -> dict:
     max_memory = max((a['memory'] for a in alloc.values()), default=0) or 1
     evicted.sort(key=lambda p: (-max((p.cpu or 0) / max_cpu, (p.memory or 0) / max_memory), p.name))
 
-    placements, pending = [], []
+    # Evictions from one drain draw on the same budgets; they refill only once the pods are healthy elsewhere.
+    allowance = {(b.namespace, b.name): b.disruptions_allowed for b in pdbs or []}
+    placements, pending, blocked = [], [], []
     for pod in evicted:
+        budgets = [b for b in pdbs or []
+                   if b.namespace == pod.namespace and label_selector_matches(b.selector, pod.labels or {})]
+        exhausted = next((b for b in budgets if allowance[(b.namespace, b.name)] < 1), None)
+        if exhausted is not None:
+            blocked.append({'pod': pod.name, 'namespace': pod.namespace, 'pdb': exhausted.name,
+                            'disruptionsAllowed': exhausted.disruptions_allowed})
+            continue
+        for b in budgets:
+            allowance[(b.namespace, b.name)] -= 1
         entry = {'pod': pod.name, 'namespace': pod.namespace, 'cpu': pod.cpu or 0, 'memory': pod.memory or 0,
                  # A naked pod is deleted by the drain and nothing recreates it.
                  'unmanaged': pod.owner_kind is None}
@@ -571,6 +586,9 @@ def _drain(node_name: str, nodes: list, pods: list) -> dict:
         'placements': placements,
         'pending': pending,
         'skipped': skipped,
+        # Pods `kubectl drain` would keep retrying to evict; they stay on the node.
+        'blocked': blocked,
+        'pdbsChecked': pdbs is not None,
     }
 
 
@@ -581,6 +599,8 @@ def _blockers(node: NodeResources, drain: dict) -> list:
         blockers.append({'slug': 'control-plane', 'pods': 0})
     if drain['pending']:
         blockers.append({'slug': 'pending', 'pods': len(drain['pending'])})
+    if drain['blocked']:
+        blockers.append({'slug': 'pdb', 'pods': len(drain['blocked'])})
     unmanaged = sum(p['unmanaged'] for p in drain['placements'] + drain['pending'])
     if unmanaged:
         blockers.append({'slug': 'unmanaged', 'pods': unmanaged})
@@ -603,7 +623,8 @@ def _rebind(pods: list, placements: list) -> list:
             for p in pods]
 
 
-def simulate_consolidation(nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> dict:
+def simulate_consolidation(nodes: Iterable[NodeResources], pods: Iterable[PodResources],
+                           pdbs: Optional[Iterable[DisruptionBudget]] = None) -> dict:
     """Which nodes could be emptied onto the rest of the cluster, alone and together.
 
     Every node first gets an independent drain verdict. Those cannot be added up —
@@ -611,12 +632,15 @@ def simulate_consolidation(nodes: Iterable[NodeResources], pods: Iterable[PodRes
     are then drained one after another, least utilised first like cluster-autoscaler,
     each against the cluster left by the previous steps. Removing a node only takes
     capacity away, so a node that cannot go alone is never a candidate for the plan.
+    Each step gets the budgets afresh: its evicted pods are running again before the
+    next node goes. `pdbs` None means they could not be read.
     """
     nodes, pods = list(nodes), list(pods)
+    pdbs = list(pdbs) if pdbs is not None else None
 
     verdicts = []
     for node in nodes:
-        drain = _drain(node.name, nodes, pods)
+        drain = _drain(node.name, nodes, pods, pdbs)
         moved = drain['placements'] + drain['pending']
         alloc = _allocatable(node)
         blockers = _blockers(node, drain)
@@ -636,8 +660,8 @@ def simulate_consolidation(nodes: Iterable[NodeResources], pods: Iterable[PodRes
     plan, working = [], pods
     for v in candidates:
         left = [n for n in nodes if n.name not in removed]
-        drain = _drain(v['node'], left, working)
-        if not drain['fits']:
+        drain = _drain(v['node'], left, working, pdbs)
+        if not drain['fits'] or drain['blocked']:
             v['conflictWith'] = list(removed)
             continue
         removed.append(v['node'])
@@ -656,7 +680,7 @@ def simulate_consolidation(nodes: Iterable[NodeResources], pods: Iterable[PodRes
         v['inPlan'] = v['node'] in removed
         v.setdefault('conflictWith', None)
 
-    return {'total': len(nodes), 'nodes': verdicts, 'plan': plan, 'freed': freed}
+    return {'total': len(nodes), 'nodes': verdicts, 'plan': plan, 'freed': freed, 'pdbsChecked': pdbs is not None}
 
 
 def simulate_replicas(namespace: str, kind: str, name: str, count: int,

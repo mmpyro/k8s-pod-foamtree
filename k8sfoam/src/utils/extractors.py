@@ -1,6 +1,6 @@
 from typing import Optional
 from kubernetes.utils import parse_quantity  # type: ignore
-from k8sfoam.src.common.dtos import PodResources, ContainerResources, NodeResources
+from k8sfoam.src.common.dtos import DisruptionBudget, PodResources, ContainerResources, NodeResources
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS, CORDON_TAINT
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, extract_extended
 
@@ -163,6 +163,12 @@ class ResourcesExtractor():
                             _pod_affinity_terms(affinity.pod_affinity if affinity is not None else None),
                             _pod_affinity_terms(affinity.pod_anti_affinity if affinity is not None else None),
                             _topology_spread(pod, labels))
+
+    def extract_disruption_budget(self, pdb) -> DisruptionBudget:
+        # A budget the controller has not processed yet reports no status: nothing may be evicted.
+        allowed = pdb.status.disruptions_allowed if pdb.status is not None else 0
+        selector = _label_selector(pdb.spec.selector) if pdb.spec is not None else None
+        return DisruptionBudget(pdb.metadata.name, pdb.metadata.namespace, selector, allowed or 0)
 
     def __extract_node_taints(self, node) -> list:
         """Every taint on the node, minus the one Kubernetes adds on cordon.

@@ -34,6 +34,7 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const BLOCKERS = {
   "control-plane": () => "control-plane node — not part of a node group",
   "pending": n => `${plural(n, "pod")} would go Pending`,
+  "pdb": n => `${plural(n, "pod")} held by a PodDisruptionBudget`,
   "unmanaged": n => `${plural(n, "naked pod")} — nothing would recreate ${n === 1 ? "it" : "them"}`,
 };
 
@@ -45,7 +46,11 @@ function blockerLabel(b) {
 // verdict is read as "necessary", not "guaranteed".
 const CAVEAT = "Filter phase only: CPU, memory, extended resources (GPUs, ephemeral-storage, hugepages), " +
   "pod count, cordon, readiness, nodeSelector, taints, required node and pod (anti-)affinity and " +
-  "DoNotSchedule topology spread. PDBs and volume zones are not simulated.";
+  "DoNotSchedule topology spread; drains honour PodDisruptionBudgets. Volume zones are not simulated.";
+
+// Shown when the server could not list PodDisruptionBudgets (RBAC), so drains ignored them.
+const PDB_UNCHECKED = "PodDisruptionBudgets not checked: the server may not list them (RBAC), " +
+  "so a real drain may still wait on some pods.";
 
 function reasonLabel(slug) {
   return (REASONS[slug] || { label: slug }).label;
@@ -173,12 +178,14 @@ function drainSimulation(result) {
   const verdicts = new Map([[result.node, "drained"]]);
   for (const p of result.placements) verdicts.set(p.to, "ok");
   const moved = result.placements.length + result.pending.length;
+  const blocked = (result.blocked || []).length;
+  const summary = !result.fits
+    ? `drain ${result.node}: ${result.pending.length} pending`
+    : `drain ${result.node}: ${moved} pod${moved === 1 ? "" : "s"} fit`;
   return {
     kind: "drain",
-    summary: result.fits
-      ? `drain ${result.node}: ${moved} pod${moved === 1 ? "" : "s"} fit`
-      : `drain ${result.node}: ${result.pending.length} pending`,
-    ok: result.fits,
+    summary: blocked ? `${summary}, ${blocked} held by PDB` : summary,
+    ok: result.fits && !blocked,
     verdicts,
   };
 }
@@ -440,16 +447,36 @@ function DrainReport({ report, memUnit, fmtMem }) {
   const r = report.result;
   const moved = r.placements.length + r.pending.length;
   const unmanaged = [...r.placements, ...r.pending].filter(p => p.unmanaged).length;
+  const blocked = r.blocked || [];
   return (
     <>
-      <div className={`sim-summary ${r.fits ? "sim-summary-ok" : "sim-summary-fail"}`}>
+      <div className={`sim-summary ${r.fits && !blocked.length ? "sim-summary-ok" : "sim-summary-fail"}`}>
         {moved === 0
-          ? "Nothing to move — this node runs no evictable pods."
+          ? (blocked.length ? "Nothing can be evicted yet." : "Nothing to move — this node runs no evictable pods.")
           : r.fits
-            ? `All ${moved} evictable pod${moved === 1 ? "" : "s"} fit on the remaining ${r.remainingNodes} node${r.remainingNodes === 1 ? "" : "s"}.`
+            ? `All ${moved} evicted pod${moved === 1 ? "" : "s"} fit on the remaining ${r.remainingNodes} node${r.remainingNodes === 1 ? "" : "s"}.`
             : `${r.pending.length} of ${moved} pods would go Pending — the cluster lacks headroom.`}
+        {blocked.length > 0 && ` kubectl drain would wait on ${plural(blocked.length, "pod")} held by a PodDisruptionBudget.`}
         {unmanaged > 0 && ` ${unmanaged} naked pod${unmanaged === 1 ? " has" : "s have"} no controller and would not be recreated.`}
       </div>
+      {r.pdbsChecked === false && <div className="sim-note">{PDB_UNCHECKED}</div>}
+
+      {blocked.length > 0 && (
+        <div className="sim-group">
+          <div className="ov-section-title">Blocked by PDB · {blocked.length}</div>
+          <div className="sim-skipped">
+            {blocked.map(b => (
+              <div key={`${b.namespace}/${b.pod}`} className="taint-row">
+                <code>{b.namespace}/{b.pod}</code>
+                <span className="taint-effect">
+                  {b.pdb} allows {plural(b.disruptionsAllowed, "disruption")}
+                  {b.disruptionsAllowed > 0 ? ", used up by this drain" : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {r.pending.length > 0 && (
         <div className="sim-group">
@@ -605,6 +632,7 @@ function ConsolidationModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
                   ? `${plural(result.plan.length, "node")} of ${result.total} can go, freeing ${fmtFreed(result.freed, memUnit, fmtMem)}.`
                   : `No node can be removed — every one of the ${result.total} is either needed for headroom or blocked.`}
               </div>
+              {result.pdbsChecked === false && <div className="sim-note">{PDB_UNCHECKED}</div>}
 
               {result.plan.length > 0 && (
                 <div className="sim-group">

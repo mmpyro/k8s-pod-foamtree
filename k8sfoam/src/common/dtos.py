@@ -28,6 +28,9 @@ ContainerResources = namedtuple('ContainerResources', 'name cpu memory memory_li
 # grouping and the scheduling simulator; allocatable_pods is None when the node
 # reports no pod limit. Declared last with defaults so existing positional
 # construction keeps working.
+# A PodDisruptionBudget, for the drain simulator: selector is a LabelSelector
+# dict (None selects no pod), disruptions_allowed is the controller's status.
+DisruptionBudget = namedtuple('DisruptionBudget', 'name namespace selector disruptions_allowed')
 NodeResources = namedtuple(
     'NodeResources',
     'name cpu memory unschedulable taints conditions extended labels allocatable_pods',
