@@ -1287,6 +1287,19 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .sim-badge-ok { background: rgba(16,185,129,.18); color: var(--ok); }
 .sim-badge-fail { background: rgba(239,68,68,.18); color: var(--danger); }
 .sim-badge-drained { background: var(--bg-3); color: var(--text-dim); }
+.sim-badge-hyp { background: transparent; color: var(--text-dim); border: 1px dashed var(--text-soft); }
+
+/* Hypothetical nodes: only in the shown simulation, so drawn as dashed ghosts.
+   The card's inline background and border colour lose to these. */
+.node-card.is-hypothetical {
+  border-style: dashed;
+  border-width: 1.5px !important;
+  border-color: var(--text-soft) !important;
+  background: transparent !important;
+}
+.node-card.is-hypothetical.sim-ok { border-color: var(--ok) !important; box-shadow: 0 0 18px -6px var(--ok); }
+.node-card.is-hypothetical.sim-fail { border-color: var(--danger) !important; box-shadow: 0 0 18px -6px var(--danger); }
+.node-card.is-hypothetical .pod-empty { background: transparent; }
 
 .sim-strip {
   display: flex; align-items: center; gap: 12px;
@@ -1304,6 +1317,13 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .overlay-head-tools { display: flex; align-items: center; gap: 8px; }
 .sim-drain-btn { padding: 8px 12px; white-space: nowrap; }
 .btn-primary:disabled { opacity: .6; cursor: default; transform: none; }
+
+/* The fit form grows with every hypothetical node row, so a simulator card
+   scrolls as a whole, header pinned, rather than only its result pane. */
+.overlay-card.sim-card { overflow-y: auto; }
+.sim-card > * { flex-shrink: 0; }
+.sim-card > .overlay-pods { flex: none; overflow: visible; }
+.sim-card > .overlay-head { position: sticky; top: 0; z-index: 1; background: var(--panel); }
 
 .sim-form {
   display: grid;
@@ -1398,6 +1418,38 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 }
 .sim-template code { color: var(--text); }
 .sim-nested { margin: 0 0 4px 18px; }
+.sim-tag-hyp { background: transparent; color: var(--text-dim); border: 1px dashed var(--text-soft); }
+
+/* "+ Add nodes" rows: a template or a custom shape, times a count. */
+.sim-extra { gap: 8px; }
+.sim-extra-entry { display: flex; flex-direction: column; gap: 6px; }
+.sim-extra-row { display: flex; align-items: center; gap: 8px; }
+.sim-extra-row select {
+  flex: 1; min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  padding: 7px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.sim-extra-row select:focus { outline: none; border-color: var(--accent); }
+.sim-field .sim-extra-count { width: 70px; }
+.sim-extra-times { color: var(--text-soft); font-size: 12px; }
+.sim-extra-shape { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding-left: 12px; }
+.sim-extra-add { align-self: flex-start; }
+.sim-extra-add:disabled { opacity: .5; cursor: default; }
+.sim-rerun { margin: 0 -22px 12px; border-top: 1px solid var(--line); padding-top: 12px; padding-bottom: 12px; }
+
+/* Offers the pending pods simulation; a button styled as a chip. */
+.pending-chip {
+  flex-shrink: 0;
+  color: var(--warn);
+  border-color: rgba(245,158,11,.45);
+  cursor: pointer;
+}
+.pending-chip:hover { color: var(--text); background: rgba(245,158,11,.18); }
 
 @media (max-width: 760px) {
   .sim-form { grid-template-columns: 1fr; }

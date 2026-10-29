@@ -12,11 +12,13 @@ const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
 const {
-  FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal, drainSimulation, scalableWorkload,
+  FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal, PendingModal, drainSimulation,
+  scalableWorkload,
 } = window.k8sSimulate;
 
 const SIM_KINDS = {
   fit: "Fit simulation", drain: "Drain simulation", consolidation: "Consolidation", replicas: "Replica simulation",
+  pending: "Pending pods",
 };
 const { readHash, writeHash } = window.k8sUrlState;
 const api = window.k8sApi;
@@ -99,81 +101,91 @@ function extOf(extended) {
 // Node objects the views share, from the GET /resources payload: memory and
 // byte-sized extended resources converted to MiB, pod requests summed per node.
 function toNodes(payload) {
-  return (payload.nodes || []).map((n, idx) => {
-    let cpuUsed = 0;
-    let memUsed = 0;
-    const extUsed = {};
+  return (payload.nodes || []).map(toNode);
+}
 
-    const pods = (n.pods || []).map(p => {
-      const podExt = extOf(p.extended);
-      cpuUsed += p.cpu || 0;
-      memUsed += p.memory || 0;
-      for (const [name, v] of Object.entries(podExt)) extUsed[name] = (extUsed[name] || 0) + v;
+// A simulation's hypothetical nodes, drawn after the real ones as dashed ghosts.
+// Their ids cannot collide with real ones, and their hues follow the real nodes'.
+function toGhostNodes(sim, offset) {
+  return ((sim && sim.hypothetical) || []).map((n, i) => ({
+    ...toNode(n, offset + i), id: `hyp-${n.name}`, hypothetical: true,
+  }));
+}
 
-      return {
-        name: p.name,
-        shortName: p.name.split('-')[0],
-        // Selector metadata for the query bar.
-        namespace: p.namespace || "",
-        labels: p.labels || {},
-        qos: p.qos || "",
-        hasInit: !!p.hasInitContainers,
-        // Best-practice rule slugs, decided by the backend.
-        findings: p.findings || [],
-        // Controlling workload { kind, name }; null for naked pods and old data.
-        owner: p.owner || null,
-        // Effective request (what the scheduler reserves) — init containers
-        // run sequentially, so this is max(sum regular, max init), not a sum.
-        cpu: p.cpu || 0,
-        mem: kbToMib(p.memory || 0),
-        ext: podExt,
-        containers: (p.containers || []).map(c => ({
-          name: c.name,
-          init: !!c.init,
-          cpu: c.cpu || 0,
-          mem: kbToMib(c.memory || 0),
-          ext: extOf(c.extended)
-        }))
-      };
-    });
+function toNode(n, idx) {
+  let cpuUsed = 0;
+  let memUsed = 0;
+  const extUsed = {};
 
-    const cpuCapacity = n.cpu || 0;
-    const memCapacity = kbToMib(n.memory || 0);
-    const convertedMemUsed = kbToMib(memUsed);
-    // Placement labels from the backend; null wherever the node is unlabelled.
-    const topo = n.topology || {};
-    const extCap = extOf(n.extended);
-    const extFree = {};
-    for (const [name, cap] of Object.entries(extCap)) extFree[name] = Math.max(0, cap - (extUsed[name] || 0));
+  const pods = (n.pods || []).map(p => {
+    const podExt = extOf(p.extended);
+    cpuUsed += p.cpu || 0;
+    memUsed += p.memory || 0;
+    for (const [name, v] of Object.entries(podExt)) extUsed[name] = (extUsed[name] || 0) + v;
 
     return {
-      id: `node-${idx}`,
-      name: n.name,
-      topology: {
-        zone: topo.zone || null,
-        region: topo.region || null,
-        instanceType: topo.instanceType || null,
-        nodePool: topo.nodePool || null,
-        capacityType: topo.capacityType || null,
-      },
-      cpuCapacity,
-      memCapacity,
-      cpuUsed,
-      memUsed: convertedMemUsed,
-      cpuFree: Math.max(0, cpuCapacity - cpuUsed),
-      memFree: Math.max(0, memCapacity - convertedMemUsed),
-      extCap,
-      extUsed,
-      extFree,
-      pods,
-      // Node health from the backend.
-      warnings: n.warnings || [],
-      taints: n.taints || [],
-      conditions: n.conditions || {},
-      unschedulable: !!n.unschedulable,
-      status: statusOf(n.warnings || [])
+      name: p.name,
+      shortName: p.name.split('-')[0],
+      // Selector metadata for the query bar.
+      namespace: p.namespace || "",
+      labels: p.labels || {},
+      qos: p.qos || "",
+      hasInit: !!p.hasInitContainers,
+      // Best-practice rule slugs, decided by the backend.
+      findings: p.findings || [],
+      // Controlling workload { kind, name }; null for naked pods and old data.
+      owner: p.owner || null,
+      // Effective request (what the scheduler reserves) — init containers
+      // run sequentially, so this is max(sum regular, max init), not a sum.
+      cpu: p.cpu || 0,
+      mem: kbToMib(p.memory || 0),
+      ext: podExt,
+      containers: (p.containers || []).map(c => ({
+        name: c.name,
+        init: !!c.init,
+        cpu: c.cpu || 0,
+        mem: kbToMib(c.memory || 0),
+        ext: extOf(c.extended)
+      }))
     };
   });
+
+  const cpuCapacity = n.cpu || 0;
+  const memCapacity = kbToMib(n.memory || 0);
+  const convertedMemUsed = kbToMib(memUsed);
+  // Placement labels from the backend; null wherever the node is unlabelled.
+  const topo = n.topology || {};
+  const extCap = extOf(n.extended);
+  const extFree = {};
+  for (const [name, cap] of Object.entries(extCap)) extFree[name] = Math.max(0, cap - (extUsed[name] || 0));
+
+  return {
+    id: `node-${idx}`,
+    name: n.name,
+    topology: {
+      zone: topo.zone || null,
+      region: topo.region || null,
+      instanceType: topo.instanceType || null,
+      nodePool: topo.nodePool || null,
+      capacityType: topo.capacityType || null,
+    },
+    cpuCapacity,
+    memCapacity,
+    cpuUsed,
+    memUsed: convertedMemUsed,
+    cpuFree: Math.max(0, cpuCapacity - cpuUsed),
+    memFree: Math.max(0, memCapacity - convertedMemUsed),
+    extCap,
+    extUsed,
+    extFree,
+    pods,
+    // Node health from the backend.
+    warnings: n.warnings || [],
+    taints: n.taints || [],
+    conditions: n.conditions || {},
+    unschedulable: !!n.unschedulable,
+    status: statusOf(n.warnings || [])
+  };
 }
 
 function App() {
@@ -210,8 +222,11 @@ function App() {
   const [fitOpen, setFitOpen] = useState(false);
   const [consolidationOpen, setConsolidationOpen] = useState(false);
   const [replicasOpen, setReplicasOpen] = useState(false);
+  const [pendingOpen, setPendingOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
+  // Unbound pods the scheduler is trying to place; offers the pending pods simulation.
+  const [pendingPods, setPendingPods] = useState(0);
   // Context name the loaded nodes came from; null until the first load.
   const [loadedCtx, setLoadedCtx] = useState(null);
   const [error, setError] = useState(null);
@@ -276,7 +291,9 @@ function App() {
     loadingRef.current = true;
     setRefreshing(true);
     try {
-      setNodes(toNodes(await api.resources(ctxName)));
+      const payload = await api.resources(ctxName);
+      setNodes(toNodes(payload));
+      setPendingPods(payload.pendingPods || 0);
       setLoadedCtx(ctxName);
       setError(null);
       setLastRefresh(Date.now());
@@ -421,6 +438,15 @@ function App() {
     window.history.replaceState(null, "", `${pathname}${search}${hash}`);
   }, [ctxName, view, metric, colorBy, groupBy, memUnit, query, selectedWorkload]);
 
+  // What the 2D map and the 3D view draw: the cluster, plus the shown simulation's
+  // hypothetical nodes. Everything else — totals, query, sidebar, exports — reads `nodes`.
+  const viewNodes = useMemo(
+    () => (sim && sim.hypothetical && sim.hypothetical.length ? [...nodes, ...toGhostNodes(sim, nodes.length)] : nodes),
+    [nodes, sim]
+  );
+  // A ghost has no pods to list and nothing to drain.
+  const focusNode = node => { if (!node.hypothetical) setFocused(node); };
+
   // Totals
   const totals = useMemo(() => {
     const t = { cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, pods: 0, nodes: nodes.length, extCap: {}, extUsed: {} };
@@ -487,6 +513,7 @@ function App() {
       setFitOpen(false);
       setConsolidationOpen(false);
       setReplicasOpen(false);
+      setPendingOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -668,6 +695,8 @@ function App() {
           onFit={() => setFitOpen(true)}
           onConsolidation={() => setConsolidationOpen(true)}
           onReplicas={() => setReplicasOpen(true)}
+          pendingPods={pendingPods}
+          onPending={() => setPendingOpen(true)}
         />
 
         {/* Active simulation — explains the green/red node outlines. A strip,
@@ -685,8 +714,13 @@ function App() {
             ) : (
               <span className="sim-strip-legend">
                 <span className="sim-badge sim-badge-ok">fits</span>
-                <span className="sim-badge sim-badge-fail">no fit</span>
+                {sim.kind !== "pending" && <span className="sim-badge sim-badge-fail">no fit</span>}
                 {sim.kind === "drain" && <span className="sim-badge sim-badge-drained">drained</span>}
+              </span>
+            )}
+            {sim.hypothetical && sim.hypothetical.length > 0 && (
+              <span className="sim-badge sim-badge-hyp" title="Dashed nodes exist only in this simulation; they are left out of exports">
+                {sim.hypothetical.length} hypothetical
               </span>
             )}
             <button className="wl-chip-clear" onClick={() => setSim(null)} title="Clear simulation (Esc)">×</button>
@@ -696,7 +730,7 @@ function App() {
         <div className="grid-wrap" ref={gridWrapRef}>
           {view === "3d" ? (
             <Scene3D
-              nodes={nodes}
+              nodes={viewNodes}
               match={match}
               zoom={zoom}
               hueOf={hueOf}
@@ -705,7 +739,7 @@ function App() {
               memUnit={memUnit}
               fmtMem={fmtMem}
               metric={metric}
-              onFocus={setFocused}
+              onFocus={focusNode}
               highlight={highlight}
               highlightActive={highlightActive}
               onPodSelect={toggleWorkload}
@@ -715,7 +749,7 @@ function App() {
             />
           ) : (
             <TreemapGrid
-              nodes={nodes}
+              nodes={viewNodes}
               match={match}
               metric={metric}
               hueOf={hueOf}
@@ -724,7 +758,7 @@ function App() {
               nodeStyle={tw.nodeStyle}
               density={tw.density}
               showLabels={tw.showLabels}
-              onFocus={setFocused}
+              onFocus={focusNode}
               highlight={highlight}
               highlightActive={highlightActive}
               onPodSelect={toggleWorkload}
@@ -736,13 +770,18 @@ function App() {
       </main>
 
       {focused && (
-        <FocusOverlay key={focused.name} node={focused} onClose={() => setFocused(null)} metric={metric} memUnit={memUnit}
-          ctx={ctxName} onSimulation={setSim} />
+        <FocusOverlay key={focused.name} node={focused} nodes={nodes} onClose={() => setFocused(null)} metric={metric}
+          memUnit={memUnit} ctx={ctxName} onSimulation={setSim} />
       )}
 
       {fitOpen && (
-        <FitModal ctx={ctxName} memUnit={memUnit} fmtMem={fmtMem}
+        <FitModal ctx={ctxName} nodes={nodes} memUnit={memUnit} fmtMem={fmtMem}
           onSimulation={setSim} onClose={() => setFitOpen(false)} />
+      )}
+
+      {pendingOpen && (
+        <PendingModal ctx={ctxName} nodes={nodes} memUnit={memUnit} fmtMem={fmtMem}
+          onSimulation={setSim} onClose={() => setPendingOpen(false)} />
       )}
 
       {consolidationOpen && (
@@ -1131,7 +1170,7 @@ function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
 function Header({
   metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
   onMenu, onRefresh, refreshing, liveStatus, workload, onClearWorkload, onExport, canExport,
-  onFit, onConsolidation, onReplicas,
+  onFit, onConsolidation, onReplicas, pendingPods, onPending,
 }) {
   const [hintOpen, setHintOpen] = useState(false);
   const cpuPct = totals.cpuUsed / (totals.cpuCap || 1);
@@ -1171,6 +1210,12 @@ function Header({
               <span className="live-dot" />
               {liveStatus}
             </span>
+          )}
+          {pendingPods > 0 && (
+            <button className="title-chip pending-chip" onClick={onPending}
+              title="Do pending pods fit? Simulate where the pods waiting for a node would go">
+              {pendingPods} pending · do they fit?
+            </button>
           )}
           {/* Replica spread of the pinned workload — the anti-affinity check. */}
           {workload && (
@@ -1482,7 +1527,7 @@ function TreemapGrid({
 
 /* ─────────── Focus overlay ─────────── */
 
-function FocusOverlay({ node, onClose, metric, memUnit, ctx, onSimulation }) {
+function FocusOverlay({ node, nodes, onClose, metric, memUnit, ctx, onSimulation }) {
   // Drain report for this node; replaces the workload list while shown.
   const [drain, setDrain] = useState(null);
   const onDrainReport = (report) => {
@@ -1562,7 +1607,7 @@ function FocusOverlay({ node, onClose, metric, memUnit, ctx, onSimulation }) {
               <div className="ov-section-title">Drain simulation</div>
               <button className="sim-link" onClick={() => setDrain(null)}>← back to workloads</button>
             </div>
-            <DrainReport report={drain} memUnit={memUnit} fmtMem={fmtMem} />
+            <DrainReport report={drain} ctx={ctx} nodes={nodes} onReport={onDrainReport} memUnit={memUnit} fmtMem={fmtMem} />
           </div>
         )}
         {!drain && <div className="overlay-pods">
