@@ -1,7 +1,8 @@
 # Scheduling simulators
 
 Dry runs of the kube-scheduler's filter phase, against each node's free **allocatable** capacity (allocatable minus
-the requests of the pods already bound there). None of them touches the cluster.
+the requests of the pods already bound there). None of them touches the cluster, and some can add
+[nodes it does not have yet](#what-if-i-add-nodes).
 
 <figure class="k8sfoam-embed k8sfoam-embed-tall">
   <iframe src="../demo/index.html?embed=1#ctx=gke_demo-ml_us-central1_ml-training&metric=nvidia.com%2Fgpu" loading="lazy" title="k8sfoams demo of the GPU cluster for the scheduling simulators"></iframe>
@@ -104,10 +105,60 @@ On demo-shop, `checkout-api` doubles easily. `search-indexer` is pinned to one n
 [Try it on demo-shop](demo/index.html#wl=checkout%2FDeployment%2Fcheckout-api){ .k8s-try target=_blank } (click
 **+N** on the `checkout-api` chip).
 
+## Do the pending pods fit?
+
+When the cluster has pods waiting for a node, the header shows a chip such as **2 pending · do they fit?**. Click it,
+and every pending pod is placed the way a drain places evicted pods: biggest first, each on the passing node with the
+most headroom left, against the room the previous ones took. The result lists the pods that **would be placed** and
+where, and the ones **still Pending** with their scheduler-style tally (`0/16 nodes available: 1 cordoned, 3
+untolerated taint, 16 insufficient CPU, 14 insufficient memory`).
+
+Pods held back by `spec.schedulingGates` (Kueue's `kueue.x-k8s.io/admission`, for example) are listed under
+**Scheduling-gated** and not simulated: the scheduler does not look at them until every gate is removed. They are left
+out of the chip's count too.
+
+If every pending pod fits on the current nodes, something the simulator does not model is holding them, such as a
+volume in another zone.
+
+On demo-shop, two pods are pending and a third is gated. `quarterly-backfill` asks for 7 CPUs, more than any node has
+free. `web-arm-canary` selects `kubernetes.io/arch=arm64`, and every node is amd64.
+
+[Try it on demo-shop](demo/index.html){ .k8s-try target=_blank } (click the *pending* chip in the header).
+
+## What if I add nodes?
+
+*Can I fit this pod?*, *Simulate drain* and *Do the pending pods fit?* can all add nodes the cluster does not have
+yet, to compare node shapes before you change a node group or a Karpenter NodePool. Click **+ Add nodes** and pick:
+
+- **an instance type the cluster runs**: a copy of its first node by name, with the same allocatable, labels (with a
+  fresh `kubernetes.io/hostname`) and taints. Taints a new node would not start with are dropped: the
+  `node.kubernetes.io/*` condition taints and the marks autoscalers put on a node they are about to remove;
+- **a custom shape**: allocatable CPU, memory and pod count, plus labels and taints (`dedicated=gpu:NoSchedule`),
+
+and how many. In the drain and pending results, **+ Add nodes** sits under the summary and re-runs the simulation.
+
+Every hypothetical node is Ready and schedulable, and is named `hypothetical-<instance-type>-<n>`
+(`hypothetical-custom-<n>` without an instance-type label). It also runs the DaemonSet pods a new node of its kind
+would: a copy runs its template's, and a custom shape runs one pod of every DaemonSet whose pod selects and tolerates
+it. Their requests count against its room, as they would on a real node.
+
+On demo-shop, open *Do the pending pods fit?* and add one `m5.2xlarge`: `quarterly-backfill` lands on
+`hypothetical-m5.2xlarge-1`, while `web-arm-canary` still fits nowhere. That is the answer to *would one more general
+node do?*.
+
+!!! note "In the demo"
+    Hypothetical nodes need the server, so the demo turns **+ Add nodes** off. Run `k8sfoams --synthetic` to try
+    them.
+
 ## Reading the result
 
 While a result is shown, nodes are outlined in both views — green fits / receives pods or copies, red cannot, grey is the drained
 (or planned-for-removal) node — and a strip above the map summarises it. `Esc` or its `×` clears it.
+
+Hypothetical nodes appear next to the real ones while their result is shown: dashed cards in the 2D map and ghost
+plates with a dashed edge in the 3D view, sized by their allocatable and holding the pods placed on them. They have
+no detail view, and they are left out of every export (PNG, SVG, JSON, CSV) and of the header totals. Clearing the
+result removes them.
 
 Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, required node affinity,
 `NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory, every extended resource the pod requests
