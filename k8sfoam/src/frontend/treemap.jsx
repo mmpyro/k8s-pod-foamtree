@@ -266,7 +266,7 @@ function NodeCard({
     <div
       ref={ref}
       onClick={onClick}
-      className={`node-card ${nodeDim ? "is-dim" : ""} ${verdict ? `sim-${verdict}` : ""}`}
+      className={`node-card ${nodeDim ? "is-dim" : ""} ${verdict ? `sim-${verdict}` : ""} ${node.hypothetical ? "is-hypothetical" : ""}`}
       style={{
         background: colors.css,
         borderColor: colors.border,
@@ -278,6 +278,7 @@ function NodeCard({
         <div className="node-header-dot" style={{ background: colors.dot }}></div>
         <span className="node-name">{node.name}</span>
         <span className="node-meta">
+          {node.hypothetical && <span className="sim-badge sim-badge-hyp" title="Exists only in this simulation">hypothetical</span>}
           {verdict && <span className={`sim-badge sim-badge-${verdict}`}>{SIM_BADGE[verdict]}</span>}
           <NodeWarnBadge warnings={node.warnings} />
           <span className="node-util" style={{ color: utilColor }}>{Math.round(utilization * 100)}%</span>

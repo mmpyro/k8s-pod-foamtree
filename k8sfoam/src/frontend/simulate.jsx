@@ -1,8 +1,10 @@
 // Scheduling simulators: "Can I fit this pod?", "Simulate drain", the
-// consolidation finder and "Can I scale this workload?". The backend runs the
-// scheduler filter and sends verdicts with reason slugs; this file is the
-// single place that decides how they read and which nodes the map outlines,
-// so the modals, the drain report and both views agree.
+// consolidation finder, "Can I scale this workload?" and "Do the pending pods
+// fit?". The backend runs the scheduler filter and sends verdicts with reason
+// slugs; this file is the single place that decides how they read and which
+// nodes the map outlines, so the modals, the drain report and both views agree.
+// Fit, drain and pending also take hypothetical nodes, which the views draw as
+// ghost nodes while the result is shown.
 
 const { useState, useEffect } = React;
 const { isBytes } = window.k8sResources;
@@ -164,13 +166,183 @@ function matchPreset(presets, form) {
   return presets.find(p => Object.keys(p.form).every(k => norm(p.form[k]) === norm(form[k]))) || null;
 }
 
-// Map verdicts: node name → "ok" | "fail" | "drained".
+/* ─────────── Hypothetical nodes ─────────── */
+
+// Matches the backend's MAX_EXTRA_NODES, over every row of one simulation.
+const MAX_EXTRA_NODES = 50;
+const SHAPE_DEFAULTS = { cpu: "8", memory: "32Gi", pods: "110", labels: "", taints: "" };
+
+// `key=value:Effect` or `key:Effect`, the way kubectl taint spells them.
+function parseTaints(text) {
+  const taints = [], errors = [];
+  for (const raw of text.split(/[\n,]/)) {
+    const tok = raw.trim();
+    if (!tok) continue;
+    const [kv, effect] = tok.split(":");
+    if (!effect || !EFFECTS.includes(effect.trim())) {
+      errors.push(`"${tok}": a taint needs an effect, one of ${EFFECTS.join(", ")}`);
+      continue;
+    }
+    const eq = kv.indexOf("=");
+    const key = (eq === -1 ? kv : kv.slice(0, eq)).trim();
+    if (!key) { errors.push(`"${tok}" has no key`); continue; }
+    taints.push({ key, value: eq === -1 ? null : kv.slice(eq + 1).trim(), effect: effect.trim() });
+  }
+  return { taints, errors };
+}
+
+// What a copy can be made of: one entry per instance type the cluster runs,
+// copying its first node by name. Nodes without the label are offered by name.
+function nodeTemplates(nodes) {
+  const byType = new Map();
+  for (const n of [...nodes].sort((a, b) => a.name.localeCompare(b.name))) {
+    const key = n.topology.instanceType || n.name;
+    if (!byType.has(key)) byType.set(key, n);
+  }
+  return [...byType.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([label, node]) => ({
+    label: `${label} · ${+(node.cpuCapacity / 1000).toFixed(1)} CPU / ${Math.round(node.memCapacity / 1024)} GiB`,
+    node,
+  }));
+}
+
+// The rows of ExtraNodesField as the backend's extraNodes.
+function toExtraNodes(rows) {
+  const extraNodes = [], errors = [];
+  let total = 0;
+  for (const r of rows) {
+    const count = Number(r.count);
+    if (!Number.isInteger(count) || count < 1) { errors.push("Node count must be a whole number from 1"); continue; }
+    total += count;
+    if (r.template) { extraNodes.push({ template: r.template, count }); continue; }
+    const { selector: labels, errors: labelErrors } = parseSelector(r.shape.labels);
+    const { taints, errors: taintErrors } = parseTaints(r.shape.taints);
+    const pods = Number(r.shape.pods);
+    errors.push(...labelErrors, ...taintErrors);
+    if (!Number.isInteger(pods) || pods < 1) errors.push("Pods per node must be a whole number from 1");
+    extraNodes.push({ shape: { cpu: r.shape.cpu, memory: r.shape.memory, pods, labels, taints }, count });
+  }
+  if (total > MAX_EXTRA_NODES) errors.push(`At most ${MAX_EXTRA_NODES} hypothetical nodes per simulation`);
+  return { extraNodes, errors };
+}
+
+let rowIds = 0;
+
+// "+ Add nodes": copies of an instance type the cluster runs, or a custom shape, each with a count.
+function ExtraNodesField({ nodes, rows, setRows }) {
+  const templates = nodeTemplates(nodes);
+  const off = window.k8sApi.isStatic;
+  const add = () => setRows(rs => [...rs, {
+    id: ++rowIds, template: templates.length ? templates[0].node.name : "", count: "1", shape: { ...SHAPE_DEFAULTS },
+  }]);
+  const update = (id, patch) => setRows(rs => rs.map(r => (r.id === id ? { ...r, ...patch } : r)));
+  const setShape = (r, field, value) => update(r.id, { shape: { ...r.shape, [field]: value } });
+  return (
+    <div className="sim-field sim-wide sim-extra">
+      <span className="ov-label">Hypothetical nodes</span>
+      {rows.map(r => (
+        <div key={r.id} className="sim-extra-entry">
+          <div className="sim-extra-row">
+            <select value={r.template} onChange={e => update(r.id, { template: e.target.value })}
+              title={r.template ? `A copy of ${r.template}: its allocatable, labels and taints` : "A node shape of your own"}>
+              {templates.map(t => <option key={t.node.name} value={t.node.name}>{t.label}</option>)}
+              <option value="">Custom shape…</option>
+            </select>
+            <span className="sim-extra-times">×</span>
+            <input className="sim-extra-count" type="number" min="1" max={MAX_EXTRA_NODES} step="1" value={r.count}
+              onChange={e => update(r.id, { count: e.target.value })} aria-label="Node count" />
+            <button type="button" className="icon-btn" title="Remove"
+              onClick={() => setRows(rs => rs.filter(x => x.id !== r.id))}><CloseIcon /></button>
+          </div>
+          {!r.template && (
+            <div className="sim-extra-shape">
+              <input value={r.shape.cpu} onChange={e => setShape(r, "cpu", e.target.value)} placeholder="CPU, e.g. 8"
+                spellCheck="false" aria-label="Allocatable CPU" />
+              <input value={r.shape.memory} onChange={e => setShape(r, "memory", e.target.value)} placeholder="Memory, e.g. 32Gi"
+                spellCheck="false" aria-label="Allocatable memory" />
+              <input value={r.shape.pods} onChange={e => setShape(r, "pods", e.target.value)} placeholder="Pods"
+                spellCheck="false" aria-label="Pods per node" />
+              <input className="sim-wide" value={r.shape.labels} onChange={e => setShape(r, "labels", e.target.value)}
+                placeholder="labels: node.kubernetes.io/instance-type=m6i.2xlarge, topology.kubernetes.io/zone=us-east-1a"
+                spellCheck="false" aria-label="Node labels" />
+              <input className="sim-wide" value={r.shape.taints} onChange={e => setShape(r, "taints", e.target.value)}
+                placeholder="taints: dedicated=gpu:NoSchedule" spellCheck="false" aria-label="Node taints" />
+            </div>
+          )}
+        </div>
+      ))}
+      <button type="button" className="sim-preset sim-extra-add" onClick={add} disabled={off}
+        title={off ? window.k8sApi.noExtraNodes : "Nodes the cluster does not have yet, for this simulation only"}>
+        + Add nodes
+      </button>
+    </div>
+  );
+}
+
+// Re-runs a shown result with hypothetical nodes, below its summary.
+function ExtraNodesRerun({ nodes, hadExtra, run }) {
+  const [rows, setRows] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const { extraNodes, errors } = toExtraNodes(rows);
+  const submit = async (e) => {
+    e.preventDefault();
+    if (errors.length) return;
+    setBusy(true);
+    try {
+      await run(extraNodes);
+      setError(null);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form className="sim-form sim-rerun" onSubmit={submit}>
+      <ExtraNodesField nodes={nodes} rows={rows} setRows={setRows} />
+      {(rows.length > 0 || hadExtra) && (
+        <div className="sim-actions sim-wide">
+          {errors.map((m, i) => <span key={i} className="sim-error">{m}</span>)}
+          {error && <span className="sim-error">{error}</span>}
+          <button type="submit" className={`btn-primary ${busy ? "spinning" : ""}`} disabled={busy || errors.length > 0}>
+            {busy ? "Simulating…" : rows.length ? "Simulate with these nodes" : "Simulate without them"}
+          </button>
+        </div>
+      )}
+    </form>
+  );
+}
+
+// The fake nodes of a result as /resources payload nodes, holding their
+// DaemonSet pods and the pods `placements` put there, so both views draw them.
+function hypotheticalNodes(result, placements = []) {
+  const pod = (p, owner) => ({
+    name: p.pod, namespace: p.namespace, cpu: p.cpu, memory: p.memory, extended: p.extended || {}, owner,
+    containers: [{ name: p.pod, cpu: p.cpu, memory: p.memory, extended: p.extended || {} }],
+  });
+  return (result.hypotheticalNodes || []).map(h => ({
+    name: h.name, cpu: h.cpu, memory: h.memory, extended: h.extended, taints: h.taints, topology: h.topology,
+    conditions: { Ready: true }, warnings: [], unschedulable: false,
+    pods: [
+      // Copies are named <daemonset>-<node>.
+      ...h.daemonPods.map(p => pod(p, { kind: "DaemonSet", name: p.pod.slice(0, -(h.name.length + 1)) })),
+      ...placements.filter(p => p.to === h.name).map(p => pod(p, null)),
+    ],
+  }));
+}
+
+const hypotheticalCount = result => (result.hypotheticalNodes || []).length;
+
+// Map verdicts: node name → "ok" | "fail" | "drained". `hypothetical` holds
+// the ghost nodes to draw next to the real ones.
 function fitSimulation(result) {
+  const extra = hypotheticalCount(result);
   return {
     kind: "fit",
-    summary: `fits ${result.fits} / ${result.total} nodes`,
+    summary: `fits ${result.fits} / ${result.total} nodes${extra ? ` (${extra} hypothetical)` : ""}`,
     ok: result.fits > 0,
     verdicts: new Map(result.nodes.map(n => [n.node, n.fits ? "ok" : "fail"])),
+    hypothetical: hypotheticalNodes(result),
   };
 }
 
@@ -179,14 +351,33 @@ function drainSimulation(result) {
   for (const p of result.placements) verdicts.set(p.to, "ok");
   const moved = result.placements.length + result.pending.length;
   const blocked = (result.blocked || []).length;
-  const summary = !result.fits
+  const extra = hypotheticalCount(result);
+  const summary = (!result.fits
     ? `drain ${result.node}: ${result.pending.length} pending`
-    : `drain ${result.node}: ${moved} pod${moved === 1 ? "" : "s"} fit`;
+    : `drain ${result.node}: ${moved} pod${moved === 1 ? "" : "s"} fit`) +
+    (extra ? ` with ${plural(extra, "hypothetical node")}` : "");
   return {
     kind: "drain",
     summary: blocked ? `${summary}, ${blocked} held by PDB` : summary,
     ok: result.fits && !blocked,
     verdicts,
+    hypothetical: hypotheticalNodes(result, result.placements),
+  };
+}
+
+// Nodes taking a pending pod read "ok"; the per-node reasons are only tallied, so no node reads "fail".
+function pendingSimulation(result) {
+  const verdicts = new Map(result.placements.map(p => [p.to, "ok"]));
+  const extra = hypotheticalCount(result);
+  const withExtra = extra ? ` with ${plural(extra, "hypothetical node")}` : "";
+  return {
+    kind: "pending",
+    summary: result.fits
+      ? `${plural(result.total, "pending pod")} fit${withExtra}`
+      : `${result.pending.length} of ${plural(result.total, "pending pod")} still pending${withExtra}`,
+    ok: result.fits,
+    verdicts,
+    hypothetical: hypotheticalNodes(result, result.placements),
   };
 }
 
@@ -239,7 +430,8 @@ function CloseIcon() {
 
 /* ─────────── Can I fit this pod? ─────────── */
 
-function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
+function FitModal({ ctx, nodes, memUnit, fmtMem, onSimulation, onClose }) {
+  const [extraRows, setExtraRows] = useState([]);
   const [cpu, setCpu] = useState("500m");
   const [memory, setMemory] = useState("1Gi");
   const [selectorText, setSelectorText] = useState("");
@@ -261,7 +453,8 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
   const { nodeAffinity, errors: affErrors } = parseNodeAffinity(affinityText);
   // Same name=quantity syntax as the selector; quantities are validated server-side.
   const { selector: extended, errors: extErrors } = parseSelector(extendedText);
-  const formErrors = [...selErrors, ...affErrors, ...tolErrors, ...extErrors];
+  const { extraNodes, errors: nodeErrors } = toExtraNodes(extraRows);
+  const formErrors = [...selErrors, ...affErrors, ...tolErrors, ...extErrors, ...nodeErrors];
   const preset = matchPreset(presets, {
     cpu, memory, extended: extendedText, nodeSelector: selectorText, nodeAffinity: affinityText,
     tolerations: tolerationText,
@@ -283,7 +476,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
     if (formErrors.length) return;
     setBusy(true);
     try {
-      const spec = { cpu, memory, extended, nodeSelector: selector, nodeAffinity, tolerations };
+      const spec = { cpu, memory, extended, nodeSelector: selector, nodeAffinity, tolerations, extraNodes };
       const res = await window.k8sApi.fit(ctx, spec, preset && preset.id);
       setResult(res);
       setError(null);
@@ -297,6 +490,9 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
 
   // Schedulable nodes first, then the rest by name, so the answer is on top.
   const rows = result ? [...result.nodes].sort((a, b) => (b.fits - a.fits) || a.node.localeCompare(b.node)) : [];
+  const fitsOn = hypothetical => (result ? result.nodes.filter(n => !!n.hypothetical === hypothetical) : []);
+  const real = fitsOn(false), extra = fitsOn(true);
+  const realFits = real.filter(n => n.fits).length, extraFits = extra.filter(n => n.fits).length;
 
   return (
     <div className="overlay" onClick={onClose}>
@@ -351,6 +547,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
             <input value={tolerationText} onChange={e => setTolerationText(e.target.value)}
               placeholder="dedicated=gpu:NoSchedule, spot  ( * tolerates all )" spellCheck="false" />
           </label>
+          <ExtraNodesField nodes={nodes} rows={extraRows} setRows={setExtraRows} />
           <div className="sim-actions sim-wide">
             {formErrors.map((m, i) => <span key={i} className="sim-error">{m}</span>)}
             {error && <span className="sim-error">{error}</span>}
@@ -367,15 +564,18 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
         {result && (
           <div className="overlay-pods">
             <div className={`sim-summary ${result.fits ? "sim-summary-ok" : "sim-summary-fail"}`}>
-              {result.fits
-                ? `${result.fits} of ${result.total} nodes can schedule it — no scale-up needed.`
-                : `No node can schedule it — this pod would stay Pending (or trigger a scale-up).`}
+              {realFits
+                ? `${realFits} of ${real.length} nodes can schedule it — no scale-up needed.`
+                : extraFits
+                  ? `No current node can schedule it, but ${extraFits} of the ${plural(extra.length, "hypothetical node")} could — that scale-up would place it.`
+                  : `No node can schedule it${extra.length ? ", not even a hypothetical one" : ""} — this pod would stay Pending (or trigger a scale-up).`}
             </div>
             <div className="pod-rows">
               {rows.map(n => (
                 <div key={n.node} className={`pod-row sim-row ${n.fits ? "sim-row-ok" : "sim-row-fail"}`}>
                   <div className="pod-row-name">
                     <code>{n.node}</code>
+                    {n.hypothetical && <span className="sim-tag sim-tag-hyp">hypothetical</span>}
                     {n.reasons.length > 0 && (
                       <div className="sim-reasons">
                         {n.reasons.map((r, i) => <span key={i} title={reasonLabel(r.slug)}>{r.message}</span>)}
@@ -442,24 +642,30 @@ function PodLine({ p, memUnit, fmtMem, children }) {
   );
 }
 
-function DrainReport({ report, memUnit, fmtMem }) {
+// `nodes` are the cluster's, to copy hypothetical nodes from; `onReport` takes a re-run's report.
+function DrainReport({ report, ctx, nodes, onReport, memUnit, fmtMem }) {
   if (report.error) return <div className="sim-summary sim-summary-fail">Drain simulation failed: {report.error}</div>;
   const r = report.result;
   const moved = r.placements.length + r.pending.length;
   const unmanaged = [...r.placements, ...r.pending].filter(p => p.unmanaged).length;
   const blocked = r.blocked || [];
+  const extra = hypotheticalCount(r);
+  const rerun = async (extraNodes) => onReport({ result: await window.k8sApi.drain(ctx, r.node, extraNodes) });
   return (
     <>
       <div className={`sim-summary ${r.fits && !blocked.length ? "sim-summary-ok" : "sim-summary-fail"}`}>
         {moved === 0
           ? (blocked.length ? "Nothing can be evicted yet." : "Nothing to move — this node runs no evictable pods.")
           : r.fits
-            ? `All ${moved} evicted pod${moved === 1 ? "" : "s"} fit on the remaining ${r.remainingNodes} node${r.remainingNodes === 1 ? "" : "s"}.`
-            : `${r.pending.length} of ${moved} pods would go Pending — the cluster lacks headroom.`}
+            ? `All ${moved} evicted pod${moved === 1 ? "" : "s"} fit on the remaining ${r.remainingNodes} node${r.remainingNodes === 1 ? "" : "s"}` +
+              `${extra ? `, ${extra} of them hypothetical` : ""}.`
+            : `${r.pending.length} of ${moved} pods would go Pending — the cluster lacks headroom` +
+              `${extra ? `, even with ${plural(extra, "hypothetical node")}` : ""}.`}
         {blocked.length > 0 && ` kubectl drain would wait on ${plural(blocked.length, "pod")} held by a PodDisruptionBudget.`}
         {unmanaged > 0 && ` ${unmanaged} naked pod${unmanaged === 1 ? " has" : "s have"} no controller and would not be recreated.`}
       </div>
       {r.pdbsChecked === false && <div className="sim-note">{PDB_UNCHECKED}</div>}
+      {onReport && moved > 0 && <ExtraNodesRerun nodes={nodes} hadExtra={extra > 0} run={rerun} />}
 
       {blocked.length > 0 && (
         <div className="sim-group">
@@ -507,6 +713,7 @@ function DrainReport({ report, memUnit, fmtMem }) {
               <PodLine key={`${p.namespace}/${p.pod}`} p={p} memUnit={memUnit} fmtMem={fmtMem}>
                 <div className="sim-reasons sim-reasons-ok">
                   <span>→ {p.to}</span>
+                  {p.hypothetical && <span className="sim-tag sim-tag-hyp">hypothetical</span>}
                   {p.unmanaged && <span className="sim-tag" title="No controller owns it: the drain deletes it for good">naked pod</span>}
                 </div>
               </PodLine>
@@ -849,7 +1056,120 @@ function ReplicasModal({ ctx, workload, current, memUnit, fmtMem, onSimulation, 
   );
 }
 
+/* ─────────── Do the pending pods fit? ─────────── */
+
+function pendingHeadline(r) {
+  const extra = hypotheticalCount(r);
+  if (r.total === 0) return r.gated.length ? "Every waiting pod is gated — nothing for the scheduler to place." : "No pod is waiting for a node.";
+  if (r.fits && extra) return `All ${plural(r.total, "pending pod")} fit once the ${plural(extra, "hypothetical node")} are added.`;
+  if (r.fits) return `All ${plural(r.total, "pending pod")} fit on the current nodes — what keeps them Pending is something the simulator does not model, e.g. volumes.`;
+  return `${r.pending.length} of ${plural(r.total, "pending pod")} fit nowhere${extra ? `, even with ${plural(extra, "hypothetical node")}` : ""}.`;
+}
+
+function PendingModal({ ctx, nodes, memUnit, fmtMem, onSimulation, onClose }) {
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  const show = (res) => {
+    setResult(res);
+    onSimulation(pendingSimulation(res));
+  };
+
+  useEffect(() => {
+    let live = true;
+    window.k8sApi.pending(ctx)
+      .then(res => live && show(res))
+      .catch(err => live && setError(err.message || String(err)));
+    return () => { live = false; };
+  }, [ctx]);
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="overlay-card sim-card" onClick={e => e.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <div className="overlay-title">Do the pending pods fit?</div>
+            <div className="overlay-sub">Place every pod waiting for a node, biggest first, like a drain does</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
+        </div>
+
+        <div className="overlay-pods">
+          {error && <div className="sim-summary sim-summary-fail">Pending pods simulation failed: {error}</div>}
+          {!result && !error && <div className="sim-note">Simulating the pending pods…</div>}
+
+          {result && (
+            <>
+              <div className={`sim-summary ${result.fits ? "sim-summary-ok" : "sim-summary-fail"}`}>
+                {pendingHeadline(result)}
+              </div>
+              {result.total > 0 && (
+                <ExtraNodesRerun nodes={nodes} hadExtra={hypotheticalCount(result) > 0}
+                  run={async extraNodes => show(await window.k8sApi.pending(ctx, extraNodes))} />
+              )}
+
+              {result.pending.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Still Pending · {result.pending.length}</div>
+                  <div className="pod-rows">
+                    {result.pending.map(p => (
+                      <PodLine key={`${p.namespace}/${p.pod}`} p={p} memUnit={memUnit} fmtMem={fmtMem}>
+                        <div className="sim-reasons">
+                          <span>
+                            {result.nodes === 0
+                              ? "the cluster has no nodes"
+                              : `0/${result.nodes} nodes available: ` +
+                                p.reasons.map(x => `${x.nodes} ${reasonLabel(x.slug)}`).join(", ")}
+                          </span>
+                        </div>
+                      </PodLine>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {result.placements.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Would be placed · {result.placements.length}</div>
+                  <div className="pod-rows">
+                    {result.placements.map(p => (
+                      <PodLine key={`${p.namespace}/${p.pod}`} p={p} memUnit={memUnit} fmtMem={fmtMem}>
+                        <div className="sim-reasons sim-reasons-ok">
+                          <span>→ {p.to}</span>
+                          {p.hypothetical && <span className="sim-tag sim-tag-hyp">hypothetical</span>}
+                        </div>
+                      </PodLine>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {result.gated.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Scheduling-gated · {result.gated.length}</div>
+                  <div className="sim-skipped">
+                    {result.gated.map(g => (
+                      <div key={`${g.namespace}/${g.pod}`} className="taint-row">
+                        <code>{g.namespace}/{g.pod}</code>
+                        <span className="taint-effect" title="The scheduler skips the pod until every gate is removed">
+                          waits for {g.gates.join(", ")}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <SimCaveat />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 window.k8sSimulate = {
-  REASONS, reasonLabel, parseSelector, parseTolerations, fitSimulation, drainSimulation, consolidationSimulation,
-  replicasSimulation, scalableWorkload, FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal,
+  REASONS, reasonLabel, parseSelector, parseTolerations, parseTaints, toExtraNodes, fitSimulation, drainSimulation,
+  consolidationSimulation, replicasSimulation, pendingSimulation, scalableWorkload, FitModal, DrainButton, DrainReport,
+  ConsolidationModal, ReplicasModal, PendingModal,
 };
