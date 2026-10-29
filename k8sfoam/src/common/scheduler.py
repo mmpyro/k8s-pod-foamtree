@@ -12,12 +12,16 @@ binding are out of scope, so a "fits" verdict is necessary rather than sufficien
 Preferred affinity terms and ScheduleAnyway spread constraints only score nodes,
 so they never filter one out.
 
+Fit and drain also take hypothetical nodes — copies of an existing node or a
+custom shape — to compare node shapes before changing a node group.
+
 Units follow the rest of the backend: CPU in millicores, memory and byte-sized
 extended resources in decimal kB, other extended resources as plain counts.
 """
 from collections import Counter
-from typing import Iterable, Optional
+from typing import Collection, Iterable, Optional
 from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources
+from k8sfoam.src.common.node_topology import node_topology
 from k8sfoam.src.common.resources import is_bytes
 
 
@@ -47,6 +51,16 @@ CONTROL_PLANE_LABELS = ('node-role.kubernetes.io/control-plane', 'node-role.kube
 
 # Upper bound on the copies one replica simulation places; each copy filters every node.
 MAX_REPLICAS = 100
+
+# Upper bound on the hypothetical nodes one simulation adds, over all its entries.
+MAX_EXTRA_NODES = 50
+
+HOSTNAME_LABEL = 'kubernetes.io/hostname'
+# Taints a fresh node does not start with: the lifecycle controller's condition
+# taints, and the marks autoscalers put on a node they are about to remove.
+TRANSIENT_TAINT_PREFIXES = ('node.kubernetes.io/', 'node.cloudprovider.kubernetes.io/')
+TRANSIENT_TAINT_KEYS = ('ToBeDeletedByClusterAutoscaler', 'DeletionCandidateOfClusterAutoscaler',
+                        'karpenter.sh/disrupted', 'karpenter.sh/disruption')
 
 
 def _allocatable(node: NodeResources) -> dict:
@@ -492,17 +506,105 @@ def _public_free(free: dict) -> dict:
             'extended': {name: max(0, amount) for name, amount in free['extended'].items()}}
 
 
-def simulate_fit(pod: PodResources, nodes: Iterable[NodeResources], pods: Iterable[PodResources]) -> dict:
-    """Verdict per node for one hypothetical pod, against the cluster as it is now."""
-    nodes, pods = list(nodes), list(pods)
-    free = free_capacity(nodes, pods)
-    placement = Placement(nodes, pods)
+class UnknownTemplate(ValueError):
+    """A hypothetical node's template names no node of the cluster."""
+
+
+def _transient(taint: dict) -> bool:
+    key = taint.get('key') or ''
+    return key.startswith(TRANSIENT_TAINT_PREFIXES) or key in TRANSIENT_TAINT_KEYS
+
+
+def hypothetical_nodes(specs: Iterable[dict], nodes: Iterable[NodeResources]) -> list:
+    """Fake nodes for a what-if run, from {template | shape, count} entries.
+
+    A template copies an existing node's allocatable, labels and taints, minus
+    the taints a fresh node would not carry yet; a shape is a NodeResources
+    whose name is ignored. Every copy is Ready and schedulable, gets its own
+    kubernetes.io/hostname and is named hypothetical-<instance-type>-<n>, or
+    hypothetical-custom-<n> without an instance-type label. The simulations
+    also bind daemon_pods() to each. Raises UnknownTemplate for a template
+    that names no node.
+    """
+    by_name = {n.name: n for n in nodes}
+    made: list = []
+    numbered: Counter = Counter()
+    for spec in specs:
+        template = spec.get('template')
+        base: Optional[NodeResources] = spec.get('shape') if template is None else by_name.get(template)
+        if base is None:
+            raise UnknownTemplate(f'Template node not found: {template}')
+        labels = dict(base.labels or {})
+        kind = node_topology(labels)['instanceType'] or 'custom'
+        taints = [t for t in base.taints or [] if not _transient(t)]
+        for _ in range(spec['count']):
+            numbered[kind] += 1
+            name = f'hypothetical-{kind}-{numbered[kind]}'
+            made.append(NodeResources(name, base.cpu or 0, base.memory or 0, False, list(taints), {'Ready': True},
+                                      dict(base.extended or {}), {**labels, HOSTNAME_LABEL: name},
+                                      base.allocatable_pods))
+    return made
+
+
+def daemon_pods(node: NodeResources, template: Optional[str], pods: Iterable[PodResources]) -> list:
+    """The DaemonSet pods a fresh `node` would run, bound to it.
+
+    A template's copy runs the template's own. A custom shape runs one pod of
+    every DaemonSet whose pod selects and tolerates it.
+    """
+    if template is not None:
+        own = [p for p in pods if p.node_name == template and p.owner_kind == 'DaemonSet']
+    else:
+        samples: dict = {}
+        for p in sorted(pods, key=lambda p: p.name):
+            if p.owner_kind == 'DaemonSet' and p.node_name is not None:
+                samples.setdefault((p.namespace, p.owner_name), p)
+        own = [p for p in samples.values() if _fits_node_affinity(p, node) and _tolerates_node(p, node)]
+    return [p._replace(name=f'{p.owner_name or p.name}-{node.name}', node_name=node.name) for p in own]
+
+
+def _describe_hypothetical(node: NodeResources, template: Optional[str], daemons: list) -> dict:
+    """A fake node as the responses list it, so the UI can draw it sized by allocatable."""
+    return {'name': node.name, 'template': template, 'cpu': node.cpu, 'memory': node.memory,
+            'pods': node.allocatable_pods, 'extended': dict(node.extended or {}),
+            'labels': dict(node.labels or {}), 'taints': list(node.taints or []),
+            'topology': node_topology(node.labels),
+            'daemonPods': [{'pod': p.name, 'namespace': p.namespace, 'cpu': p.cpu or 0, 'memory': p.memory or 0,
+                            'extended': dict(p.extended or {})} for p in daemons]}
+
+
+def _with_hypothetical(specs: list, nodes: list, pods: list) -> tuple:
+    """The cluster plus the fake nodes of `specs` and their DaemonSet pods.
+
+    Returns (nodes, pods, fake node names, the fake nodes as responses list them).
+    """
+    extra_nodes = hypothetical_nodes(specs, nodes)
+    templates = [spec.get('template') for spec in specs for _ in range(spec['count'])]
+    daemons: list = []
+    described = []
+    for node, template in zip(extra_nodes, templates):
+        own = daemon_pods(node, template, pods)
+        daemons += own
+        described.append(_describe_hypothetical(node, template, own))
+    return [*nodes, *extra_nodes], [*pods, *daemons], {n.name for n in extra_nodes}, described
+
+
+def simulate_fit(pod: PodResources, nodes: Iterable[NodeResources], pods: Iterable[PodResources],
+                 extra: Iterable[dict] = ()) -> dict:
+    """Verdict per node for one hypothetical pod, against the cluster as it is now.
+
+    `extra` are hypothetical_nodes() specs, added to the cluster for this run.
+    """
+    all_nodes, all_pods, fake, described = _with_hypothetical(list(extra), list(nodes), list(pods))
+    free = free_capacity(all_nodes, all_pods)
+    placement = Placement(all_nodes, all_pods)
     results = []
-    for node in nodes:
+    for node in all_nodes:
         reasons = filter_node(pod, node, free[node.name], placement)
         results.append({'node': node.name, 'fits': not reasons, 'reasons': reasons,
-                        'free': _public_free(free[node.name])})
-    return {'fits': sum(r['fits'] for r in results), 'total': len(results), 'nodes': results}
+                        'free': _public_free(free[node.name]), 'hypothetical': node.name in fake})
+    return {'fits': sum(r['fits'] for r in results), 'total': len(results), 'nodes': results,
+            'hypotheticalNodes': described}
 
 
 def _unschedulable_summary(reasons_per_node: list) -> list:
@@ -520,22 +622,25 @@ def _headroom(pod: PodResources, alloc: dict, free: dict) -> float:
 
 
 def simulate_drain(node_name: str, nodes: Iterable[NodeResources], pods: Iterable[PodResources],
-                   pdbs: Optional[Iterable[DisruptionBudget]] = None) -> Optional[dict]:
+                   pdbs: Optional[Iterable[DisruptionBudget]] = None, extra: Iterable[dict] = ()) -> Optional[dict]:
     """Re-place every evictable pod of `node_name` onto the rest of the cluster.
 
     First-fit decreasing: the biggest pods (by dominant share) are placed first,
     each on the passing node with the most headroom left afterwards. In that order,
     each eviction draws on the PodDisruptionBudgets selecting the pod; once one is
     used up, its remaining pods are blocked and stay. `pdbs` None means they could
-    not be read, and the result says so. Returns None when the node does not exist.
+    not be read, and the result says so. `extra` are hypothetical_nodes() specs the
+    pods may also go to. Returns None when the node does not exist.
     """
-    nodes, pods = list(nodes), list(pods)
-    if not any(n.name == node_name for n in nodes):
+    real = list(nodes)
+    if not any(n.name == node_name for n in real):
         return None
-    return _drain(node_name, nodes, pods, list(pdbs) if pdbs is not None else None)
+    all_nodes, all_pods, fake, described = _with_hypothetical(list(extra), real, list(pods))
+    result = _drain(node_name, all_nodes, all_pods, list(pdbs) if pdbs is not None else None, fake)
+    return {**result, 'hypotheticalNodes': described}
 
 
-def _drain(node_name: str, nodes: list, pods: list, pdbs: Optional[list] = None) -> dict:
+def _drain(node_name: str, nodes: list, pods: list, pdbs: Optional[list] = None, fake: Collection = ()) -> dict:
     remaining = [n for n in nodes if n.name != node_name]
     free = free_capacity(remaining, pods)
     placement = Placement(remaining, pods)
@@ -577,7 +682,7 @@ def _drain(node_name: str, nodes: list, pods: list, pdbs: Optional[list] = None)
         target = max(passing, key=lambda n: (_headroom(pod, alloc[n.name], free[n.name]), n.name))
         _reserve(free[target.name], pod)
         placement.place(pod, target.name)
-        placements.append({**entry, 'to': target.name})
+        placements.append({**entry, 'to': target.name, 'hypothetical': target.name in fake})
 
     return {
         'node': node_name,
