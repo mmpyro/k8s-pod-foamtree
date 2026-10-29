@@ -15,9 +15,14 @@ the requests of the pods already bound there). None of them touches the cluster.
 ## Can I fit this pod?
 
 The dashed **+** button in the header. Enter a CPU and memory request, optionally extended resources
-(`nvidia.com/gpu=1, ephemeral-storage=10Gi`), a `nodeSelector` (`zone=a, disk=ssd`) and tolerations
-(`dedicated=gpu:NoSchedule`, `spot` for any value and effect, `*` for everything). Every node gets a verdict; the ones
-that cannot take the pod say why, e.g. `Insufficient CPU: requires 4000m, available 1200m`.
+(`nvidia.com/gpu=1, ephemeral-storage=10Gi`), a `nodeSelector` (`zone=a, disk=ssd`), a required node affinity term
+and tolerations (`dedicated=gpu:NoSchedule`, `spot` for any value and effect, `*` for everything). Every node gets a
+verdict; the ones that cannot take the pod say why, e.g. `Insufficient CPU: requires 4000m, available 1200m`.
+
+The node affinity field holds one `nodeSelectorTerm`, its expressions ANDed: `zone in (a,b)`, `disk notin (hdd)`,
+`gpu` or `gpu exists`, `!spot` or `spot doesnotexist`, `cores gt 4`, `cores lt 64`. A node that fails the term
+reads `Node affinity mismatch: requires zone In (a,b), spot DoesNotExist`. Several ORed terms can be sent through the
+[HTTP API](http-api.md).
 
 !!! note "In the demo"
     The demo answers from precomputed files, so it offers six preset pods instead of free input. On the GPU cluster,
@@ -94,11 +99,16 @@ On demo-shop, `checkout-api` doubles easily. `search-indexer` is pinned to one n
 While a result is shown, nodes are outlined in both views — green fits / receives pods or copies, red cannot, grey is the drained
 (or planned-for-removal) node — and a strip above the map summarises it. `Esc` or its `×` clears it.
 
-Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, `NoSchedule`/`NoExecute` taints vs.
-tolerations, pod count, CPU, memory, then every extended resource the pod requests against the node's free allocatable
-(`Insufficient nvidia.com/gpu: requires 1, available 0`; a node that does not advertise a resource has none). A pod
-that tolerates `node.kubernetes.io/unschedulable` or `not-ready` (every DaemonSet pod does) still fits a cordoned or
-NotReady node.
+Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, required node affinity,
+`NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory, then every extended resource the pod requests
+against the node's free allocatable (`Insufficient nvidia.com/gpu: requires 1, available 0`; a node that does not
+advertise a resource has none). A pod that tolerates `node.kubernetes.io/unschedulable` or `not-ready` (every
+DaemonSet pod does) still fits a cordoned or NotReady node.
 
-**Not simulated:** node/pod affinity, topology spread, PodDisruptionBudgets and volume zone binding — so a green
-verdict is necessary, not sufficient.
+Node affinity is the pod's `requiredDuringSchedulingIgnoredDuringExecution` `nodeSelectorTerms`: the terms are ORed,
+the expressions inside a term ANDed, with the operators `In`, `NotIn`, `Exists`, `DoesNotExist`, `Gt` and `Lt`, and
+`matchFields` on `metadata.name`. Drains, the consolidation finder and replica copies all honour it. Preferred terms
+only score nodes, so they are ignored.
+
+**Not simulated:** pod affinity, topology spread, PodDisruptionBudgets and volume zone binding — so a green verdict is
+necessary, not sufficient.

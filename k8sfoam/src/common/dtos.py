@@ -5,12 +5,14 @@ from collections import namedtuple
 # node_selector/tolerations/owner_kind back the scheduling simulator.
 # owner_kind/owner_name identify the workload: a Deployment's ReplicaSet is
 # resolved to the Deployment, and owner_name is None for static and naked pods.
+# node_affinity holds the required nodeSelectorTerms as plain dicts
+# ({matchExpressions, matchFields}); the preferred terms only score nodes.
 # They are declared last with defaults so existing positional construction keeps working.
 PodResources = namedtuple(
     'PodResources',
     'name node_name cpu memory containers init_containers namespace labels qos_class extended '
-    'node_selector tolerations owner_kind owner_name',
-    defaults=('', None, None, None, None, None, None, None)
+    'node_selector tolerations owner_kind owner_name node_affinity',
+    defaults=('', None, None, None, None, None, None, None, None)
 )
 # `extended` on every DTO maps a non-cpu/memory resource name (nvidia.com/gpu,
 # ephemeral-storage, hugepages-2Mi) to a count, or to kB for byte-sized ones.

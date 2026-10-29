@@ -5,6 +5,8 @@ from pydash import py_ as _  # type: ignore
 from k8sfoam.tests.common.mocks import (create_container, create_pod, create_node, create_taint, create_condition,
                                         create_toleration)
 from unittest.mock import MagicMock
+from kubernetes.client import (V1Affinity, V1NodeAffinity, V1NodeSelector, V1NodeSelectorRequirement,  # type: ignore
+                               V1NodeSelectorTerm, V1PreferredSchedulingTerm)
 
 
 def test_should_extract_pod_resources_with_single_container_pod():
@@ -490,6 +492,47 @@ def test_should_extract_pod_scheduling_constraints():
     assert result.node_selector == {'zone': 'a'}
     assert result.tolerations == [{'key': 'dedicated', 'operator': 'Equal', 'value': 'gpu', 'effect': 'NoSchedule'}]
     assert result.owner_kind == 'ReplicaSet'
+
+
+def test_should_extract_required_node_affinity():
+    # Given — the preferred terms only score nodes, so they are left out
+    affinity = V1Affinity(node_affinity=V1NodeAffinity(
+        required_during_scheduling_ignored_during_execution=V1NodeSelector(node_selector_terms=[
+            V1NodeSelectorTerm(match_expressions=[
+                V1NodeSelectorRequirement(key='zone', operator='In', values=['a', 'b']),
+                V1NodeSelectorRequirement(key='spot', operator='DoesNotExist')]),
+            V1NodeSelectorTerm(match_fields=[
+                V1NodeSelectorRequirement(key='metadata.name', operator='In', values=['node-1'])]),
+        ]),
+        preferred_during_scheduling_ignored_during_execution=[V1PreferredSchedulingTerm(
+            weight=1, preference=V1NodeSelectorTerm(match_expressions=[
+                V1NodeSelectorRequirement(key='disk', operator='In', values=['ssd'])]))],
+    ))
+    pod = create_pod('web', 'node', containers=[create_container('app', '100m', '100Mi')], affinity=affinity)
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert result.node_affinity == [
+        {'matchExpressions': [{'key': 'zone', 'operator': 'In', 'values': ['a', 'b']},
+                              {'key': 'spot', 'operator': 'DoesNotExist', 'values': []}],
+         'matchFields': []},
+        {'matchExpressions': [],
+         'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': ['node-1']}]},
+    ]
+
+
+@pytest.mark.parametrize('affinity', [None, V1Affinity(), V1Affinity(node_affinity=V1NodeAffinity())])
+def test_should_extract_no_node_affinity_when_none_is_required(affinity):
+    # Given
+    pod = create_pod('web', 'node', containers=[create_container('app', '100m', '100Mi')], affinity=affinity)
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert result.node_affinity == []
 
 
 @pytest.mark.parametrize('owner_kind, annotations, expected', [

@@ -135,6 +135,111 @@ def test_node_selector_match_fits():
     assert reasons == []
 
 
+def expr(key, operator, *values):
+    return {'key': key, 'operator': operator, 'values': list(values)}
+
+
+def term(*expressions, fields=()):
+    return {'matchExpressions': list(expressions), 'matchFields': list(fields)}
+
+
+@pytest.mark.parametrize('requirement, expected', [
+    (expr('zone', 'In', 'a', 'b'), True),
+    (expr('zone', 'In', 'c'), False),
+    (expr('zone', 'NotIn', 'c'), True),
+    (expr('zone', 'NotIn', 'a'), False),
+    (expr('spot', 'NotIn', 'true'), True),
+    (expr('zone', 'Exists'), True),
+    (expr('spot', 'Exists'), False),
+    (expr('spot', 'DoesNotExist'), True),
+    (expr('zone', 'DoesNotExist'), False),
+    (expr('cores', 'Gt', '4'), True),
+    (expr('cores', 'Gt', '8'), False),
+    (expr('cores', 'Lt', '16'), True),
+    (expr('cores', 'Lt', '8'), False),
+    (expr('zone', 'Gt', '1'), False),
+    (expr('spot', 'Lt', '1'), False),
+])
+def test_node_affinity_operators(requirement, expected):
+    # Given
+    n = node('a', labels={'zone': 'a', 'cores': '8'})
+
+    # When
+    reasons = filter_node(pod('new', node_affinity=[term(requirement)]), n, free_capacity([n], [])['a'])
+
+    # Then
+    assert (reasons == []) is expected
+
+
+def test_node_affinity_ands_expressions_within_a_term():
+    # Given
+    n = node('a', labels={'zone': 'a', 'disk': 'hdd'})
+    affinity = [term(expr('zone', 'In', 'a'), expr('disk', 'In', 'ssd'))]
+
+    # When
+    reasons = filter_node(pod('new', node_affinity=affinity), n, free_capacity([n], [])['a'])
+
+    # Then
+    assert reasons == [{'slug': 'node-affinity',
+                        'message': 'Node affinity mismatch: requires zone In (a), disk In (ssd)'}]
+
+
+def test_node_affinity_ors_terms():
+    # Given
+    nodes = [node('a', labels={'zone': 'a'}), node('b', labels={'zone': 'b'}), node('c', labels={'zone': 'c'})]
+    affinity = [term(expr('zone', 'In', 'a')), term(expr('zone', 'In', 'b'))]
+
+    # When
+    result = simulate_fit(pod('new', node_affinity=affinity), nodes, [])
+
+    # Then
+    verdicts = {r['node']: r for r in result['nodes']}
+    assert result['fits'] == 2
+    assert verdicts['c']['reasons'] == [{'slug': 'node-affinity',
+                                         'message': 'Node affinity mismatch: requires zone In (a) or zone In (b)'}]
+
+
+def test_node_affinity_match_fields_on_the_node_name():
+    # Given
+    nodes = [node('a'), node('b')]
+    affinity = [term(fields=[expr('metadata.name', 'In', 'b')])]
+
+    # When
+    result = simulate_fit(pod('new', node_affinity=affinity), nodes, [])
+
+    # Then
+    assert [r['node'] for r in result['nodes'] if r['fits']] == ['b']
+
+
+def test_node_affinity_is_checked_right_after_the_node_selector():
+    # Given
+    n = node('a', labels={'zone': 'b'}, taints=[{'key': 'dedicated', 'value': 'gpu', 'effect': 'NoSchedule'}])
+    p = pod('new', node_selector={'zone': 'a'}, node_affinity=[term(expr('zone', 'In', 'a'))])
+
+    # When
+    reasons = filter_node(p, n, free_capacity([n], [])['a'])
+
+    # Then
+    assert slugs(reasons) == ['node-selector', 'node-affinity', 'taint']
+
+
+def test_simulate_drain_respects_node_affinity_of_evicted_pods():
+    # Given — c has the most room, but the pod may only run in zone a
+    nodes = [node('a1', labels={'zone': 'a'}), node('a2', cpu=2000, labels={'zone': 'a'}),
+             node('c', cpu=16000, labels={'zone': 'c'})]
+    pods = [pod('web', 'a1', 1000, node_affinity=[term(expr('zone', 'In', 'a'))]),
+            pod('db', 'a1', 3000, node_affinity=[term(expr('zone', 'In', 'a'))])]
+
+    # When
+    result = simulate_drain('a1', nodes, pods)
+
+    # Then
+    assert [(p['pod'], p['to']) for p in result['placements']] == [('web', 'a2')]
+    assert result['pending'][0]['pod'] == 'db'
+    assert result['pending'][0]['reasons'] == [{'slug': 'node-affinity', 'nodes': 1},
+                                               {'slug': 'insufficient-cpu', 'nodes': 1}]
+
+
 def test_untolerated_blocking_taint_is_reported_and_prefer_no_schedule_ignored():
     # Given
     n = node('a', taints=[{'key': 'dedicated', 'value': 'gpu', 'effect': 'NoSchedule'},
@@ -542,7 +647,7 @@ def test_simulate_replicas_honour_node_selector_and_tolerations():
     # Then
     assert result['placements'] == ['gpu', 'gpu']
     assert result['template'] == {'pod': 'web-1', 'cpu': 100, 'memory': 0.0, 'extended': {},
-                                  'nodeSelector': {'pool': 'gpu'}, 'tolerations': [toleration]}
+                                  'nodeSelector': {'pool': 'gpu'}, 'tolerations': [toleration], 'nodeAffinity': []}
     verdicts = by_node(result)
     assert slugs(verdicts['tainted']['reasons']) == ['taint']
     assert slugs(verdicts['general']['reasons']) == ['node-selector']

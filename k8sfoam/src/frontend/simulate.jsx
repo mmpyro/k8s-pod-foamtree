@@ -12,6 +12,7 @@ const REASONS = {
   "cordoned":            { label: "cordoned" },
   "not-ready":           { label: "not ready" },
   "node-selector":       { label: "nodeSelector mismatch" },
+  "node-affinity":       { label: "node affinity mismatch" },
   "taint":               { label: "untolerated taint" },
   "insufficient-pods":   { label: "pod limit reached" },
   "insufficient-cpu":    { label: "insufficient CPU" },
@@ -40,8 +41,8 @@ function blockerLabel(b) {
 // What the simulator does not model, shown under every result so a green
 // verdict is read as "necessary", not "guaranteed".
 const CAVEAT = "Filter phase only: CPU, memory, extended resources (GPUs, ephemeral-storage, hugepages), " +
-  "pod count, cordon, readiness, nodeSelector and taints. " +
-  "Affinity, topology spread, PDBs and volume zones are not simulated.";
+  "pod count, cordon, readiness, nodeSelector, required node affinity and taints. " +
+  "Pod affinity, topology spread, PDBs and volume zones are not simulated.";
 
 function reasonLabel(slug) {
   return (REASONS[slug] || { label: slug }).label;
@@ -84,6 +85,56 @@ function parseTolerations(text) {
       : { key, operator: "Equal", value: kv.slice(eq + 1).trim(), effect: effect && effect.trim() });
   }
   return { tolerations, errors };
+}
+
+// One required node affinity term, its expressions ANDed:
+// `zone in (a,b), disk notin (hdd), gpu exists, !spot, cores gt 4`.
+// A bare `key` means exists. Commas inside parentheses separate values.
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0, current = "";
+  for (const ch of text) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth = Math.max(0, depth - 1);
+    if ((ch === "," || ch === "\n") && depth === 0) { parts.push(current); current = ""; continue; }
+    current += ch;
+  }
+  parts.push(current);
+  return parts.map(p => p.trim()).filter(Boolean);
+}
+
+const SET_OPS = { in: "In", notin: "NotIn" };
+const NUM_OPS = { gt: "Gt", lt: "Lt" };
+const EXIST_OPS = { exists: "Exists", doesnotexist: "DoesNotExist" };
+function parseNodeAffinity(text) {
+  const expressions = [], errors = [];
+  for (const tok of splitTopLevel(text)) {
+    let m;
+    if ((m = tok.match(/^(\S+)\s+(in|notin)\s*\(([^)]*)\)$/i))) {
+      const values = m[3].split(",").map(v => v.trim()).filter(Boolean);
+      if (!values.length) { errors.push(`"${tok}" lists no values`); continue; }
+      expressions.push({ key: m[1], operator: SET_OPS[m[2].toLowerCase()], values });
+    } else if ((m = tok.match(/^(\S+)\s+(gt|lt)\s+(-?\d+)$/i))) {
+      expressions.push({ key: m[1], operator: NUM_OPS[m[2].toLowerCase()], values: [m[3]] });
+    } else if ((m = tok.match(/^(\S+)\s+(exists|doesnotexist)$/i))) {
+      expressions.push({ key: m[1], operator: EXIST_OPS[m[2].toLowerCase()], values: [] });
+    } else if ((m = tok.match(/^!(\S+)$/))) {
+      expressions.push({ key: m[1], operator: "DoesNotExist", values: [] });
+    } else if (/^[^\s!()]+$/.test(tok)) {
+      expressions.push({ key: tok, operator: "Exists", values: [] });
+    } else {
+      errors.push(`"${tok}" is not key in (a,b), key notin (a), key exists, !key or key gt N`);
+    }
+  }
+  return { nodeAffinity: expressions.length ? [{ matchExpressions: expressions }] : [], errors };
+}
+
+// `zone In (a,b), spot DoesNotExist or ...` — the backend's wording.
+function fmtNodeAffinity(terms) {
+  const fmt = r => ["In", "NotIn"].includes(r.operator)
+    ? `${r.key} ${r.operator} (${r.values.join(",")})`
+    : r.values && r.values.length ? `${r.key} ${r.operator} ${r.values[0]}` : `${r.key} ${r.operator}`;
+  return terms.map(t => [...(t.matchExpressions || []), ...(t.matchFields || [])].map(fmt).join(", ")).join(" or ");
 }
 
 // The preset whose fields the form holds, or null. Whitespace around the
@@ -171,6 +222,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
   const [memory, setMemory] = useState("1Gi");
   const [selectorText, setSelectorText] = useState("");
   const [tolerationText, setTolerationText] = useState("");
+  const [affinityText, setAffinityText] = useState("");
   const [extendedText, setExtendedText] = useState("");
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -184,11 +236,13 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
 
   const { selector, errors: selErrors } = parseSelector(selectorText);
   const { tolerations, errors: tolErrors } = parseTolerations(tolerationText);
+  const { nodeAffinity, errors: affErrors } = parseNodeAffinity(affinityText);
   // Same name=quantity syntax as the selector; quantities are validated server-side.
   const { selector: extended, errors: extErrors } = parseSelector(extendedText);
-  const formErrors = [...selErrors, ...tolErrors, ...extErrors];
+  const formErrors = [...selErrors, ...affErrors, ...tolErrors, ...extErrors];
   const preset = matchPreset(presets, {
-    cpu, memory, extended: extendedText, nodeSelector: selectorText, tolerations: tolerationText,
+    cpu, memory, extended: extendedText, nodeSelector: selectorText, nodeAffinity: affinityText,
+    tolerations: tolerationText,
   });
   const customInDemo = window.k8sApi.isStatic && !preset;
 
@@ -197,6 +251,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
     setMemory(p.form.memory);
     setExtendedText(p.form.extended);
     setSelectorText(p.form.nodeSelector);
+    setAffinityText(p.form.nodeAffinity || "");
     setTolerationText(p.form.tolerations);
     setError(null);
   };
@@ -206,7 +261,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
     if (formErrors.length) return;
     setBusy(true);
     try {
-      const spec = { cpu, memory, extended, nodeSelector: selector, tolerations };
+      const spec = { cpu, memory, extended, nodeSelector: selector, nodeAffinity, tolerations };
       const res = await window.k8sApi.fit(ctx, spec, preset && preset.id);
       setResult(res);
       setError(null);
@@ -263,6 +318,11 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
             <span className="ov-label">nodeSelector</span>
             <input value={selectorText} onChange={e => setSelectorText(e.target.value)}
               placeholder="topology.kubernetes.io/zone=us-east-1a, disk=ssd" spellCheck="false" />
+          </label>
+          <label className="sim-field sim-wide">
+            <span className="ov-label">Node affinity (required)</span>
+            <input value={affinityText} onChange={e => setAffinityText(e.target.value)}
+              placeholder="topology.kubernetes.io/zone in (us-east-1a,us-east-1b), !spot, cores gt 4" spellCheck="false" />
           </label>
           <label className="sim-field sim-wide">
             <span className="ov-label">Tolerations</span>
@@ -615,6 +675,7 @@ function TemplateLine({ t, memUnit, fmtMem }) {
       <span>requests <code>{(t.cpu / 1000).toFixed(2)} cores · {fmtMem(kbToMib(t.memory), memUnit)} {memUnit}</code></span>
       {ext.length > 0 && <span>extended <code>{ext.join(", ")}</code></span>}
       {selector.length > 0 && <span>nodeSelector <code>{selector.join(", ")}</code></span>}
+      {(t.nodeAffinity || []).length > 0 && <span>node affinity <code>{fmtNodeAffinity(t.nodeAffinity)}</code></span>}
       {t.tolerations.length > 0 && <span>tolerations <code>{t.tolerations.map(fmtToleration).join(", ")}</code></span>}
     </div>
   );

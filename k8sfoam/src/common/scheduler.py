@@ -3,11 +3,12 @@
 Backs four what-if questions — "can this pod fit anywhere?", "where would this
 node's pods go if it were drained?", "which nodes could be removed?" and "can this
 workload scale out by N replicas?". It deliberately covers only the predicates
-that decide most placements: node condition, cordon, nodeSelector, taints and
-tolerations, pod count, CPU, memory and extended resource requests (GPUs,
-ephemeral-storage, hugepages). Affinity/anti-affinity, topology spread,
-PodDisruptionBudgets and volume zone binding are out of scope, so a "fits"
-verdict is necessary rather than sufficient.
+that decide most placements: node condition, cordon, nodeSelector, required node
+affinity, taints and tolerations, pod count, CPU, memory and extended resource
+requests (GPUs, ephemeral-storage, hugepages). Inter-pod affinity/anti-affinity,
+topology spread, PodDisruptionBudgets and volume zone binding are out of scope,
+so a "fits" verdict is necessary rather than sufficient. Preferred affinity terms
+only score nodes, so they never filter one out.
 
 Units follow the rest of the backend: CPU in millicores, memory and byte-sized
 extended resources in decimal kB, other extended resources as plain counts.
@@ -32,7 +33,7 @@ NOT_READY_TAINT = {'key': 'node.kubernetes.io/not-ready', 'value': None, 'effect
 DRAIN_SKIPPED_OWNERS = {'DaemonSet': 'daemonset', 'Node': 'static'}
 
 # Reason slugs in the order the filter evaluates them — the frontend labels them.
-REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'taint',
+REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'node-affinity', 'taint',
                 'insufficient-pods', 'insufficient-cpu', 'insufficient-memory', 'insufficient-extended')
 
 # Why a node cannot be removed even on its own. cluster-autoscaler refuses to
@@ -116,6 +117,55 @@ def _tolerated(pod: PodResources, taint: dict) -> bool:
     return any(tolerates(t, taint) for t in pod.tolerations or [])
 
 
+def requirement_matches(requirement: dict, value: Optional[str]) -> bool:
+    """One NodeSelectorRequirement against a label or field value; None when the node has none."""
+    operator, values = requirement['operator'], requirement.get('values') or []
+    if operator == 'In':
+        return value is not None and value in values
+    if operator == 'NotIn':
+        return value is None or value not in values
+    if operator == 'Exists':
+        return value is not None
+    if operator == 'DoesNotExist':
+        return value is None
+    if operator in ('Gt', 'Lt'):
+        # Both sides must parse as integers, like the API's NodeSelectorRequirement.
+        try:
+            actual, bound = int(value or ''), int(values[0])
+        except (ValueError, IndexError):
+            return False
+        return actual > bound if operator == 'Gt' else actual < bound
+    return False
+
+
+def node_selector_term_matches(term: dict, node: NodeResources) -> bool:
+    """Expressions and fields of a term are ANDed; an empty term matches no node."""
+    expressions, fields = term.get('matchExpressions') or [], term.get('matchFields') or []
+    if not expressions and not fields:
+        return False
+    labels = node.labels or {}
+    if not all(requirement_matches(r, labels.get(r['key'])) for r in expressions):
+        return False
+    # metadata.name is the only field a node selector may match on.
+    return all(r['key'] == 'metadata.name' and requirement_matches(r, node.name) for r in fields)
+
+
+def _fmt_requirement(r: dict) -> str:
+    values = r.get('values') or []
+    if r['operator'] in ('In', 'NotIn'):
+        return f"{r['key']} {r['operator']} ({','.join(values)})"
+    return f"{r['key']} {r['operator']} {values[0]}" if values else f"{r['key']} {r['operator']}"
+
+
+def _fmt_term(term: dict) -> str:
+    requirements = [*(term.get('matchExpressions') or []), *(term.get('matchFields') or [])]
+    return ', '.join(_fmt_requirement(r) for r in requirements)
+
+
+def _fmt_terms(terms: list) -> str:
+    return ' or '.join(_fmt_term(t) for t in terms)
+
+
 def _reason(slug: str, message: str) -> dict:
     return {'slug': slug, 'message': message}
 
@@ -135,6 +185,10 @@ def filter_node(pod: PodResources, node: NodeResources, free: dict) -> list:
         if labels.get(key) != value:
             has = f'node has {key}={labels[key]}' if key in labels else f'node has no {key} label'
             reasons.append(_reason('node-selector', f'Node selector mismatch: requires {key}={value}, {has}'))
+    # Terms are ORed: one matching term is enough.
+    terms = pod.node_affinity or []
+    if terms and not any(node_selector_term_matches(t, node) for t in terms):
+        reasons.append(_reason('node-affinity', f'Node affinity mismatch: requires {_fmt_terms(terms)}'))
 
     for taint in node.taints or []:
         if taint.get('effect') in FILTER_EFFECTS and not _tolerated(pod, taint):
@@ -368,7 +422,8 @@ def simulate_replicas(namespace: str, kind: str, name: str, count: int,
         'workload': {'namespace': namespace, 'kind': kind, 'name': name},
         'template': {'pod': template.name, 'cpu': template.cpu or 0, 'memory': template.memory or 0,
                      'extended': dict(template.extended or {}), 'nodeSelector': dict(template.node_selector or {}),
-                     'tolerations': list(template.tolerations or [])},
+                     'tolerations': list(template.tolerations or []),
+                     'nodeAffinity': list(template.node_affinity or [])},
         'requested': count,
         'placed': len(placements),
         'fits': fits,
