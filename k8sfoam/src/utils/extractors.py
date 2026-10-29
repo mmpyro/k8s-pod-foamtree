@@ -162,7 +162,8 @@ class ResourcesExtractor():
                             self.__extract_node_affinity(pod),
                             _pod_affinity_terms(affinity.pod_affinity if affinity is not None else None),
                             _pod_affinity_terms(affinity.pod_anti_affinity if affinity is not None else None),
-                            _topology_spread(pod, labels))
+                            _topology_spread(pod, labels),
+                            [g.name for g in pod.spec.scheduling_gates or []])
 
     def extract_disruption_budget(self, pdb) -> DisruptionBudget:
         # A budget the controller has not processed yet reports no status: nothing may be evicted.

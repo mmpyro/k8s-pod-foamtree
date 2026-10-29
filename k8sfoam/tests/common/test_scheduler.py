@@ -3,7 +3,8 @@ import pytest
 from collections import Counter
 from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources
 from k8sfoam.src.common.scheduler import (UnknownTemplate, filter_node, free_capacity, hypothetical_nodes,
-                                          simulate_consolidation, simulate_drain, simulate_fit, simulate_replicas,
+                                          simulate_consolidation, simulate_drain, simulate_fit, simulate_pending,
+                                          simulate_replicas,
                                           tolerates, fmt_memory)
 
 
@@ -1161,3 +1162,49 @@ def test_simulate_drain_fits_only_after_adding_nodes():
     assert with_extra['fits'] is True
     assert with_extra['remainingNodes'] == 2
     assert [(p['to'], p['hypothetical']) for p in with_extra['placements']] == [('hypothetical-m5.large-1', True)]
+
+
+def test_simulate_pending_without_pending_pods_fits():
+    # When
+    result = simulate_pending([node('a')], [pod('web', 'a', 100)])
+
+    # Then
+    assert (result['fits'], result['total'], result['placements'], result['pending'], result['gated']) == \
+        (True, 0, [], [], [])
+
+
+def test_simulate_pending_places_the_biggest_pods_first_once_nodes_are_added():
+    # Given — a is nearly full; two pending pods need a node each
+    nodes = [node('a', cpu=4000, labels={INSTANCE_TYPE: 'm5.xlarge'})]
+    pods = [pod('web', 'a', 3500), pod('small', None, 1000), pod('big', None, 3000)]
+
+    # When
+    now = simulate_pending(nodes, pods)
+    grown = simulate_pending(nodes, pods, [{'template': 'a', 'count': 2}])
+
+    # Then
+    assert now['fits'] is False
+    assert [p['pod'] for p in now['pending']] == ['big', 'small']
+    assert now['pending'][0]['reasons'] == [{'slug': 'insufficient-cpu', 'nodes': 1}]
+    assert grown['fits'] is True
+    assert grown['total'] == 2
+    assert grown['nodes'] == 3
+    # big takes the first empty copy; small then goes where most room is left.
+    assert [(p['pod'], p['to'], p['hypothetical']) for p in grown['placements']] == [
+        ('big', 'hypothetical-m5.xlarge-2', True), ('small', 'hypothetical-m5.xlarge-1', True)]
+
+
+def test_simulate_pending_reports_pods_that_never_fit_and_lists_gated_ones():
+    # Given
+    nodes = [node('a', labels={'kubernetes.io/arch': 'amd64'})]
+    pods = [pod('arm', None, 100, node_selector={'kubernetes.io/arch': 'arm64'}),
+            pod('queued', None, 100, scheduling_gates=['kueue.x-k8s.io/admission'])]
+
+    # When
+    result = simulate_pending(nodes, pods, [{'template': 'a', 'count': 3}])
+
+    # Then
+    assert result['fits'] is False
+    assert [(p['pod'], p['reasons']) for p in result['pending']] == [('arm', [{'slug': 'node-selector', 'nodes': 4}])]
+    assert result['gated'] == [{'pod': 'queued', 'namespace': 'default', 'gates': ['kueue.x-k8s.io/admission']}]
+    assert result['total'] == 1

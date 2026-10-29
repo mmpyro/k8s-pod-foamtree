@@ -4,8 +4,10 @@
 
 The site is the regular frontend bundle switched to static mode: instead of the
 HTTP API it reads JSON files holding what each endpoint would have answered.
-Every drain and the consolidation plan are precomputed; the fit simulator offers
-FIT_PRESETS only, since an arbitrary pod cannot be answered ahead of time. Each
+Every drain, the consolidation plan and the Pending pods' placement are
+precomputed against the cluster as it is; hypothetical nodes need the server.
+The fit simulator offers FIT_PRESETS only, since an arbitrary pod cannot be
+answered ahead of time. Each
 workload's replica simulation is stored once with MAX_REPLICAS copies; the
 frontend cuts it down to the count asked for.
 """
@@ -17,7 +19,7 @@ from pathlib import Path
 from typing import Any, List
 from k8sfoam.src.app import parse_pod_spec
 from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_REPLICAS, simulate_consolidation, simulate_drain,
-                                          simulate_fit, simulate_replicas)
+                                          simulate_fit, simulate_pending, simulate_replicas)
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -115,6 +117,7 @@ def export_data(data_dir: Path, seed: int = DEFAULT_SEED) -> None:
         for node in nodes:
             _write(out / 'drain' / f'{node.name}.json', simulate_drain(node.name, nodes, pods, pdbs))
         _write(out / 'consolidation.json', simulate_consolidation(nodes, pods, pdbs))
+        _write(out / 'pending.json', simulate_pending(nodes, pods))
         for preset in FIT_PRESETS:
             _write(out / 'fit' / f"{preset['id']}.json", simulate_fit(parse_pod_spec(preset['spec']), nodes, pods))
         workloads = {(p.namespace, p.owner_kind, p.owner_name) for p in pods

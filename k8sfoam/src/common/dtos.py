@@ -12,12 +12,14 @@ from collections import namedtuple
 # topology_spread holds the DoNotSchedule topologySpreadConstraints ({maxSkew,
 # topologyKey, labelSelector, minDomains, nodeAffinityPolicy, nodeTaintsPolicy}),
 # with matchLabelKeys already folded into labelSelector.
+# scheduling_gates names the spec.schedulingGates keeping an unbound pod out of the scheduler.
 # They are declared last with defaults so existing positional construction keeps working.
 PodResources = namedtuple(
     'PodResources',
     'name node_name cpu memory containers init_containers namespace labels qos_class extended '
-    'node_selector tolerations owner_kind owner_name node_affinity pod_affinity pod_anti_affinity topology_spread',
-    defaults=('', None, None, None, None, None, None, None, None, None, None, None)
+    'node_selector tolerations owner_kind owner_name node_affinity pod_affinity pod_anti_affinity topology_spread '
+    'scheduling_gates',
+    defaults=('', None, None, None, None, None, None, None, None, None, None, None, None)
 )
 # `extended` on every DTO maps a non-cpu/memory resource name (nvidia.com/gpu,
 # ephemeral-storage, hugepages-2Mi) to a count, or to kB for byte-sized ones.

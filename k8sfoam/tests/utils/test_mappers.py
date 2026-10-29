@@ -409,6 +409,19 @@ def test_combined_carries_health_topology_and_findings():
     assert pod_out['findings'] == ['missing-requests', 'missing-limits']
 
 
+def test_combined_counts_the_pending_pods_the_scheduler_is_trying_to_place():
+    # Given
+    node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]
+    pods = [PodResources('web', 'minikube', 100, 0, [], []), PodResources('big', None, 9000, 0, [], []),
+            PodResources('gated', None, 100, 0, [], [], scheduling_gates=['kueue.x-k8s.io/admission'])]
+
+    # When
+    payload = FoamTreeMapper(node, pods).combined()
+
+    # Then
+    assert payload['pendingPods'] == 1
+
+
 def test_combined_keeps_init_containers_that_request_anything():
     # Given — a memory-only init container would vanish from the cpu treemap
     node = [NodeResources('minikube', 2000, float(bitmath.GB(1).kB))]

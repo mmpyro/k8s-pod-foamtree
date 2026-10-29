@@ -389,6 +389,52 @@ def test_simulate_drain_post_validates_the_body(k8s_client, body, status, test_c
 
 
 @patch('k8sfoam.src.app.K8sClient')
+def test_simulate_pending_places_unbound_pods(k8s_client, test_client):
+    # Given — the pending pod needs 3 CPUs: a has them, b does not
+    cluster = simulation_cluster()
+    cluster.get_pod_resources.return_value = [PodResources('job', None, 3000, float(bitmath.GiB(1).kB), [], [],
+                                                           owner_kind='Job', owner_name='job')]
+    k8s_client.return_value = cluster
+
+    # When
+    empty = test_client.post('/simulate/pending?context=minikube')
+    grown = test_client.post('/simulate/pending', json={'extraNodes': [{'template': 'a', 'count': 1}]})
+
+    # Then
+    assert empty.status_code == 200
+    k8s_client.assert_any_call('minikube', 500)
+    assert [p['to'] for p in empty.json['placements']] == ['a']
+    assert grown.json['nodes'] == 3
+    assert grown.json['hypotheticalNodes'][0]['name'] == 'hypothetical-custom-1'
+
+
+@pytest.mark.parametrize('body, status', [(['extraNodes'], 400), ({'extraNodes': 'a'}, 400),
+                                          ({'extraNodes': [{'template': 'ghost', 'count': 1}]}, 400)])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_pending_validates_the_body(k8s_client, body, status, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.post('/simulate/pending', json=body)
+
+    # Then
+    assert response.status_code == status
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_pending_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_node_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.post('/simulate/pending')
+
+    # Then
+    assert response.status_code == 500
+
+
+@patch('k8sfoam.src.app.K8sClient')
 def test_simulate_consolidation_returns_verdicts_and_plan(k8s_client, test_client):
     # Given
     k8s_client.return_value = simulation_cluster()
