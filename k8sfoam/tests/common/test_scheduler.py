@@ -240,6 +240,135 @@ def test_simulate_drain_respects_node_affinity_of_evicted_pods():
                                                {'slug': 'insufficient-cpu', 'nodes': 1}]
 
 
+HOST = 'kubernetes.io/hostname'
+ZONE = 'topology.kubernetes.io/zone'
+
+
+def host(name, zone=None, **kw):
+    labels = {HOST: name, **({ZONE: zone} if zone else {})}
+    return node(name, labels=labels, **kw)
+
+
+def pod_term(topology_key, namespaces=(), namespace_selector=None, **match_labels):
+    return {'labelSelector': {'matchLabels': match_labels, 'matchExpressions': []},
+            'namespaces': list(namespaces), 'namespaceSelector': namespace_selector, 'topologyKey': topology_key}
+
+
+def test_hostname_anti_affinity_forbids_a_second_replica_on_a_node():
+    # Given
+    nodes = [host('a'), host('b'), host('c')]
+    anti = [pod_term(HOST, app='web')]
+    pods = [replica('web-1', 'a', 100, labels={'app': 'web'}, pod_anti_affinity=anti)]
+
+    # When
+    result = replicas(3, nodes, pods)
+
+    # Then — one copy per free node, then nowhere is left
+    assert sorted(result['placements']) == ['b', 'c']
+    assert result['pending'] == [{'slug': 'pod-anti-affinity', 'nodes': 3}]
+    assert by_node(result)['a']['reasons'] == [{
+        'slug': 'pod-anti-affinity',
+        'message': f'Pod anti-affinity: default/web-1 matches app=web in the same {HOST}'}]
+
+
+def test_zone_pod_affinity_needs_a_matching_pod_in_the_zone():
+    # Given
+    nodes = [host('a1', 'a'), host('a2', 'a'), host('b1', 'b'), host('bare')]
+    pods = [pod('cache', 'a1', labels={'app': 'cache'})]
+    web = pod('web', labels={'app': 'web'}, pod_affinity=[pod_term(ZONE, app='cache')])
+
+    # When
+    result = simulate_fit(web, nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert [n for n, v in verdicts.items() if v['fits']] == ['a1', 'a2']
+    assert verdicts['b1']['reasons'] == [{'slug': 'pod-affinity',
+                                          'message': f'Pod affinity: no pod matching app=cache in the same {ZONE}'}]
+    assert verdicts['bare']['reasons'] == [{'slug': 'pod-affinity', 'message': f'Pod affinity: node has no {ZONE} label'}]
+
+
+def test_first_pod_of_a_self_affine_group_may_go_anywhere_with_the_topology():
+    # Given — nothing matches yet, and the pod matches its own term
+    nodes = [host('a1', 'a'), host('bare')]
+    web = pod('web', labels={'app': 'web'}, pod_affinity=[pod_term(ZONE, app='web')])
+
+    # When
+    result = simulate_fit(web, nodes, [])
+
+    # Then
+    assert [n for n, v in by_node(result).items() if v['fits']] == ['a1']
+
+
+def test_existing_pods_anti_affinity_rejects_the_incoming_pod():
+    # Given — the incoming pod has no terms of its own
+    nodes = [host('a', 'z1'), host('b', 'z1'), host('c', 'z2')]
+    pods = [pod('db', 'a', labels={'app': 'db'}, pod_anti_affinity=[pod_term(ZONE, app='web')])]
+
+    # When
+    result = simulate_fit(pod('web', labels={'app': 'web'}), nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert [n for n, v in verdicts.items() if v['fits']] == ['c']
+    assert verdicts['b']['reasons'] == [{'slug': 'pod-anti-affinity',
+                                         'message': f'Pod anti-affinity: default/db repels it in the same {ZONE}'}]
+
+
+def test_pod_terms_are_scoped_to_namespaces():
+    # Given — a matching pod in another namespace
+    nodes = [host('a'), host('b')]
+    other = PodResources('web-x', 'a', 0, 0.0, [], [], 'other', labels={'app': 'web'}, owner_kind='ReplicaSet')
+
+    # When
+    own_namespace = simulate_fit(pod('web', pod_anti_affinity=[pod_term(HOST, app='web')]), nodes, [other])
+    listed = simulate_fit(pod('web', pod_anti_affinity=[pod_term(HOST, ['other'], app='web')]), nodes, [other])
+    every = simulate_fit(pod('web', pod_anti_affinity=[pod_term(HOST, namespace_selector={}, app='web')]),
+                         nodes, [other])
+
+    # Then
+    assert own_namespace['fits'] == 2
+    assert listed['fits'] == 1
+    assert every['fits'] == 1
+
+
+def test_simulate_drain_keeps_anti_affine_pods_apart_as_it_places_them():
+    # Given — two evicted replicas that must not share a node
+    nodes = [host('a'), host('b', cpu=8000), host('c')]
+    anti = [pod_term(HOST, app='web')]
+    pods = [pod('web-1', 'a', 1000, labels={'app': 'web'}, pod_anti_affinity=anti),
+            pod('web-2', 'a', 900, labels={'app': 'web'}, pod_anti_affinity=anti)]
+
+    # When
+    result = simulate_drain('a', nodes, pods)
+
+    # Then — b has room for both, but takes only the first
+    assert [(p['pod'], p['to']) for p in result['placements']] == [('web-1', 'b'), ('web-2', 'c')]
+
+
+def test_inter_pod_affinity_on_a_5k_pod_cluster_runs_in_reasonable_time():
+    # Given — 100 nodes in 3 zones, 50 workloads with one hostname-anti-affine replica per node
+    import time
+    nodes = [host(f'n{i}', f'z{i % 3}', cpu=64000, memory=256 * GI) for i in range(100)]
+    pods = [pod(f'app{a}-{i}', f'n{i}', 100, GI, labels={'app': f'app{a}'},
+                pod_anti_affinity=[pod_term(HOST, app=f'app{a}')],
+                pod_affinity=[pod_term(ZONE, app=f'app{a}')])
+            for i in range(100) for a in range(50)]
+    assert len(pods) == 5000
+    started = time.monotonic()
+
+    # When
+    fit = simulate_fit(pod('new', 100, labels={'app': 'app0'}, pod_anti_affinity=[pod_term(HOST, app='app0')]),
+                       nodes, pods)
+    drain = simulate_drain('n0', nodes, pods)
+
+    # Then
+    assert time.monotonic() - started < 10
+    assert fit['fits'] == 0
+    assert len(drain['pending']) == 50
+    assert drain['pending'][0]['reasons'] == [{'slug': 'pod-anti-affinity', 'nodes': 99}]
+
+
 def test_untolerated_blocking_taint_is_reported_and_prefer_no_schedule_ignored():
     # Given
     n = node('a', taints=[{'key': 'dedicated', 'value': 'gpu', 'effect': 'NoSchedule'},
@@ -647,7 +776,8 @@ def test_simulate_replicas_honour_node_selector_and_tolerations():
     # Then
     assert result['placements'] == ['gpu', 'gpu']
     assert result['template'] == {'pod': 'web-1', 'cpu': 100, 'memory': 0.0, 'extended': {},
-                                  'nodeSelector': {'pool': 'gpu'}, 'tolerations': [toleration], 'nodeAffinity': []}
+                                  'nodeSelector': {'pool': 'gpu'}, 'tolerations': [toleration], 'nodeAffinity': [],
+                                  'podAffinity': [], 'podAntiAffinity': []}
     verdicts = by_node(result)
     assert slugs(verdicts['tainted']['reasons']) == ['taint']
     assert slugs(verdicts['general']['reasons']) == ['node-selector']

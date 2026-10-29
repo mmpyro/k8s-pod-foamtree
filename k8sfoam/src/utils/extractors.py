@@ -1,3 +1,4 @@
+from typing import Optional
 from kubernetes.utils import parse_quantity  # type: ignore
 from k8sfoam.src.common.dtos import PodResources, ContainerResources, NodeResources
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS, CORDON_TAINT
@@ -19,6 +20,22 @@ def _totals(c: ContainerResources) -> dict:
 
 def _requirement(r) -> dict:
     return {'key': r.key, 'operator': r.operator, 'values': list(r.values or [])}
+
+
+def _label_selector(s) -> Optional[dict]:
+    """None stays None: an unset selector matches no pod, while an empty one matches every pod."""
+    if s is None:
+        return None
+    return {'matchLabels': dict(s.match_labels or {}),
+            'matchExpressions': [_requirement(r) for r in s.match_expressions or []]}
+
+
+def _pod_affinity_terms(rule) -> list:
+    """The required terms of a podAffinity or podAntiAffinity; preferred ones only score nodes."""
+    terms = rule.required_during_scheduling_ignored_during_execution if rule is not None else None
+    return [{'labelSelector': _label_selector(t.label_selector), 'namespaces': list(t.namespaces or []),
+             'namespaceSelector': _label_selector(t.namespace_selector), 'topologyKey': t.topology_key}
+            for t in terms or []]
 
 
 # The kubelet marks a static pod's API copy with this annotation. Such a pod is
@@ -117,10 +134,13 @@ class ResourcesExtractor():
         extended = {k: v for k, v in effective.items() if k not in ('cpu', 'memory') and v}
 
         owner_kind, owner_name = self.__extract_owner(pod, labels)
+        affinity = pod.spec.affinity
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
                             namespace, labels, qos_class, extended, dict(pod.spec.node_selector or {}),
                             self.__extract_tolerations(pod), owner_kind, owner_name,
-                            self.__extract_node_affinity(pod))
+                            self.__extract_node_affinity(pod),
+                            _pod_affinity_terms(affinity.pod_affinity if affinity is not None else None),
+                            _pod_affinity_terms(affinity.pod_anti_affinity if affinity is not None else None))
 
     def __extract_node_taints(self, node) -> list:
         """Every taint on the node, minus the one Kubernetes adds on cordon.
