@@ -14,7 +14,7 @@ def create_list(items, next_page=None, resource_version='1') -> MagicMock:
 def create_pod(name: str, node_name: str, containers=[], init_containers=None,
                namespace='default', labels=None, qos_class='Burstable', node_selector=None,
                tolerations=None, owner_kind='ReplicaSet', annotations=None, phase='Running',
-               owner_name=None) -> MagicMock:
+               owner_name=None, affinity=None) -> MagicMock:
     pod = MagicMock()
     metadata = MagicMock()
     metadata.name = name
@@ -29,6 +29,7 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     spec.node_name = node_name
     spec.node_selector = node_selector
     spec.tolerations = tolerations
+    spec.affinity = affinity
     spec.containers = containers
     spec.init_containers = init_containers
     status = MagicMock()

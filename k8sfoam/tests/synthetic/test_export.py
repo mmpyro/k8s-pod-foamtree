@@ -45,13 +45,17 @@ def test_preset_form_writes_the_fit_modal_syntax():
     spec = {'cpu': '4', 'memory': '16Gi', 'extended': {'nvidia.com/gpu': '1'}, 'nodeSelector': {'zone': 'a'},
             'tolerations': [{'key': 'gpu', 'operator': 'Exists', 'effect': 'NoSchedule'},
                             {'key': 'dedicated', 'operator': 'Equal', 'value': 'ml'},
-                            {'operator': 'Exists'}]}
+                            {'operator': 'Exists'}],
+            'nodeAffinity': [{'matchExpressions': [{'key': 'zone', 'operator': 'In', 'values': ['a', 'b']},
+                                                   {'key': 'spot', 'operator': 'DoesNotExist'},
+                                                   {'key': 'cores', 'operator': 'Gt', 'values': ['4']}]}]}
 
     # When
     form = preset_form(spec)
 
     # Then
     assert form == {'cpu': '4', 'memory': '16Gi', 'extended': 'nvidia.com/gpu=1', 'nodeSelector': 'zone=a',
+                    'nodeAffinity': 'zone in (a,b), !spot, cores gt 4',
                     'tolerations': 'gpu:NoSchedule, dedicated=ml, *'}
 
 
@@ -135,7 +139,7 @@ def test_export_lists_presets_with_their_form(site):
     # Then
     assert [p['id'] for p in presets] == [p['id'] for p in FIT_PRESETS]
     assert presets[0]['form'] == {'cpu': '500m', 'memory': '1Gi', 'extended': '', 'nodeSelector': '',
-                                  'tolerations': ''}
+                                  'nodeAffinity': '', 'tolerations': ''}
 
 
 def test_export_replaces_stale_data(frontend, tmp_path):

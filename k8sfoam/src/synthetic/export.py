@@ -55,13 +55,27 @@ def _toleration_text(t: dict) -> str:
     return f"{text}:{t['effect']}" if t.get('effect') else text
 
 
+def _requirement_text(r: dict) -> str:
+    """One node affinity expression in the fit modal's syntax: `key in (a,b)`, `key`, `!key` or `key gt N`."""
+    operator, values = r['operator'], r.get('values') or []
+    if operator in ('In', 'NotIn'):
+        return f"{r['key']} {operator.lower()} ({','.join(values)})"
+    if operator == 'Exists':
+        return r['key']
+    if operator == 'DoesNotExist':
+        return f"!{r['key']}"
+    return f"{r['key']} {operator.lower()} {values[0]}"
+
+
 def preset_form(spec: dict) -> dict:
-    """The fit modal's text fields for a preset spec."""
+    """The fit modal's text fields for a preset spec. The modal holds a single node affinity term."""
+    terms = spec.get('nodeAffinity') or []
     return {
         'cpu': spec.get('cpu', ''),
         'memory': spec.get('memory', ''),
         'extended': ', '.join(f'{k}={v}' for k, v in (spec.get('extended') or {}).items()),
         'nodeSelector': ', '.join(f'{k}={v}' for k, v in (spec.get('nodeSelector') or {}).items()),
+        'nodeAffinity': ', '.join(_requirement_text(r) for r in terms[0]['matchExpressions']) if terms else '',
         'tolerations': ', '.join(_toleration_text(t) for t in spec.get('tolerations') or []),
     }
 

@@ -158,10 +158,43 @@ def test_simulate_fit_checks_extended_resources(k8s_client, test_client):
     assert verdicts['cpu']['reasons'][0]['message'] == 'Insufficient nvidia.com/gpu: requires 1, available 0'
 
 
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_checks_node_affinity(k8s_client, test_client):
+    # Given
+    cluster = simulation_cluster()
+    cluster.get_node_resources.return_value = [
+        NodeResources('a', 4000, float(bitmath.GiB(16).kB), labels={'zone': 'a'}),
+        NodeResources('b', 4000, float(bitmath.GiB(16).kB), labels={'zone': 'b'})]
+    k8s_client.return_value = cluster
+    affinity = [{'matchExpressions': [{'key': 'zone', 'operator': 'In', 'values': ['b']}]}]
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'nodeAffinity': affinity})
+
+    # Then
+    assert response.status_code == 200
+    verdicts = {r['node']: r for r in response.json['nodes']}
+    assert verdicts['b']['fits'] is True
+    assert verdicts['a']['reasons'][0]['message'] == 'Node affinity mismatch: requires zone In (b)'
+
+
+def affinity_body(*expressions):
+    return {'cpu': '1', 'nodeAffinity': [{'matchExpressions': list(expressions)}]}
+
+
 @pytest.mark.parametrize('body', [{'cpu': 'lots'}, {'cpu': '1', 'nodeSelector': ['zone=a']},
                                   {'cpu': '1', 'tolerations': 'all'}, ['cpu'],
                                   {'cpu': '1', 'extended': {'pods': '1'}}, {'cpu': '1', 'extended': {'cpu': '1'}},
-                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': 'many'}}, {'extended': ['gpu']}])
+                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': 'many'}}, {'extended': ['gpu']},
+                                  {'cpu': '1', 'nodeAffinity': {'zone': 'a'}}, {'cpu': '1', 'nodeAffinity': ['zone']},
+                                  {'cpu': '1', 'nodeAffinity': [{'matchExpressions': []}]},
+                                  affinity_body({'key': 'zone', 'operator': 'Near', 'values': ['a']}),
+                                  affinity_body({'key': 'zone', 'operator': 'In', 'values': []}),
+                                  affinity_body({'key': 'zone', 'operator': 'In', 'values': 'a'}),
+                                  affinity_body({'key': '', 'operator': 'Exists'}),
+                                  affinity_body({'key': 'zone', 'operator': 'Exists', 'values': ['a']}),
+                                  affinity_body({'key': 'cores', 'operator': 'Gt', 'values': ['many']}),
+                                  affinity_body({'key': 'cores', 'operator': 'Gt', 'values': ['1', '2']})])
 @patch('k8sfoam.src.app.K8sClient')
 def test_simulate_fit_rejects_malformed_spec(k8s_client, body, test_client):
     # When

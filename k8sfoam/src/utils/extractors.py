@@ -17,6 +17,10 @@ def _totals(c: ContainerResources) -> dict:
     return {'cpu': c.cpu, 'memory': c.memory, **(c.extended or {})}
 
 
+def _requirement(r) -> dict:
+    return {'key': r.key, 'operator': r.operator, 'values': list(r.values or [])}
+
+
 # The kubelet marks a static pod's API copy with this annotation. Such a pod is
 # owned by the node itself: a drain cannot evict it and nothing reschedules it.
 MIRROR_POD_ANNOTATION = 'kubernetes.io/config.mirror'
@@ -30,6 +34,18 @@ class ResourcesExtractor():
     def __extract_tolerations(self, pod) -> list:
         return [{'key': t.key, 'operator': t.operator, 'value': t.value, 'effect': t.effect}
                 for t in pod.spec.tolerations or []]
+
+    def __extract_node_affinity(self, pod) -> list:
+        """The required nodeSelectorTerms; [] when the pod requires none."""
+        affinity = pod.spec.affinity
+        node_affinity = affinity.node_affinity if affinity is not None else None
+        required = (node_affinity.required_during_scheduling_ignored_during_execution
+                    if node_affinity is not None else None)
+        if required is None:
+            return []
+        return [{'matchExpressions': [_requirement(r) for r in term.match_expressions or []],
+                 'matchFields': [_requirement(r) for r in term.match_fields or []]}
+                for term in required.node_selector_terms or []]
 
     def __extract_owner(self, pod, labels: dict) -> tuple:
         """Who recreates the pod after an eviction, as (kind, name): a controller,
@@ -103,7 +119,8 @@ class ResourcesExtractor():
         owner_kind, owner_name = self.__extract_owner(pod, labels)
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
                             namespace, labels, qos_class, extended, dict(pod.spec.node_selector or {}),
-                            self.__extract_tolerations(pod), owner_kind, owner_name)
+                            self.__extract_tolerations(pod), owner_kind, owner_name,
+                            self.__extract_node_affinity(pod))
 
     def __extract_node_taints(self, node) -> list:
         """Every taint on the node, minus the one Kubernetes adds on cordon.
