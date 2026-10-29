@@ -38,6 +38,27 @@ def _pod_affinity_terms(rule) -> list:
             for t in terms or []]
 
 
+def _topology_spread(pod, labels: dict) -> list:
+    """The DoNotSchedule constraints; ScheduleAnyway ones only score nodes.
+
+    matchLabelKeys ANDs `key In (the pod's value)` into the selector, so a
+    Deployment's old ReplicaSet pods do not count against its new ones; keys the
+    pod has no label for are ignored, as the API server does.
+    """
+    constraints = []
+    for c in pod.spec.topology_spread_constraints or []:
+        if c.when_unsatisfiable != 'DoNotSchedule':
+            continue
+        selector = _label_selector(c.label_selector)
+        if selector is not None:
+            selector['matchExpressions'] += [{'key': k, 'operator': 'In', 'values': [labels[k]]}
+                                             for k in c.match_label_keys or [] if k in labels]
+        constraints.append({'maxSkew': c.max_skew, 'topologyKey': c.topology_key, 'minDomains': c.min_domains,
+                            'labelSelector': selector, 'nodeAffinityPolicy': c.node_affinity_policy or 'Honor',
+                            'nodeTaintsPolicy': c.node_taints_policy or 'Ignore'})
+    return constraints
+
+
 # The kubelet marks a static pod's API copy with this annotation. Such a pod is
 # owned by the node itself: a drain cannot evict it and nothing reschedules it.
 MIRROR_POD_ANNOTATION = 'kubernetes.io/config.mirror'
@@ -140,7 +161,8 @@ class ResourcesExtractor():
                             self.__extract_tolerations(pod), owner_kind, owner_name,
                             self.__extract_node_affinity(pod),
                             _pod_affinity_terms(affinity.pod_affinity if affinity is not None else None),
-                            _pod_affinity_terms(affinity.pod_anti_affinity if affinity is not None else None))
+                            _pod_affinity_terms(affinity.pod_anti_affinity if affinity is not None else None),
+                            _topology_spread(pod, labels))
 
     def __extract_node_taints(self, node) -> list:
         """Every taint on the node, minus the one Kubernetes adds on cordon.

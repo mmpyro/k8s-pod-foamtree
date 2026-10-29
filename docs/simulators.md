@@ -75,7 +75,7 @@ and so is a node running a naked pod.
 
 Instead of typing a pod shape into *Can I fit this pod?*, start from a real one. Click a pod to pin its workload, then
 click **+N** on the workload chip in the header. The workload's pod is the template: its effective requests, extended
-resources, `nodeSelector`, node and pod affinity, and tolerations, shown at the top of the result. Copies are then placed one after another,
+resources, `nodeSelector`, node and pod affinity, topology spread and tolerations, shown at the top of the result. Copies are then placed one after another,
 each on the passing node with the most headroom left, against the room the previous copies left behind.
 
 The simulation first asks whether the workload could double, so the answer is two clicks away. Type any count up to
@@ -102,7 +102,7 @@ While a result is shown, nodes are outlined in both views — green fits / recei
 Predicates checked, in the scheduler's order: cordon, `Ready`, `nodeSelector`, required node affinity,
 `NoSchedule`/`NoExecute` taints vs. tolerations, pod count, CPU, memory, every extended resource the pod requests
 against the node's free allocatable (`Insufficient nvidia.com/gpu: requires 1, available 0`; a node that does not
-advertise a resource has none), then required pod affinity and anti-affinity. A pod that tolerates
+advertise a resource has none), then topology spread and required pod affinity and anti-affinity. A pod that tolerates
 `node.kubernetes.io/unschedulable` or `not-ready` (every DaemonSet pod does) still fits a cordoned or NotReady node.
 
 Node affinity is the pod's `requiredDuringSchedulingIgnoredDuringExecution` `nodeSelectorTerms`: the terms are ORed,
@@ -121,9 +121,23 @@ Pod affinity and anti-affinity are the required `podAffinity` / `podAntiAffinity
   the same kubernetes.io/hostname`), and no pod already running there may have an anti-affinity term selecting the
   incoming pod (`Pod anti-affinity: shop/db-0 repels it in the same kubernetes.io/hostname`).
 
-Drains and replica copies see the pods they have already placed, so a workload with hostname anti-affinity grows by
-at most one copy per node, and two evicted replicas never land on the same node.
+Topology spread covers the `topologySpreadConstraints` with `whenUnsatisfiable: DoNotSchedule`; `ScheduleAnyway`
+only scores nodes. Placing the pod in a domain is rejected when the pods its `labelSelector` matches there (in the
+pod's namespace, plus the pod itself if it matches) would exceed the emptiest domain's count by more than `maxSkew`:
+`Topology spread: topology.kubernetes.io/zone=us-east-1a would have skew 2, over maxSkew 1 (3 matching pods there, 2
+in the emptiest topology.kubernetes.io/zone)`. As in kube-scheduler:
 
-**Not simulated:** topology spread, PodDisruptionBudgets, a non-empty `namespaceSelector` on pod affinity terms (it
+- a node without the constraint's topology label is rejected, and holds no domain;
+- with `nodeAffinityPolicy: Honor` (the default), only nodes passing the pod's `nodeSelector` and node affinity hold
+  domains; with `nodeTaintsPolicy: Honor` (the default is `Ignore`), only nodes whose taints the pod tolerates;
+- with fewer domains than `minDomains`, the emptiest one counts as 0;
+- `matchLabelKeys` adds the pod's own values of those labels to the selector, so a Deployment's pods from an older
+  ReplicaSet do not count.
+
+Drains and replica copies see the pods they have already placed, so a workload with hostname anti-affinity grows by
+at most one copy per node, a zone-spread workload's copies fill the zones evenly, and two evicted replicas never land
+on the same node.
+
+**Not simulated:** PodDisruptionBudgets, a non-empty `namespaceSelector` on pod affinity terms (it
 needs namespace labels, so only the listed namespaces, or the pod's own, count) and volume zone binding — so a green
 verdict is necessary, not sufficient.
