@@ -2,8 +2,9 @@ import bitmath  # type: ignore
 import pytest
 from collections import Counter
 from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources
-from k8sfoam.src.common.scheduler import (filter_node, free_capacity, simulate_consolidation, simulate_drain,
-                                          simulate_fit, simulate_replicas, tolerates, fmt_memory)
+from k8sfoam.src.common.scheduler import (UnknownTemplate, filter_node, free_capacity, hypothetical_nodes,
+                                          simulate_consolidation, simulate_drain, simulate_fit, simulate_replicas,
+                                          tolerates, fmt_memory)
 
 
 GI = float(bitmath.GiB(1).kB)
@@ -1020,3 +1021,143 @@ def test_simulate_replicas_leaves_the_input_pods_untouched():
 
     # Then
     assert pods == before
+
+
+INSTANCE_TYPE = 'node.kubernetes.io/instance-type'
+NO_GPU = {'key': 'dedicated', 'value': 'gpu', 'effect': 'NoSchedule'}
+
+
+def test_hypothetical_template_copies_allocatable_labels_and_taints_with_a_fresh_hostname():
+    # Given
+    template = node('gpu-1', cpu=8000, memory=32 * GI, extended={GPU: 4}, allocatable_pods=58,
+                    labels={HOST: 'gpu-1', ZONE: 'a', INSTANCE_TYPE: 'g5.xlarge'}, taints=[NO_GPU],
+                    unschedulable=True, conditions={'Ready': False})
+
+    # When
+    made = hypothetical_nodes([{'template': 'gpu-1', 'count': 2}], [template])
+
+    # Then
+    assert [n.name for n in made] == ['hypothetical-g5.xlarge-1', 'hypothetical-g5.xlarge-2']
+    first = made[0]
+    assert (first.cpu, first.memory, first.extended, first.allocatable_pods) == (8000, 32 * GI, {GPU: 4}, 58)
+    assert first.labels == {HOST: 'hypothetical-g5.xlarge-1', ZONE: 'a', INSTANCE_TYPE: 'g5.xlarge'}
+    assert first.taints == [NO_GPU]
+    # A fresh copy is Ready and schedulable, whatever state the template is in.
+    assert first.unschedulable is False
+    assert first.conditions == {'Ready': True}
+
+
+def test_hypothetical_template_drops_the_taints_a_fresh_node_would_not_carry():
+    # Given
+    taints = [NO_GPU, {'key': 'node.kubernetes.io/not-ready', 'value': None, 'effect': 'NoExecute'},
+              {'key': 'ToBeDeletedByClusterAutoscaler', 'value': '1700000000', 'effect': 'NoSchedule'}]
+
+    # When
+    made = hypothetical_nodes([{'template': 'a', 'count': 1}], [node('a', taints=taints)])
+
+    # Then
+    assert made[0].taints == [NO_GPU]
+
+
+def test_hypothetical_custom_shape_without_an_instance_type_is_named_custom():
+    # Given
+    shape = NodeResources('', 2000, 4 * GI, labels={'pool': 'spare'}, allocatable_pods=110)
+
+    # When
+    made = hypothetical_nodes([{'shape': shape, 'count': 2}, {'shape': shape, 'count': 1}], [])
+
+    # Then
+    assert [n.name for n in made] == ['hypothetical-custom-1', 'hypothetical-custom-2', 'hypothetical-custom-3']
+    assert made[2].labels == {'pool': 'spare', HOST: 'hypothetical-custom-3'}
+
+
+def test_hypothetical_unknown_template_raises():
+    with pytest.raises(UnknownTemplate):
+        hypothetical_nodes([{'template': 'ghost', 'count': 1}], [node('a')])
+
+
+def test_simulate_fit_with_extra_nodes_marks_and_describes_them():
+    # Given — the only real node is full
+    nodes = [node('a', cpu=1000, labels={INSTANCE_TYPE: 'm5.large'})]
+
+    # When
+    result = simulate_fit(pod('new', cpu=2000), nodes, [], [{'shape': node('', cpu=4000), 'count': 1}])
+
+    # Then
+    assert (result['fits'], result['total']) == (1, 2)
+    verdicts = {r['node']: r for r in result['nodes']}
+    assert verdicts['a']['hypothetical'] is False
+    assert verdicts['hypothetical-custom-1']['fits'] is True
+    assert verdicts['hypothetical-custom-1']['hypothetical'] is True
+    described = result['hypotheticalNodes'][0]
+    assert (described['name'], described['template'], described['cpu']) == ('hypothetical-custom-1', None, 4000)
+
+
+def test_simulate_fit_honours_taints_on_hypothetical_nodes():
+    # Given
+    template = node('gpu-1', taints=[NO_GPU], labels={INSTANCE_TYPE: 'g5.xlarge'})
+    tolerating = pod('trainer', cpu=100, tolerations=[{'key': 'dedicated', 'operator': 'Equal', 'value': 'gpu',
+                                                       'effect': 'NoSchedule'}])
+
+    # When
+    plain = simulate_fit(pod('web', cpu=100), [template], [], [{'template': 'gpu-1', 'count': 1}])
+    tolerated = simulate_fit(tolerating, [template], [], [{'template': 'gpu-1', 'count': 1}])
+
+    # Then
+    fake = 'hypothetical-g5.xlarge-1'
+    assert slugs({r['node']: r for r in plain['nodes']}[fake]['reasons']) == ['taint']
+    assert {r['node']: r for r in tolerated['nodes']}[fake]['fits'] is True
+    assert tolerated['hypotheticalNodes'][0]['template'] == 'gpu-1'
+
+
+def daemon(name, node_name, cpu, ds, **kw):
+    return pod(name, node_name, cpu, owner_kind='DaemonSet', owner_name=ds, **kw)
+
+
+def test_template_copies_run_the_template_daemonset_pods():
+    # Given — the agent takes 500m of every node; the new pod needs all the rest
+    nodes = [node('a', cpu=2000, labels={INSTANCE_TYPE: 'm5.large'}), node('b', cpu=2000)]
+    pods = [daemon('agent-x1', 'a', 500, 'agent'), daemon('agent-x2', 'b', 500, 'agent'), pod('web', 'a', 1500)]
+
+    # When
+    result = simulate_fit(pod('new', cpu=1600), nodes, pods, [{'template': 'a', 'count': 1}])
+
+    # Then
+    fake = {r['node']: r for r in result['nodes']}['hypothetical-m5.large-1']
+    assert slugs(fake['reasons']) == ['insufficient-cpu']
+    assert fake['free']['cpu'] == 1500
+    assert result['hypotheticalNodes'][0]['daemonPods'] == [
+        {'pod': 'agent-hypothetical-m5.large-1', 'namespace': 'default', 'cpu': 500, 'memory': 0.0, 'extended': {}}]
+
+
+def test_custom_shapes_run_every_daemonset_that_selects_and_tolerates_them():
+    # Given
+    linux_only = daemon('agent-1', 'a', 100, 'agent', node_selector={'os': 'linux'})
+    gpu_plugin = daemon('plugin-1', 'gpu', 100, 'gpu-plugin', tolerations=[{'key': 'dedicated', 'operator': 'Exists'}])
+    everywhere = daemon('proxy-1', 'a', 100, 'proxy', tolerations=[{'operator': 'Exists'}])
+    extra = [{'shape': node('', labels={'os': 'linux'}, taints=[NO_GPU]), 'count': 1}]
+
+    # When
+    result = simulate_fit(pod('new'), [node('a', labels={'os': 'linux'}), node('gpu', taints=[NO_GPU])],
+                          [linux_only, gpu_plugin, everywhere], extra)
+
+    # Then — the node selector matches, but the taint keeps the agent off
+    names = [p['pod'] for p in result['hypotheticalNodes'][0]['daemonPods']]
+    assert names == ['gpu-plugin-hypothetical-custom-1', 'proxy-hypothetical-custom-1']
+
+
+def test_simulate_drain_fits_only_after_adding_nodes():
+    # Given
+    nodes = [node('a', labels={INSTANCE_TYPE: 'm5.large'}), node('b', cpu=1000)]
+    pods = [pod('big', 'a', 3000)]
+
+    # When
+    without = simulate_drain('a', nodes, pods)
+    with_extra = simulate_drain('a', nodes, pods, extra=[{'template': 'a', 'count': 1}])
+
+    # Then
+    assert without['fits'] is False
+    assert without['hypotheticalNodes'] == []
+    assert with_extra['fits'] is True
+    assert with_extra['remainingNodes'] == 2
+    assert [(p['to'], p['hypothetical']) for p in with_extra['placements']] == [('hypothetical-m5.large-1', True)]

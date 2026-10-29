@@ -296,6 +296,99 @@ def test_simulate_drain_returns_internal_server_error(k8s_client, test_client):
 
 
 @patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_adds_hypothetical_nodes_from_a_template_and_a_shape(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+    shape = {'cpu': '8', 'memory': '32Gi', 'pods': 58, 'labels': {'node.kubernetes.io/instance-type': 'm5.2xlarge'},
+             'taints': [{'key': 'dedicated', 'value': 'batch', 'effect': 'NoSchedule'}]}
+    body = {'cpu': '6', 'memory': '1Gi', 'extraNodes': [{'template': 'b', 'count': 2}, {'shape': shape, 'count': 1}]}
+
+    # When
+    response = test_client.post('/simulate/fit', json=body)
+
+    # Then
+    assert response.status_code == 200
+    verdicts = {r['node']: r for r in response.json['nodes']}
+    assert [name for name, v in verdicts.items() if v['hypothetical']] == [
+        'hypothetical-custom-1', 'hypothetical-custom-2', 'hypothetical-m5.2xlarge-1']
+    assert verdicts['hypothetical-m5.2xlarge-1']['reasons'][0]['message'] == \
+        'Untolerated taint: dedicated=batch:NoSchedule'
+    described = {n['name']: n for n in response.json['hypotheticalNodes']}
+    assert described['hypothetical-custom-1']['template'] == 'b'
+    assert described['hypothetical-m5.2xlarge-1']['cpu'] == 8000
+    assert described['hypothetical-m5.2xlarge-1']['pods'] == 58
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_unknown_template_is_a_bad_request(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'extraNodes': [{'template': 'ghost', 'count': 1}]})
+
+    # Then
+    assert response.status_code == 400
+    assert response.get_data(as_text=True) == 'Template node not found: ghost'
+
+
+@pytest.mark.parametrize('extra', [{'template': 'a'}, [{'count': 1}], [{'template': 'a', 'shape': {}, 'count': 1}],
+                                   [{'template': 'a', 'count': 0}], [{'template': 'a', 'count': '2'}],
+                                   [{'template': 'a', 'count': 51}], [{'template': '', 'count': 1}],
+                                   [{'shape': {'cpu': '4'}, 'count': 1}], [{'shape': 'big', 'count': 1}],
+                                   [{'shape': {'cpu': 'lots', 'memory': '1Gi'}, 'count': 1}],
+                                   [{'shape': {'cpu': '4', 'memory': '1Gi', 'pods': 0}, 'count': 1}],
+                                   [{'shape': {'cpu': '4', 'memory': '1Gi', 'labels': ['a']}, 'count': 1}],
+                                   [{'shape': {'cpu': '4', 'memory': '1Gi', 'taints': [{'key': 'k', 'effect': 'Nope'}]},
+                                     'count': 1}],
+                                   [{'shape': {'cpu': '4', 'memory': '1Gi', 'taints': [{'effect': 'NoSchedule'}]},
+                                     'count': 1}]])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_rejects_malformed_extra_nodes(k8s_client, extra, test_client):
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'extraNodes': extra})
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_post_places_pods_on_hypothetical_nodes(k8s_client, test_client):
+    # Given — web asks for 3 CPUs and b only has 1
+    cluster = simulation_cluster()
+    cluster.get_pod_resources.return_value = [PodResources('web', 'a', 3000, float(bitmath.GiB(1).kB), [], [],
+                                                           owner_kind='ReplicaSet')]
+    k8s_client.return_value = cluster
+
+    # When
+    without = test_client.get('/simulate/drain/a')
+    response = test_client.post('/simulate/drain/a', json={'extraNodes': [{'template': 'a', 'count': 1}]})
+
+    # Then
+    assert without.json['fits'] is False
+    assert response.status_code == 200
+    assert response.json['fits'] is True
+    assert response.json['placements'][0]['to'] == 'hypothetical-custom-1'
+    assert response.json['placements'][0]['hypothetical'] is True
+    assert response.json['hypotheticalNodes'][0]['template'] == 'a'
+
+
+@pytest.mark.parametrize('body, status', [(['extraNodes'], 400), ({'extraNodes': [{'count': 1}]}, 400),
+                                          ({'extraNodes': [{'template': 'ghost', 'count': 1}]}, 400), ({}, 200)])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_post_validates_the_body(k8s_client, body, status, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.post('/simulate/drain/a', json=body)
+
+    # Then
+    assert response.status_code == status
+
+
+@patch('k8sfoam.src.app.K8sClient')
 def test_simulate_consolidation_returns_verdicts_and_plan(k8s_client, test_client):
     # Given
     k8s_client.return_value = simulation_cluster()
