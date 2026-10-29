@@ -59,7 +59,8 @@ and simulate a drain, hover a pod, type `audit:spof-zone` into the query bar, or
 
 -   :material-calculator-variant-outline: **[Scheduling simulators](simulators.md)**
 
-    "Can I fit this pod?" and "What happens if I drain this node?", answered against free allocatable capacity.
+    "Can I fit this pod?", "What happens if I drain this node?" and "Do the pending pods fit?", answered against free
+    allocatable capacity, with or without hypothetical nodes.
 
 -   :material-filter-variant: **[Filtering](filtering.md)**
 
