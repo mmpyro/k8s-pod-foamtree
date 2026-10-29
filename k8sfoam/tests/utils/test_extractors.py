@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from kubernetes.client import (V1Affinity, V1LabelSelector, V1LabelSelectorRequirement,  # type: ignore
                                V1NodeAffinity, V1NodeSelector, V1NodeSelectorRequirement, V1NodeSelectorTerm,
                                V1PodAffinity, V1PodAffinityTerm, V1PodAntiAffinity, V1PreferredSchedulingTerm,
-                               V1WeightedPodAffinityTerm)
+                               V1TopologySpreadConstraint, V1WeightedPodAffinityTerm)
 
 
 def test_should_extract_pod_resources_with_single_container_pod():
@@ -569,6 +569,48 @@ def test_should_extract_required_pod_affinity_and_anti_affinity():
         'labelSelector': {'matchLabels': {'app': 'web'}, 'matchExpressions': []},
         'namespaces': [], 'namespaceSelector': {'matchLabels': {}, 'matchExpressions': []},
         'topologyKey': 'kubernetes.io/hostname'}]
+
+
+def test_should_extract_do_not_schedule_topology_spread_constraints():
+    # Given — ScheduleAnyway only scores nodes; matchLabelKeys narrows the selector to this revision
+    constraints = [
+        V1TopologySpreadConstraint(max_skew=1, topology_key='topology.kubernetes.io/zone',
+                                   when_unsatisfiable='DoNotSchedule',
+                                   label_selector=V1LabelSelector(match_labels={'app': 'web'}),
+                                   match_label_keys=['pod-template-hash', 'absent'], min_domains=3),
+        V1TopologySpreadConstraint(max_skew=2, topology_key='kubernetes.io/hostname',
+                                   when_unsatisfiable='ScheduleAnyway',
+                                   label_selector=V1LabelSelector(match_labels={'app': 'web'})),
+        V1TopologySpreadConstraint(max_skew=1, topology_key='kubernetes.io/hostname',
+                                   when_unsatisfiable='DoNotSchedule', node_affinity_policy='Ignore',
+                                   node_taints_policy='Honor'),
+    ]
+    pod = create_pod('web', 'node', containers=[create_container('app', '100m', '100Mi')],
+                     labels={'app': 'web', 'pod-template-hash': 'abc'}, topology_spread_constraints=constraints)
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert result.topology_spread == [
+        {'maxSkew': 1, 'topologyKey': 'topology.kubernetes.io/zone', 'minDomains': 3,
+         'labelSelector': {'matchLabels': {'app': 'web'},
+                           'matchExpressions': [{'key': 'pod-template-hash', 'operator': 'In', 'values': ['abc']}]},
+         'nodeAffinityPolicy': 'Honor', 'nodeTaintsPolicy': 'Ignore'},
+        {'maxSkew': 1, 'topologyKey': 'kubernetes.io/hostname', 'minDomains': None, 'labelSelector': None,
+         'nodeAffinityPolicy': 'Ignore', 'nodeTaintsPolicy': 'Honor'},
+    ]
+
+
+def test_should_extract_no_topology_spread_when_unset():
+    # Given
+    pod = create_pod('web', 'node', containers=[create_container('app', '100m', '100Mi')])
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert result.topology_spread == []
 
 
 @pytest.mark.parametrize('owner_kind, annotations, expected', [

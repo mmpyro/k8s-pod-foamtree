@@ -1,5 +1,6 @@
 import bitmath  # type: ignore
 import pytest
+from collections import Counter
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.common.scheduler import (filter_node, free_capacity, simulate_consolidation, simulate_drain,
                                           simulate_fit, simulate_replicas, tolerates, fmt_memory)
@@ -367,6 +368,120 @@ def test_inter_pod_affinity_on_a_5k_pod_cluster_runs_in_reasonable_time():
     assert fit['fits'] == 0
     assert len(drain['pending']) == 50
     assert drain['pending'][0]['reasons'] == [{'slug': 'pod-anti-affinity', 'nodes': 99}]
+
+
+def spread(max_skew=1, key=ZONE, min_domains=None, node_affinity_policy='Honor', node_taints_policy='Ignore',
+           **match_labels):
+    return {'maxSkew': max_skew, 'topologyKey': key, 'minDomains': min_domains,
+            'labelSelector': {'matchLabels': match_labels or {'app': 'web'}, 'matchExpressions': []},
+            'nodeAffinityPolicy': node_affinity_policy, 'nodeTaintsPolicy': node_taints_policy}
+
+
+def web(name, node_name=None, constraints=None, **kw):
+    return pod(name, node_name, labels={'app': 'web'}, topology_spread=constraints or [spread()], **kw)
+
+
+def test_topology_spread_with_max_skew_1_across_three_zones():
+    # Given
+    nodes = [host('a1', 'a'), host('b1', 'b'), host('c1', 'c')]
+    pods = [web('web-1', 'a1'), web('web-2', 'b1')]
+
+    # When
+    result = simulate_fit(web('new'), nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert [n for n, v in verdicts.items() if v['fits']] == ['c1']
+    assert verdicts['a1']['reasons'] == [{
+        'slug': 'topology-spread',
+        'message': f'Topology spread: {ZONE}=a would have skew 2, over maxSkew 1 '
+                   f'(1 matching pod there, 0 in the emptiest {ZONE})'}]
+
+
+def test_topology_spread_rejects_nodes_without_the_topology_label_and_does_not_count_them():
+    # Given — the bare node holds no zone, so it is no empty domain either
+    nodes = [host('a1', 'a'), host('b1', 'b'), host('bare')]
+    pods = [web('web-1', 'a1'), web('web-2', 'bare')]
+
+    # When
+    result = simulate_fit(web('new'), nodes, pods)
+
+    # Then
+    verdicts = by_node(result)
+    assert [n for n, v in verdicts.items() if v['fits']] == ['b1']
+    assert verdicts['bare']['reasons'] == [{'slug': 'topology-spread',
+                                            'message': f'Topology spread: node has no {ZONE} label'}]
+
+
+def test_topology_spread_min_domains_counts_missing_domains_as_empty():
+    # Given — two zones, one pod each
+    nodes = [host('a1', 'a'), host('b1', 'b')]
+    pods = [web('web-1', 'a1'), web('web-2', 'b1')]
+
+    # When
+    enough = simulate_fit(web('new', constraints=[spread(min_domains=2)]), nodes, pods)
+    too_few = simulate_fit(web('new', constraints=[spread(min_domains=3)]), nodes, pods)
+
+    # Then
+    assert enough['fits'] == 2
+    assert too_few['fits'] == 0
+
+
+def test_topology_spread_node_affinity_policy_decides_which_domains_count():
+    # Given — the pod may only run in zones a and b; zone c is empty
+    nodes = [host('a1', 'a'), host('b1', 'b'), host('c1', 'c')]
+    pods = [web('web-1', 'a1'), web('web-2', 'b1')]
+    affinity = [term(expr(ZONE, 'In', 'a', 'b'))]
+
+    # When
+    honour = simulate_fit(web('new', node_affinity=affinity), nodes, pods)
+    ignore = simulate_fit(web('new', constraints=[spread(node_affinity_policy='Ignore')], node_affinity=affinity),
+                          nodes, pods)
+
+    # Then
+    assert honour['fits'] == 2
+    assert ignore['fits'] == 0
+
+
+def test_topology_spread_node_taints_policy_honour_skips_tainted_domains():
+    # Given — zone c only has a node the pod does not tolerate
+    nodes = [host('a1', 'a'), host('b1', 'b'),
+             host('c1', 'c', taints=[{'key': 'dedicated', 'value': 'gpu', 'effect': 'NoSchedule'}])]
+    pods = [web('web-1', 'a1'), web('web-2', 'b1')]
+
+    # When
+    honour = simulate_fit(web('new', constraints=[spread(node_taints_policy='Honor')]), nodes, pods)
+    ignore = simulate_fit(web('new'), nodes, pods)
+
+    # Then
+    assert honour['fits'] == 2
+    assert ignore['fits'] == 0
+
+
+def test_topology_spread_only_counts_matching_pods_in_the_namespace():
+    # Given
+    nodes = [host('a1', 'a'), host('b1', 'b')]
+    other_ns = PodResources('web-x', 'a1', 0, 0.0, [], [], 'other', labels={'app': 'web'}, owner_kind='ReplicaSet')
+    pods = [other_ns, pod('api', 'a1', labels={'app': 'api'})]
+
+    # When
+    result = simulate_fit(web('new'), nodes, pods)
+
+    # Then
+    assert result['fits'] == 2
+
+
+def test_simulate_replicas_spread_copies_evenly_across_zones():
+    # Given — zone a has the most room, but the copies must spread
+    nodes = [host('a1', 'a', cpu=16000), host('a2', 'a', cpu=16000), host('b1', 'b'), host('c1', 'c')]
+    pods = [replica('web-1', 'a1', 100, labels={'app': 'web'}, topology_spread=[spread()])]
+
+    # When
+    result = replicas(5, nodes, pods)
+
+    # Then — six pods in all, two per zone
+    zone_of = {'a1': 'a', 'a2': 'a', 'b1': 'b', 'c1': 'c'}
+    assert Counter(zone_of[n] for n in ['a1', *result['placements']]) == {'a': 2, 'b': 2, 'c': 2}
 
 
 def test_untolerated_blocking_taint_is_reported_and_prefer_no_schedule_ignored():
@@ -777,7 +892,7 @@ def test_simulate_replicas_honour_node_selector_and_tolerations():
     assert result['placements'] == ['gpu', 'gpu']
     assert result['template'] == {'pod': 'web-1', 'cpu': 100, 'memory': 0.0, 'extended': {},
                                   'nodeSelector': {'pool': 'gpu'}, 'tolerations': [toleration], 'nodeAffinity': [],
-                                  'podAffinity': [], 'podAntiAffinity': []}
+                                  'podAffinity': [], 'podAntiAffinity': [], 'topologySpread': []}
     verdicts = by_node(result)
     assert slugs(verdicts['tainted']['reasons']) == ['taint']
     assert slugs(verdicts['general']['reasons']) == ['node-selector']

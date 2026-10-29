@@ -18,6 +18,7 @@ const REASONS = {
   "insufficient-cpu":    { label: "insufficient CPU" },
   "insufficient-memory": { label: "insufficient memory" },
   "insufficient-extended": { label: "insufficient extended resource" },
+  "topology-spread":     { label: "topology spread skew" },
   "pod-affinity":        { label: "pod affinity unmet" },
   "pod-anti-affinity":   { label: "pod anti-affinity conflict" },
 };
@@ -43,8 +44,8 @@ function blockerLabel(b) {
 // What the simulator does not model, shown under every result so a green
 // verdict is read as "necessary", not "guaranteed".
 const CAVEAT = "Filter phase only: CPU, memory, extended resources (GPUs, ephemeral-storage, hugepages), " +
-  "pod count, cordon, readiness, nodeSelector, taints, and required node and pod (anti-)affinity. " +
-  "Topology spread, PDBs and volume zones are not simulated.";
+  "pod count, cordon, readiness, nodeSelector, taints, required node and pod (anti-)affinity and " +
+  "DoNotSchedule topology spread. PDBs and volume zones are not simulated.";
 
 function reasonLabel(slug) {
   return (REASONS[slug] || { label: slug }).label;
@@ -692,6 +693,9 @@ function TemplateLine({ t, memUnit, fmtMem }) {
       {(t.nodeAffinity || []).length > 0 && <span>node affinity <code>{fmtNodeAffinity(t.nodeAffinity)}</code></span>}
       {(t.podAffinity || []).length > 0 && <span>pod affinity <code>{fmtPodTerms(t.podAffinity)}</code></span>}
       {(t.podAntiAffinity || []).length > 0 && <span>pod anti-affinity <code>{fmtPodTerms(t.podAntiAffinity)}</code></span>}
+      {(t.topologySpread || []).length > 0 && (
+        <span>topology spread <code>{t.topologySpread.map(c => `maxSkew ${c.maxSkew} per ${c.topologyKey}`).join("; ")}</code></span>
+      )}
       {t.tolerations.length > 0 && <span>tolerations <code>{t.tolerations.map(fmtToleration).join(", ")}</code></span>}
     </div>
   );

@@ -5,11 +5,11 @@ node's pods go if it were drained?", "which nodes could be removed?" and "can th
 workload scale out by N replicas?". It deliberately covers only the predicates
 that decide most placements: node condition, cordon, nodeSelector, required node
 affinity, taints and tolerations, pod count, CPU, memory and extended resource
-requests (GPUs, ephemeral-storage, hugepages), and required inter-pod affinity and
-anti-affinity. Topology spread, PodDisruptionBudgets, namespaceSelector on pod
-affinity terms and volume zone binding are out of scope, so a "fits" verdict is
-necessary rather than sufficient. Preferred affinity terms only score nodes, so
-they never filter one out.
+requests (GPUs, ephemeral-storage, hugepages), DoNotSchedule topology spread, and
+required inter-pod affinity and anti-affinity. PodDisruptionBudgets,
+namespaceSelector on pod affinity terms and volume zone binding are out of scope,
+so a "fits" verdict is necessary rather than sufficient. Preferred affinity terms
+and ScheduleAnyway spread constraints only score nodes, so they never filter one out.
 
 Units follow the rest of the backend: CPU in millicores, memory and byte-sized
 extended resources in decimal kB, other extended resources as plain counts.
@@ -36,7 +36,7 @@ DRAIN_SKIPPED_OWNERS = {'DaemonSet': 'daemonset', 'Node': 'static'}
 # Reason slugs in the order the filter evaluates them — the frontend labels them.
 REASON_ORDER = ('cordoned', 'not-ready', 'node-selector', 'node-affinity', 'taint',
                 'insufficient-pods', 'insufficient-cpu', 'insufficient-memory', 'insufficient-extended',
-                'pod-affinity', 'pod-anti-affinity')
+                'topology-spread', 'pod-affinity', 'pod-anti-affinity')
 
 # Why a node cannot be removed even on its own. cluster-autoscaler refuses to
 # scale down a node running a pod no controller would recreate, and the control
@@ -239,6 +239,59 @@ class _Domains():
                     self.repelling.setdefault(key, {}).setdefault(labels[key], other)
 
 
+def _fits_node_affinity(pod: PodResources, node: NodeResources) -> bool:
+    labels = node.labels or {}
+    if any(labels.get(k) != v for k, v in (pod.node_selector or {}).items()):
+        return False
+    terms = pod.node_affinity or []
+    return not terms or any(node_selector_term_matches(t, node) for t in terms)
+
+
+def _tolerates_node(pod: PodResources, node: NodeResources) -> bool:
+    taints = [*(node.taints or []), *([CORDON_TAINT] if node.unschedulable else [])]
+    return all(t.get('effect') not in FILTER_EFFECTS or _tolerated(pod, t) for t in taints)
+
+
+class _Spread():
+    """Pods matching each of one incoming pod's spread constraints, per topology domain.
+
+    Like kube-scheduler, only nodes carrying every constraint's topology key hold
+    domains, and nodeAffinityPolicy / nodeTaintsPolicy Honor leave out nodes the
+    pod could not be scheduled to anyway.
+    """
+
+    def __init__(self, pod: PodResources, nodes: list):
+        self.pod = pod
+        constraints = pod.topology_spread or []
+        keys = {c['topologyKey'] for c in constraints}
+        labelled = [n for n in nodes if keys <= (n.labels or {}).keys()]
+        # Per constraint: node name → its domain value, and domain value → matching pods.
+        self.domain_of: list = []
+        self.counts: list = []
+        for c in constraints:
+            eligible = [n for n in labelled if self.__counts_node(c, n)]
+            domain_of = {n.name: n.labels[c['topologyKey']] for n in eligible}
+            self.domain_of.append(domain_of)
+            self.counts.append({value: 0 for value in domain_of.values()})
+
+    def __counts_node(self, constraint: dict, node: NodeResources) -> bool:
+        if constraint['nodeAffinityPolicy'] == 'Honor' and not _fits_node_affinity(self.pod, node):
+            return False
+        return constraint['nodeTaintsPolicy'] != 'Honor' or _tolerates_node(self.pod, node)
+
+    def add(self, sample: PodResources, members: list) -> None:
+        """Account for `members`, (pod, node labels) pairs alike to `sample` in namespace and labels."""
+        if sample.namespace != self.pod.namespace:
+            return
+        for c, domain_of, counts in zip(self.pod.topology_spread or [], self.domain_of, self.counts):
+            if not label_selector_matches(c['labelSelector'], sample.labels or {}):
+                continue
+            for other, _ in members:
+                value = domain_of.get(other.node_name)
+                if value is not None:
+                    counts[value] += 1
+
+
 def _likeness(pod: PodResources) -> tuple:
     """Pods with the same key look the same to every inter-pod term, e.g. replicas of one workload."""
     return pod.namespace, frozenset((pod.labels or {}).items()), repr(pod.pod_anti_affinity or [])
@@ -254,11 +307,15 @@ class Placement():
     """
 
     def __init__(self, nodes: Iterable[NodeResources], pods: Iterable[PodResources]):
-        self.__labels = {n.name: n.labels or {} for n in nodes}
+        self.__nodes = list(nodes)
+        self.__labels = {n.name: n.labels or {} for n in self.__nodes}
         self.__pods = [p for p in pods if p.node_name in self.__labels]
         self.__has_anti_affinity = any(p.pod_anti_affinity for p in self.__pods)
         self.__groups: Optional[dict] = None
         self.__domains: dict = {}
+        self.__spreads: dict = {}
+        self.__last_domains: tuple = (None, None)
+        self.__last_spread: tuple = (None, None)
 
     @property
     def has_anti_affinity(self) -> bool:
@@ -282,10 +339,13 @@ class Placement():
         if self.__groups is None:
             return
         self.__join(self.__groups, bound)
-        for domains in self.__domains.values():
-            domains.add(bound, [(bound, self.__labels[node_name])])
+        member = [(bound, self.__labels[node_name])]
+        for index in (*self.__domains.values(), *self.__spreads.values()):
+            index.add(bound, member)
 
     def domains(self, pod: PodResources) -> _Domains:
+        if self.__last_domains[0] is pod:
+            return self.__last_domains[1]
         key = (*_likeness(pod), repr(pod.pod_affinity or []))
         domains = self.__domains.get(key)
         if domains is None:
@@ -293,7 +353,48 @@ class Placement():
             for sample, members in self.__grouped().values():
                 domains.add(sample, members)
             self.__domains[key] = domains
+        self.__last_domains = (pod, domains)
         return domains
+
+    def spread(self, pod: PodResources) -> _Spread:
+        # A simulation filters one pod against every node in a row: skip the key for it.
+        if self.__last_spread[0] is pod:
+            return self.__last_spread[1]
+        key = repr((pod.namespace, sorted((pod.labels or {}).items()), pod.topology_spread, pod.node_selector,
+                    pod.node_affinity, pod.tolerations))
+        spread = self.__spreads.get(key)
+        if spread is None:
+            spread = _Spread(pod, self.__nodes)
+            for sample, members in self.__grouped().values():
+                spread.add(sample, members)
+            self.__spreads[key] = spread
+        self.__last_spread = (pod, spread)
+        return spread
+
+
+def _spread_reasons(pod: PodResources, node: NodeResources, placement: Placement) -> list:
+    constraints = pod.topology_spread or []
+    if not constraints:
+        return []
+    labels = node.labels or {}
+    missing = [c['topologyKey'] for c in constraints if c['topologyKey'] not in labels]
+    if missing:
+        return [_reason('topology-spread', f'Topology spread: node has no {missing[0]} label')]
+    spread = placement.spread(pod)
+    for c, counts in zip(constraints, spread.counts):
+        key = c['topologyKey']
+        # Fewer domains than minDomains: the missing ones count as empty.
+        too_few = c.get('minDomains') and len(counts) < c['minDomains']
+        minimum = 0 if too_few else min(counts.values(), default=0)
+        count = counts.get(labels[key], 0)
+        own = 1 if label_selector_matches(c['labelSelector'], pod.labels or {}) else 0
+        skew = count + own - minimum
+        if skew > c['maxSkew']:
+            pods = f"{count} matching pod{'' if count == 1 else 's'}"
+            return [_reason('topology-spread',
+                            f"Topology spread: {key}={labels[key]} would have skew {skew}, over maxSkew "
+                            f"{c['maxSkew']} ({pods} there, {minimum} in the emptiest {key})")]
+    return []
 
 
 def _inter_pod_reasons(pod: PodResources, node: NodeResources, placement: Placement) -> list:
@@ -378,7 +479,9 @@ def filter_node(pod: PodResources, node: NodeResources, free: dict, placement: O
                                    f'Insufficient {name}: requires {fmt_extended(name, amount)}, '
                                    f'available {fmt_extended(name, available)}'))
 
-    reasons.extend(_inter_pod_reasons(pod, node, placement if placement is not None else Placement([node], [])))
+    placement = placement if placement is not None else Placement([node], [])
+    reasons.extend(_spread_reasons(pod, node, placement))
+    reasons.extend(_inter_pod_reasons(pod, node, placement))
     return reasons
 
 
@@ -599,7 +702,8 @@ def simulate_replicas(namespace: str, kind: str, name: str, count: int,
                      'tolerations': list(template.tolerations or []),
                      'nodeAffinity': list(template.node_affinity or []),
                      'podAffinity': list(template.pod_affinity or []),
-                     'podAntiAffinity': list(template.pod_anti_affinity or [])},
+                     'podAntiAffinity': list(template.pod_anti_affinity or []),
+                     'topologySpread': list(template.topology_spread or [])},
         'requested': count,
         'placed': len(placements),
         'fits': fits,
