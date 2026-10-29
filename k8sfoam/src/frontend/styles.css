@@ -1318,6 +1318,13 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .sim-drain-btn { padding: 8px 12px; white-space: nowrap; }
 .btn-primary:disabled { opacity: .6; cursor: default; transform: none; }
 
+/* The fit form grows with every hypothetical node row, so a simulator card
+   scrolls as a whole, header pinned, rather than only its result pane. */
+.overlay-card.sim-card { overflow-y: auto; }
+.sim-card > * { flex-shrink: 0; }
+.sim-card > .overlay-pods { flex: none; overflow: visible; }
+.sim-card > .overlay-head { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+
 .sim-form {
   display: grid;
   grid-template-columns: 1fr 1fr;
