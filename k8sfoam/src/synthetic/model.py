@@ -9,8 +9,9 @@ import random
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
-from kubernetes.client import (V1Container, V1Node, V1NodeCondition, V1NodeSpec, V1NodeStatus,  # type: ignore
-                               V1ObjectMeta, V1OwnerReference, V1Pod, V1PodSpec, V1PodStatus,
+from kubernetes.client import (V1Container, V1LabelSelector, V1Node, V1NodeCondition, V1NodeSpec,  # type: ignore
+                               V1NodeStatus, V1ObjectMeta, V1OwnerReference, V1Pod, V1PodDisruptionBudget,
+                               V1PodDisruptionBudgetSpec, V1PodDisruptionBudgetStatus, V1PodSpec, V1PodStatus,
                                V1ResourceRequirements, V1Taint, V1Toleration)
 from kubernetes.utils import parse_quantity  # type: ignore
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS
@@ -163,6 +164,8 @@ class ClusterModel():
         self.nodes: List[V1Node] = []
         self.pods: List[V1Pod] = []
         self.workloads: List[Workload] = []
+        # (namespace, name, matchLabels, minAvailable): the specs; status follows the pods, see disruption_budgets().
+        self.__budgets: List[Tuple[str, str, Dict[str, str], int]] = []
         self.__alloc: Dict[str, Dict[str, Decimal]] = {}
         self.__free: Dict[str, Dict[str, Decimal]] = {}
         self.__zone: Dict[str, str] = {}
@@ -361,6 +364,26 @@ class ClusterModel():
             for _ in range(w.replicas):
                 self.__place(w, key)
         return self.__pods_of[key]
+
+    def add_budget(self, namespace: str, name: str, match_labels: Dict[str, str], min_available: int) -> None:
+        """A PodDisruptionBudget with minAvailable over the pods its labels select."""
+        self.__budgets.append((namespace, name, dict(match_labels), min_available))
+
+    def disruption_budgets(self) -> List[V1PodDisruptionBudget]:
+        """The budgets with the status the disruption controller would report for the pods running now."""
+        budgets = []
+        for namespace, name, match_labels, min_available in self.__budgets:
+            in_namespace = [p for p in self.pods if p.metadata.namespace == namespace]
+            healthy = sum(1 for p in in_namespace if all(_labels(p).get(k) == v for k, v in match_labels.items()))
+            budgets.append(V1PodDisruptionBudget(
+                api_version='policy/v1', kind='PodDisruptionBudget',
+                metadata=V1ObjectMeta(name=name, namespace=namespace),
+                spec=V1PodDisruptionBudgetSpec(min_available=min_available,
+                                               selector=V1LabelSelector(match_labels=match_labels)),
+                status=V1PodDisruptionBudgetStatus(current_healthy=healthy, desired_healthy=min_available,
+                                                   expected_pods=healthy,
+                                                   disruptions_allowed=max(0, healthy - min_available))))
+        return budgets
 
     def pods_of(self, w: Workload) -> List[V1Pod]:
         return list(self.__pods_of[self.workloads.index(w)])

@@ -1226,6 +1226,16 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   padding: 0 1px;
 }
 .wl-chip-clear:hover { color: var(--text); }
+.wl-chip-sim {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 15px;
+  padding: 0 6px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-pill);
+}
+.wl-chip-sim:hover { color: var(--text); background: var(--accent); }
 
 /* Same deal as .title-chip above — give way before the title does. */
 @media (max-width: 1000px) {
@@ -1366,6 +1376,28 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 .sim-link { font-size: 11px; color: var(--text-dim); background: none; border: 0; cursor: pointer; }
 .sim-link:hover { color: var(--text); }
 .sim-caveat { margin-top: 14px; font-size: 10.5px; color: var(--text-soft); line-height: 1.5; }
+
+.sim-summary-neutral { color: var(--text-dim); border-color: var(--line-2); background: var(--bg-2); }
+.sim-row-warn { border-left: 3px solid var(--warn); }
+.sim-reasons-warn { color: var(--warn); }
+.sim-row-click { cursor: pointer; }
+.sim-step {
+  font-size: 9.5px;
+  min-width: 16px;
+  padding: 0 5px;
+  text-align: center;
+  border-radius: var(--r-pill);
+  background: rgba(16,185,129,.18);
+}
+.sim-muted { color: var(--text-soft); }
+.sim-template {
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+  margin-bottom: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.sim-template code { color: var(--text); }
+.sim-nested { margin: 0 0 4px 18px; }
 
 @media (max-width: 760px) {
   .sim-form { grid-template-columns: 1fr; }

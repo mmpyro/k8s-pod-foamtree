@@ -5,12 +5,19 @@ from collections import namedtuple
 # node_selector/tolerations/owner_kind back the scheduling simulator.
 # owner_kind/owner_name identify the workload: a Deployment's ReplicaSet is
 # resolved to the Deployment, and owner_name is None for static and naked pods.
+# node_affinity holds the required nodeSelectorTerms as plain dicts
+# ({matchExpressions, matchFields}); the preferred terms only score nodes.
+# pod_affinity/pod_anti_affinity hold the required PodAffinityTerms
+# ({labelSelector, namespaces, namespaceSelector, topologyKey}).
+# topology_spread holds the DoNotSchedule topologySpreadConstraints ({maxSkew,
+# topologyKey, labelSelector, minDomains, nodeAffinityPolicy, nodeTaintsPolicy}),
+# with matchLabelKeys already folded into labelSelector.
 # They are declared last with defaults so existing positional construction keeps working.
 PodResources = namedtuple(
     'PodResources',
     'name node_name cpu memory containers init_containers namespace labels qos_class extended '
-    'node_selector tolerations owner_kind owner_name',
-    defaults=('', None, None, None, None, None, None, None)
+    'node_selector tolerations owner_kind owner_name node_affinity pod_affinity pod_anti_affinity topology_spread',
+    defaults=('', None, None, None, None, None, None, None, None, None, None, None)
 )
 # `extended` on every DTO maps a non-cpu/memory resource name (nvidia.com/gpu,
 # ephemeral-storage, hugepages-2Mi) to a count, or to kB for byte-sized ones.
@@ -21,6 +28,9 @@ ContainerResources = namedtuple('ContainerResources', 'name cpu memory memory_li
 # grouping and the scheduling simulator; allocatable_pods is None when the node
 # reports no pod limit. Declared last with defaults so existing positional
 # construction keeps working.
+# A PodDisruptionBudget, for the drain simulator: selector is a LabelSelector
+# dict (None selects no pod), disruptions_allowed is the controller's status.
+DisruptionBudget = namedtuple('DisruptionBudget', 'name namespace selector disruptions_allowed')
 NodeResources = namedtuple(
     'NodeResources',
     'name cpu memory unschedulable taints conditions extended labels allocatable_pods',

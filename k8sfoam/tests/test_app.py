@@ -3,7 +3,7 @@ import bitmath  # type: ignore
 from k8sfoam.src.app import create_app, main, change_events, DEBOUNCE
 from k8sfoam.src.k8s.k8s_client import DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock
-from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
+from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources, ContainerResources
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP
 
@@ -119,6 +119,7 @@ def simulation_cluster():
                                                            NodeResources('b', 1000, float(bitmath.GiB(16).kB))]
     k8s_client_instance.get_pod_resources.return_value = [PodResources('web', 'a', 1000, float(bitmath.GiB(1).kB), [], [],
                                                                        owner_kind='ReplicaSet')]
+    k8s_client_instance.get_disruption_budgets.return_value = []
     return k8s_client_instance
 
 
@@ -158,10 +159,43 @@ def test_simulate_fit_checks_extended_resources(k8s_client, test_client):
     assert verdicts['cpu']['reasons'][0]['message'] == 'Insufficient nvidia.com/gpu: requires 1, available 0'
 
 
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_checks_node_affinity(k8s_client, test_client):
+    # Given
+    cluster = simulation_cluster()
+    cluster.get_node_resources.return_value = [
+        NodeResources('a', 4000, float(bitmath.GiB(16).kB), labels={'zone': 'a'}),
+        NodeResources('b', 4000, float(bitmath.GiB(16).kB), labels={'zone': 'b'})]
+    k8s_client.return_value = cluster
+    affinity = [{'matchExpressions': [{'key': 'zone', 'operator': 'In', 'values': ['b']}]}]
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'nodeAffinity': affinity})
+
+    # Then
+    assert response.status_code == 200
+    verdicts = {r['node']: r for r in response.json['nodes']}
+    assert verdicts['b']['fits'] is True
+    assert verdicts['a']['reasons'][0]['message'] == 'Node affinity mismatch: requires zone In (b)'
+
+
+def affinity_body(*expressions):
+    return {'cpu': '1', 'nodeAffinity': [{'matchExpressions': list(expressions)}]}
+
+
 @pytest.mark.parametrize('body', [{'cpu': 'lots'}, {'cpu': '1', 'nodeSelector': ['zone=a']},
                                   {'cpu': '1', 'tolerations': 'all'}, ['cpu'],
                                   {'cpu': '1', 'extended': {'pods': '1'}}, {'cpu': '1', 'extended': {'cpu': '1'}},
-                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': 'many'}}, {'extended': ['gpu']}])
+                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': 'many'}}, {'extended': ['gpu']},
+                                  {'cpu': '1', 'nodeAffinity': {'zone': 'a'}}, {'cpu': '1', 'nodeAffinity': ['zone']},
+                                  {'cpu': '1', 'nodeAffinity': [{'matchExpressions': []}]},
+                                  affinity_body({'key': 'zone', 'operator': 'Near', 'values': ['a']}),
+                                  affinity_body({'key': 'zone', 'operator': 'In', 'values': []}),
+                                  affinity_body({'key': 'zone', 'operator': 'In', 'values': 'a'}),
+                                  affinity_body({'key': '', 'operator': 'Exists'}),
+                                  affinity_body({'key': 'zone', 'operator': 'Exists', 'values': ['a']}),
+                                  affinity_body({'key': 'cores', 'operator': 'Gt', 'values': ['many']}),
+                                  affinity_body({'key': 'cores', 'operator': 'Gt', 'values': ['1', '2']})])
 @patch('k8sfoam.src.app.K8sClient')
 def test_simulate_fit_rejects_malformed_spec(k8s_client, body, test_client):
     # When
@@ -199,6 +233,45 @@ def test_simulate_drain_returns_placements(k8s_client, test_client):
 
 
 @patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_honours_disruption_budgets(k8s_client, test_client):
+    # Given
+    cluster = simulation_cluster()
+    cluster.get_pod_resources.return_value = [
+        PodResources('db-0', 'a', 100, float(bitmath.GiB(1).kB), [], [], 'default', labels={'app': 'db'},
+                     owner_kind='StatefulSet', owner_name='db')]
+    cluster.get_disruption_budgets.return_value = [
+        DisruptionBudget('db-pdb', 'default', {'matchLabels': {'app': 'db'}, 'matchExpressions': []}, 0)]
+    k8s_client.return_value = cluster
+
+    # When
+    drain = test_client.get('/simulate/drain/a')
+    consolidation = test_client.get('/simulate/consolidation')
+
+    # Then
+    assert drain.status_code == 200
+    assert drain.json['pdbsChecked'] is True
+    assert drain.json['blocked'] == [{'pod': 'db-0', 'namespace': 'default', 'pdb': 'db-pdb',
+                                      'disruptionsAllowed': 0}]
+    verdicts = {v['node']: v for v in consolidation.json['nodes']}
+    assert verdicts['a']['blockers'] == [{'slug': 'pdb', 'pods': 1}]
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_says_when_disruption_budgets_were_not_checked(k8s_client, test_client):
+    # Given — RBAC denied listing PDBs
+    cluster = simulation_cluster()
+    cluster.get_disruption_budgets.return_value = None
+    k8s_client.return_value = cluster
+
+    # When
+    response = test_client.get('/simulate/drain/a')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['pdbsChecked'] is False
+
+
+@patch('k8sfoam.src.app.K8sClient')
 def test_simulate_drain_unknown_node_returns_not_found(k8s_client, test_client):
     # Given
     k8s_client.return_value = simulation_cluster()
@@ -217,6 +290,109 @@ def test_simulate_drain_returns_internal_server_error(k8s_client, test_client):
 
     # When
     response = test_client.get('/simulate/drain/a')
+
+    # Then
+    assert response.status_code == 500
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_consolidation_returns_verdicts_and_plan(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    response = test_client.get('/simulate/consolidation?context=minikube')
+
+    # Then
+    assert response.status_code == 200
+    k8s_client.assert_called_with('minikube', 500)
+    assert response.json['total'] == 2
+    # b is empty, so it goes first; then a's pod has nowhere left to go.
+    assert [step['node'] for step in response.json['plan']] == ['b']
+    verdicts = {v['node']: v for v in response.json['nodes']}
+    assert verdicts['a']['removable'] is True
+    assert verdicts['a']['conflictWith'] == ['b']
+    assert response.json['freed']['cpu'] == 1000
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_consolidation_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_node_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.get('/simulate/consolidation')
+
+    # Then
+    assert response.status_code == 500
+
+
+def replica_cluster():
+    cluster = simulation_cluster()
+    cluster.get_pod_resources.return_value = [PodResources('web-1', 'a', 1000, float(bitmath.GiB(1).kB), [], [], 'default',
+                                                           owner_kind='Deployment', owner_name='web')]
+    return cluster
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_returns_placements(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = replica_cluster()
+
+    # When
+    response = test_client.get('/simulate/replicas/default/Deployment/web?count=2&context=minikube')
+
+    # Then
+    assert response.status_code == 200
+    k8s_client.assert_called_with('minikube', 500)
+    assert response.json['fits'] is True
+    assert response.json['placements'] == ['a', 'a']
+    assert response.json['template']['pod'] == 'web-1'
+
+
+@pytest.mark.parametrize('query', ['?count=0', '?count=101', '?count=abc', '?count=', ''])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_rejects_a_bad_count(k8s_client, query, test_client):
+    # When
+    response = test_client.get(f'/simulate/replicas/default/Deployment/web{query}')
+
+    # Then
+    assert response.status_code == 400
+    assert b'count must be' in response.data
+    k8s_client.assert_not_called()
+
+
+@pytest.mark.parametrize('kind', ['DaemonSet', 'Node'])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_rejects_daemonset_and_static_pods(k8s_client, kind, test_client):
+    # When
+    response = test_client.get(f'/simulate/replicas/kube-system/{kind}/kube-proxy?count=1')
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_unknown_workload_returns_not_found(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = replica_cluster()
+
+    # When
+    response = test_client.get('/simulate/replicas/default/Deployment/ghost?count=1')
+
+    # Then
+    assert response.status_code == 404
+    assert response.data == b'Workload default/Deployment/ghost not found'
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_returns_internal_server_error(k8s_client, test_client):
+    # Given
+    k8s_client.return_value.get_pod_resources.side_effect = Exception('Cannot connect to k8s api')
+
+    # When
+    response = test_client.get('/simulate/replicas/default/Deployment/web?count=1')
 
     # Then
     assert response.status_code == 500
@@ -556,10 +732,12 @@ def test_synthetic_simulators(synthetic_client):
     # When
     drain = synthetic_client.get(f'/simulate/drain/{node}')
     fit = synthetic_client.post('/simulate/fit', json={'cpu': '500m', 'memory': '1Gi'})
+    replicas = synthetic_client.get('/simulate/replicas/checkout/Deployment/checkout-api?count=6')
 
     # Then
     assert drain.status_code == 200 and drain.json['node'] == node
     assert fit.status_code == 200 and fit.json['total'] == 16
+    assert replicas.status_code == 200 and replicas.json['requested'] == 6
 
 
 def test_synthetic_unknown_context_is_an_error(synthetic_client):

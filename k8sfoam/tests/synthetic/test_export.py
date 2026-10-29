@@ -1,5 +1,6 @@
 import json
 import pytest
+from k8sfoam.src.common.scheduler import MAX_REPLICAS
 from k8sfoam.src.synthetic.export import (BUNDLE_TAG, FIT_PRESETS, STATIC_CONFIG, context_path, export_site,
                                           preset_form, static_index)
 from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP
@@ -44,13 +45,17 @@ def test_preset_form_writes_the_fit_modal_syntax():
     spec = {'cpu': '4', 'memory': '16Gi', 'extended': {'nvidia.com/gpu': '1'}, 'nodeSelector': {'zone': 'a'},
             'tolerations': [{'key': 'gpu', 'operator': 'Exists', 'effect': 'NoSchedule'},
                             {'key': 'dedicated', 'operator': 'Equal', 'value': 'ml'},
-                            {'operator': 'Exists'}]}
+                            {'operator': 'Exists'}],
+            'nodeAffinity': [{'matchExpressions': [{'key': 'zone', 'operator': 'In', 'values': ['a', 'b']},
+                                                   {'key': 'spot', 'operator': 'DoesNotExist'},
+                                                   {'key': 'cores', 'operator': 'Gt', 'values': ['4']}]}]}
 
     # When
     form = preset_form(spec)
 
     # Then
     assert form == {'cpu': '4', 'memory': '16Gi', 'extended': 'nvidia.com/gpu=1', 'nodeSelector': 'zone=a',
+                    'nodeAffinity': 'zone in (a,b), !spot, cores gt 4',
                     'tolerations': 'gpu:NoSchedule, dedicated=ml, *'}
 
 
@@ -93,7 +98,7 @@ def test_export_writes_the_dashboard_and_contexts(site):
 
 
 @pytest.mark.parametrize('path', ['demo-shop', 'gke-demo-ml-us-central1-ml-training', 'demo-platform'])
-def test_export_precomputes_every_drain_and_preset(site, path):
+def test_export_precomputes_every_drain_preset_and_consolidation(site, path):
     # Given
     data = site / 'data' / path
 
@@ -105,6 +110,26 @@ def test_export_precomputes_every_drain_and_preset(site, path):
         assert read(data / 'drain' / f"{node['name']}.json")['node'] == node['name']
     for preset in FIT_PRESETS:
         assert read(data / 'fit' / f"{preset['id']}.json")['total'] == len(resources['nodes'])
+    consolidation = read(data / 'consolidation.json')
+    assert [v['node'] for v in consolidation['nodes']] == [n['name'] for n in resources['nodes']]
+    workloads = {(p['namespace'], p['owner']['kind'], p['owner']['name'])
+                 for n in resources['nodes'] for p in n['pods']
+                 if p['owner'] and p['owner']['name'] and p['owner']['kind'] not in ('DaemonSet', 'Node')}
+    assert workloads
+    for namespace, kind, name in workloads:
+        result = read(data / 'replicas' / namespace / kind / f'{name}.json')
+        assert result['requested'] == MAX_REPLICAS
+        assert result['workload'] == {'namespace': namespace, 'kind': kind, 'name': name}
+    assert not (data / 'replicas' / 'kube-system' / 'DaemonSet').exists()
+
+
+def test_export_precomputes_checkout_api_replicas(site):
+    # Given / When
+    result = read(site / 'data' / 'demo-shop' / 'replicas' / 'checkout' / 'Deployment' / 'checkout-api.json')
+
+    # Then
+    assert result['template']['pod'].startswith('checkout-api-')
+    assert result['total'] == 16
 
 
 def test_export_lists_presets_with_their_form(site):
@@ -114,7 +139,7 @@ def test_export_lists_presets_with_their_form(site):
     # Then
     assert [p['id'] for p in presets] == [p['id'] for p in FIT_PRESETS]
     assert presets[0]['form'] == {'cpu': '500m', 'memory': '1Gi', 'extended': '', 'nodeSelector': '',
-                                  'tolerations': ''}
+                                  'nodeAffinity': '', 'tolerations': ''}
 
 
 def test_export_replaces_stale_data(frontend, tmp_path):

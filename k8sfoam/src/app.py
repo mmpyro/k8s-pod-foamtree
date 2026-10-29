@@ -8,7 +8,8 @@ from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import PodResources
-from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
+from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_REPLICAS, simulate_consolidation, simulate_drain,
+                                          simulate_fit, simulate_replicas)
 from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 
@@ -26,6 +27,40 @@ def get_version() -> str:
         return 'unknown'
 
 
+NODE_SELECTOR_OPERATORS = ('In', 'NotIn', 'Exists', 'DoesNotExist', 'Gt', 'Lt')
+
+
+def parse_requirement(r) -> dict:
+    """One matchExpressions entry, validated as the API server would. Raises ValueError."""
+    if not isinstance(r, dict) or not isinstance(r.get('key'), str) or not r['key']:
+        raise ValueError(f'Node affinity requirement needs a key: {r!r}')
+    operator, values = r.get('operator'), r.get('values') or []
+    if operator not in NODE_SELECTOR_OPERATORS:
+        raise ValueError(f'Node affinity operator must be one of {", ".join(NODE_SELECTOR_OPERATORS)}: {r!r}')
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise ValueError(f'Node affinity values must be a list of strings: {r!r}')
+    if operator in ('In', 'NotIn') and not values:
+        raise ValueError(f'{operator} needs at least one value: {r!r}')
+    if operator in ('Exists', 'DoesNotExist') and values:
+        raise ValueError(f'{operator} takes no values: {r!r}')
+    if operator in ('Gt', 'Lt') and (len(values) != 1 or not values[0].lstrip('-').isdigit()):
+        raise ValueError(f'{operator} needs exactly one integer value: {r!r}')
+    return {'key': r['key'], 'operator': operator, 'values': list(values)}
+
+
+def parse_node_affinity(terms) -> list:
+    """Required nodeSelectorTerms of the fit form, matchExpressions only. Raises ValueError."""
+    if not isinstance(terms, list) or not all(isinstance(t, dict) for t in terms):
+        raise ValueError('nodeAffinity must be a list of nodeSelectorTerms')
+    parsed = []
+    for term in terms:
+        expressions = term.get('matchExpressions')
+        if not isinstance(expressions, list) or not expressions:
+            raise ValueError('Every nodeAffinity term needs a non-empty matchExpressions list')
+        parsed.append({'matchExpressions': [parse_requirement(r) for r in expressions], 'matchFields': []})
+    return parsed
+
+
 def parse_pod_spec(body) -> PodResources:
     """Hypothetical pod from the fit form. Raises ValueError on a malformed field."""
     if not isinstance(body, dict):
@@ -36,6 +71,7 @@ def parse_pod_spec(body) -> PodResources:
         raise ValueError('nodeSelector must map label keys to string values')
     if not isinstance(tolerations, list) or not all(isinstance(t, dict) for t in tolerations):
         raise ValueError('tolerations must be a list of objects')
+    node_affinity = parse_node_affinity(body.get('nodeAffinity') or [])
     extended_spec = body.get('extended') or {}
     if not isinstance(extended_spec, dict):
         raise ValueError('extended must map resource names to quantities')
@@ -52,7 +88,19 @@ def parse_pod_spec(body) -> PodResources:
                          f"extended={extended_spec!r}")
     tolerations = [{k: t.get(k) for k in ('key', 'operator', 'value', 'effect')} for t in tolerations]
     return PodResources('hypothetical', None, cpu, memory, [], [], extended={k: v for k, v in extended.items() if v},
-                        node_selector=node_selector, tolerations=tolerations)
+                        node_selector=node_selector, tolerations=tolerations, node_affinity=node_affinity)
+
+
+def parse_replica_count(value: Optional[str]) -> int:
+    """`count` of a replica simulation. Raises ValueError unless it is 1..MAX_REPLICAS."""
+    message = f'count must be an integer from 1 to {MAX_REPLICAS}, got {value!r}'
+    try:
+        count = int(value or '')
+    except ValueError:
+        raise ValueError(message)
+    if not 1 <= count <= MAX_REPLICAS:
+        raise ValueError(message)
+    return count
 
 
 class Registry(Protocol):
@@ -156,11 +204,40 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def simulate_node_drain(node_name: str):
             try:
                 k8s_client = cluster(request.args.get('context'))
-                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources(),
+                                        k8s_client.get_disruption_budgets())
             except Exception as ex:
                 return str(ex), 500
             if result is None:
                 return f'Node {node_name} not found', 404
+            return jsonify(result)
+
+        @app.route('/simulate/consolidation', methods=['GET'])
+        def simulate_cluster_consolidation():
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                return jsonify(simulate_consolidation(k8s_client.get_node_resources(), k8s_client.get_pod_resources(),
+                                                      k8s_client.get_disruption_budgets()))
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/simulate/replicas/<namespace>/<kind>/<name>', methods=['GET'])
+        def simulate_workload_replicas(namespace: str, kind: str, name: str):
+            try:
+                count = parse_replica_count(request.args.get('count'))
+            except ValueError as ex:
+                return str(ex), 400
+            # A DaemonSet runs one pod per matching node and a static pod belongs to its kubelet.
+            if kind in DRAIN_SKIPPED_OWNERS:
+                return f'{kind} pods have no replica count to scale', 400
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                result = simulate_replicas(namespace, kind, name, count,
+                                           k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+            except Exception as ex:
+                return str(ex), 500
+            if result is None:
+                return f'Workload {namespace}/{kind}/{name} not found', 404
             return jsonify(result)
 
         @app.route('/events', methods=['GET'])

@@ -1,5 +1,6 @@
+from typing import Optional
 from kubernetes.utils import parse_quantity  # type: ignore
-from k8sfoam.src.common.dtos import PodResources, ContainerResources, NodeResources
+from k8sfoam.src.common.dtos import DisruptionBudget, PodResources, ContainerResources, NodeResources
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS, CORDON_TAINT
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, extract_extended
 
@@ -17,6 +18,47 @@ def _totals(c: ContainerResources) -> dict:
     return {'cpu': c.cpu, 'memory': c.memory, **(c.extended or {})}
 
 
+def _requirement(r) -> dict:
+    return {'key': r.key, 'operator': r.operator, 'values': list(r.values or [])}
+
+
+def _label_selector(s) -> Optional[dict]:
+    """None stays None: an unset selector matches no pod, while an empty one matches every pod."""
+    if s is None:
+        return None
+    return {'matchLabels': dict(s.match_labels or {}),
+            'matchExpressions': [_requirement(r) for r in s.match_expressions or []]}
+
+
+def _pod_affinity_terms(rule) -> list:
+    """The required terms of a podAffinity or podAntiAffinity; preferred ones only score nodes."""
+    terms = rule.required_during_scheduling_ignored_during_execution if rule is not None else None
+    return [{'labelSelector': _label_selector(t.label_selector), 'namespaces': list(t.namespaces or []),
+             'namespaceSelector': _label_selector(t.namespace_selector), 'topologyKey': t.topology_key}
+            for t in terms or []]
+
+
+def _topology_spread(pod, labels: dict) -> list:
+    """The DoNotSchedule constraints; ScheduleAnyway ones only score nodes.
+
+    matchLabelKeys ANDs `key In (the pod's value)` into the selector, so a
+    Deployment's old ReplicaSet pods do not count against its new ones; keys the
+    pod has no label for are ignored, as the API server does.
+    """
+    constraints = []
+    for c in pod.spec.topology_spread_constraints or []:
+        if c.when_unsatisfiable != 'DoNotSchedule':
+            continue
+        selector = _label_selector(c.label_selector)
+        if selector is not None:
+            selector['matchExpressions'] += [{'key': k, 'operator': 'In', 'values': [labels[k]]}
+                                             for k in c.match_label_keys or [] if k in labels]
+        constraints.append({'maxSkew': c.max_skew, 'topologyKey': c.topology_key, 'minDomains': c.min_domains,
+                            'labelSelector': selector, 'nodeAffinityPolicy': c.node_affinity_policy or 'Honor',
+                            'nodeTaintsPolicy': c.node_taints_policy or 'Ignore'})
+    return constraints
+
+
 # The kubelet marks a static pod's API copy with this annotation. Such a pod is
 # owned by the node itself: a drain cannot evict it and nothing reschedules it.
 MIRROR_POD_ANNOTATION = 'kubernetes.io/config.mirror'
@@ -30,6 +72,18 @@ class ResourcesExtractor():
     def __extract_tolerations(self, pod) -> list:
         return [{'key': t.key, 'operator': t.operator, 'value': t.value, 'effect': t.effect}
                 for t in pod.spec.tolerations or []]
+
+    def __extract_node_affinity(self, pod) -> list:
+        """The required nodeSelectorTerms; [] when the pod requires none."""
+        affinity = pod.spec.affinity
+        node_affinity = affinity.node_affinity if affinity is not None else None
+        required = (node_affinity.required_during_scheduling_ignored_during_execution
+                    if node_affinity is not None else None)
+        if required is None:
+            return []
+        return [{'matchExpressions': [_requirement(r) for r in term.match_expressions or []],
+                 'matchFields': [_requirement(r) for r in term.match_fields or []]}
+                for term in required.node_selector_terms or []]
 
     def __extract_owner(self, pod, labels: dict) -> tuple:
         """Who recreates the pod after an eviction, as (kind, name): a controller,
@@ -101,9 +155,20 @@ class ResourcesExtractor():
         extended = {k: v for k, v in effective.items() if k not in ('cpu', 'memory') and v}
 
         owner_kind, owner_name = self.__extract_owner(pod, labels)
+        affinity = pod.spec.affinity
         return PodResources(name, node_name, effective_cpu, effective_memory, containers, init_containers,
                             namespace, labels, qos_class, extended, dict(pod.spec.node_selector or {}),
-                            self.__extract_tolerations(pod), owner_kind, owner_name)
+                            self.__extract_tolerations(pod), owner_kind, owner_name,
+                            self.__extract_node_affinity(pod),
+                            _pod_affinity_terms(affinity.pod_affinity if affinity is not None else None),
+                            _pod_affinity_terms(affinity.pod_anti_affinity if affinity is not None else None),
+                            _topology_spread(pod, labels))
+
+    def extract_disruption_budget(self, pdb) -> DisruptionBudget:
+        # A budget the controller has not processed yet reports no status: nothing may be evicted.
+        allowed = pdb.status.disruptions_allowed if pdb.status is not None else 0
+        selector = _label_selector(pdb.spec.selector) if pdb.spec is not None else None
+        return DisruptionBudget(pdb.metadata.name, pdb.metadata.namespace, selector, allowed or 0)
 
     def __extract_node_taints(self, node) -> list:
         """Every taint on the node, minus the one Kubernetes adds on cordon.

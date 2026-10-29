@@ -1,20 +1,26 @@
-// Scheduling simulators: "Can I fit this pod?" and "Simulate drain". The
-// backend runs the scheduler filter and sends verdicts with reason slugs; this
-// file is the single place that decides how they read and which nodes the map
-// outlines, so the modal, the drain report and both views agree.
+// Scheduling simulators: "Can I fit this pod?", "Simulate drain", the
+// consolidation finder and "Can I scale this workload?". The backend runs the
+// scheduler filter and sends verdicts with reason slugs; this file is the
+// single place that decides how they read and which nodes the map outlines,
+// so the modals, the drain report and both views agree.
 
 const { useState, useEffect } = React;
+const { isBytes } = window.k8sResources;
 
 // Ordered the way the backend's filter evaluates them.
 const REASONS = {
   "cordoned":            { label: "cordoned" },
   "not-ready":           { label: "not ready" },
   "node-selector":       { label: "nodeSelector mismatch" },
+  "node-affinity":       { label: "node affinity mismatch" },
   "taint":               { label: "untolerated taint" },
   "insufficient-pods":   { label: "pod limit reached" },
   "insufficient-cpu":    { label: "insufficient CPU" },
   "insufficient-memory": { label: "insufficient memory" },
   "insufficient-extended": { label: "insufficient extended resource" },
+  "topology-spread":     { label: "topology spread skew" },
+  "pod-affinity":        { label: "pod affinity unmet" },
+  "pod-anti-affinity":   { label: "pod anti-affinity conflict" },
 };
 
 const SKIP_REASONS = {
@@ -22,11 +28,29 @@ const SKIP_REASONS = {
   static: "static pod — owned by the kubelet, not evicted",
 };
 
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+// Why a node cannot go even on its own, in the backend's order.
+const BLOCKERS = {
+  "control-plane": () => "control-plane node — not part of a node group",
+  "pending": n => `${plural(n, "pod")} would go Pending`,
+  "pdb": n => `${plural(n, "pod")} held by a PodDisruptionBudget`,
+  "unmanaged": n => `${plural(n, "naked pod")} — nothing would recreate ${n === 1 ? "it" : "them"}`,
+};
+
+function blockerLabel(b) {
+  return (BLOCKERS[b.slug] || (() => b.slug))(b.pods);
+}
+
 // What the simulator does not model, shown under every result so a green
 // verdict is read as "necessary", not "guaranteed".
 const CAVEAT = "Filter phase only: CPU, memory, extended resources (GPUs, ephemeral-storage, hugepages), " +
-  "pod count, cordon, readiness, nodeSelector and taints. " +
-  "Affinity, topology spread, PDBs and volume zones are not simulated.";
+  "pod count, cordon, readiness, nodeSelector, taints, required node and pod (anti-)affinity and " +
+  "DoNotSchedule topology spread; drains honour PodDisruptionBudgets. Volume zones are not simulated.";
+
+// Shown when the server could not list PodDisruptionBudgets (RBAC), so drains ignored them.
+const PDB_UNCHECKED = "PodDisruptionBudgets not checked: the server may not list them (RBAC), " +
+  "so a real drain may still wait on some pods.";
 
 function reasonLabel(slug) {
   return (REASONS[slug] || { label: slug }).label;
@@ -71,6 +95,68 @@ function parseTolerations(text) {
   return { tolerations, errors };
 }
 
+// One required node affinity term, its expressions ANDed:
+// `zone in (a,b), disk notin (hdd), gpu exists, !spot, cores gt 4`.
+// A bare `key` means exists. Commas inside parentheses separate values.
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0, current = "";
+  for (const ch of text) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth = Math.max(0, depth - 1);
+    if ((ch === "," || ch === "\n") && depth === 0) { parts.push(current); current = ""; continue; }
+    current += ch;
+  }
+  parts.push(current);
+  return parts.map(p => p.trim()).filter(Boolean);
+}
+
+const SET_OPS = { in: "In", notin: "NotIn" };
+const NUM_OPS = { gt: "Gt", lt: "Lt" };
+const EXIST_OPS = { exists: "Exists", doesnotexist: "DoesNotExist" };
+function parseNodeAffinity(text) {
+  const expressions = [], errors = [];
+  for (const tok of splitTopLevel(text)) {
+    let m;
+    if ((m = tok.match(/^(\S+)\s+(in|notin)\s*\(([^)]*)\)$/i))) {
+      const values = m[3].split(",").map(v => v.trim()).filter(Boolean);
+      if (!values.length) { errors.push(`"${tok}" lists no values`); continue; }
+      expressions.push({ key: m[1], operator: SET_OPS[m[2].toLowerCase()], values });
+    } else if ((m = tok.match(/^(\S+)\s+(gt|lt)\s+(-?\d+)$/i))) {
+      expressions.push({ key: m[1], operator: NUM_OPS[m[2].toLowerCase()], values: [m[3]] });
+    } else if ((m = tok.match(/^(\S+)\s+(exists|doesnotexist)$/i))) {
+      expressions.push({ key: m[1], operator: EXIST_OPS[m[2].toLowerCase()], values: [] });
+    } else if ((m = tok.match(/^!(\S+)$/))) {
+      expressions.push({ key: m[1], operator: "DoesNotExist", values: [] });
+    } else if (/^[^\s!()]+$/.test(tok)) {
+      expressions.push({ key: tok, operator: "Exists", values: [] });
+    } else {
+      errors.push(`"${tok}" is not key in (a,b), key notin (a), key exists, !key or key gt N`);
+    }
+  }
+  return { nodeAffinity: expressions.length ? [{ matchExpressions: expressions }] : [], errors };
+}
+
+// `zone In (a,b), spot DoesNotExist or ...` — the backend's wording.
+function fmtNodeAffinity(terms) {
+  const fmt = r => ["In", "NotIn"].includes(r.operator)
+    ? `${r.key} ${r.operator} (${r.values.join(",")})`
+    : r.values && r.values.length ? `${r.key} ${r.operator} ${r.values[0]}` : `${r.key} ${r.operator}`;
+  return terms.map(t => [...(t.matchExpressions || []), ...(t.matchFields || [])].map(fmt).join(", ")).join(" or ");
+}
+
+// `app=web per kubernetes.io/hostname; ...` — what each pod affinity term selects, and over which domain.
+function fmtPodTerms(terms) {
+  return terms.map(t => {
+    const s = t.labelSelector;
+    const parts = s ? [
+      ...Object.entries(s.matchLabels || {}).map(([k, v]) => `${k}=${v}`),
+      ...(s.matchExpressions || []).map(r => `${r.key} ${r.operator}${r.values && r.values.length ? ` (${r.values.join(",")})` : ""}`),
+    ] : [];
+    return `${parts.join(", ") || "any pod"} per ${t.topologyKey}`;
+  }).join("; ");
+}
+
 // The preset whose fields the form holds, or null. Whitespace around the
 // commas of a list field does not make it a different pod.
 function matchPreset(presets, form) {
@@ -92,11 +178,50 @@ function drainSimulation(result) {
   const verdicts = new Map([[result.node, "drained"]]);
   for (const p of result.placements) verdicts.set(p.to, "ok");
   const moved = result.placements.length + result.pending.length;
+  const blocked = (result.blocked || []).length;
+  const summary = !result.fits
+    ? `drain ${result.node}: ${result.pending.length} pending`
+    : `drain ${result.node}: ${moved} pod${moved === 1 ? "" : "s"} fit`;
   return {
     kind: "drain",
+    summary: blocked ? `${summary}, ${blocked} held by PDB` : summary,
+    ok: result.fits && !blocked,
+    verdicts,
+  };
+}
+
+// Removed nodes read "drained", the ones taking their pods "ok", blocked ones
+// "fail" — even when they take pods too, since why a node stays is the answer.
+function consolidationSimulation(result) {
+  const verdicts = new Map();
+  for (const step of result.plan) {
+    for (const p of step.placements) verdicts.set(p.to, "ok");
+  }
+  for (const v of result.nodes) if (!v.removable) verdicts.set(v.node, "fail");
+  for (const step of result.plan) verdicts.set(step.node, "drained");
+  const n = result.plan.length;
+  return {
+    kind: "consolidation",
+    summary: n ? `${n} of ${result.total} nodes could be removed` : "no node could be removed",
+    ok: n > 0,
+    verdicts,
+  };
+}
+
+// Nodes taking copies read "ok". When the workload cannot grow by the whole
+// count, the nodes that took none could not take one either: "fail".
+function replicasSimulation(result) {
+  const verdicts = new Map();
+  for (const v of result.nodes) {
+    if (v.replicas > 0) verdicts.set(v.node, "ok");
+    else if (!result.fits) verdicts.set(v.node, "fail");
+  }
+  const { name } = result.workload;
+  return {
+    kind: "replicas",
     summary: result.fits
-      ? `drain ${result.node}: ${moved} pod${moved === 1 ? "" : "s"} fit`
-      : `drain ${result.node}: ${result.pending.length} pending`,
+      ? `${name} +${result.requested}: all fit`
+      : `${name} +${result.requested}: ${result.placed} fit, ${result.requested - result.placed} pending`,
     ok: result.fits,
     verdicts,
   };
@@ -119,6 +244,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
   const [memory, setMemory] = useState("1Gi");
   const [selectorText, setSelectorText] = useState("");
   const [tolerationText, setTolerationText] = useState("");
+  const [affinityText, setAffinityText] = useState("");
   const [extendedText, setExtendedText] = useState("");
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -132,11 +258,13 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
 
   const { selector, errors: selErrors } = parseSelector(selectorText);
   const { tolerations, errors: tolErrors } = parseTolerations(tolerationText);
+  const { nodeAffinity, errors: affErrors } = parseNodeAffinity(affinityText);
   // Same name=quantity syntax as the selector; quantities are validated server-side.
   const { selector: extended, errors: extErrors } = parseSelector(extendedText);
-  const formErrors = [...selErrors, ...tolErrors, ...extErrors];
+  const formErrors = [...selErrors, ...affErrors, ...tolErrors, ...extErrors];
   const preset = matchPreset(presets, {
-    cpu, memory, extended: extendedText, nodeSelector: selectorText, tolerations: tolerationText,
+    cpu, memory, extended: extendedText, nodeSelector: selectorText, nodeAffinity: affinityText,
+    tolerations: tolerationText,
   });
   const customInDemo = window.k8sApi.isStatic && !preset;
 
@@ -145,6 +273,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
     setMemory(p.form.memory);
     setExtendedText(p.form.extended);
     setSelectorText(p.form.nodeSelector);
+    setAffinityText(p.form.nodeAffinity || "");
     setTolerationText(p.form.tolerations);
     setError(null);
   };
@@ -154,7 +283,7 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
     if (formErrors.length) return;
     setBusy(true);
     try {
-      const spec = { cpu, memory, extended, nodeSelector: selector, tolerations };
+      const spec = { cpu, memory, extended, nodeSelector: selector, nodeAffinity, tolerations };
       const res = await window.k8sApi.fit(ctx, spec, preset && preset.id);
       setResult(res);
       setError(null);
@@ -211,6 +340,11 @@ function FitModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
             <span className="ov-label">nodeSelector</span>
             <input value={selectorText} onChange={e => setSelectorText(e.target.value)}
               placeholder="topology.kubernetes.io/zone=us-east-1a, disk=ssd" spellCheck="false" />
+          </label>
+          <label className="sim-field sim-wide">
+            <span className="ov-label">Node affinity (required)</span>
+            <input value={affinityText} onChange={e => setAffinityText(e.target.value)}
+              placeholder="topology.kubernetes.io/zone in (us-east-1a,us-east-1b), !spot, cores gt 4" spellCheck="false" />
           </label>
           <label className="sim-field sim-wide">
             <span className="ov-label">Tolerations</span>
@@ -313,16 +447,36 @@ function DrainReport({ report, memUnit, fmtMem }) {
   const r = report.result;
   const moved = r.placements.length + r.pending.length;
   const unmanaged = [...r.placements, ...r.pending].filter(p => p.unmanaged).length;
+  const blocked = r.blocked || [];
   return (
     <>
-      <div className={`sim-summary ${r.fits ? "sim-summary-ok" : "sim-summary-fail"}`}>
+      <div className={`sim-summary ${r.fits && !blocked.length ? "sim-summary-ok" : "sim-summary-fail"}`}>
         {moved === 0
-          ? "Nothing to move — this node runs no evictable pods."
+          ? (blocked.length ? "Nothing can be evicted yet." : "Nothing to move — this node runs no evictable pods.")
           : r.fits
-            ? `All ${moved} evictable pod${moved === 1 ? "" : "s"} fit on the remaining ${r.remainingNodes} node${r.remainingNodes === 1 ? "" : "s"}.`
+            ? `All ${moved} evicted pod${moved === 1 ? "" : "s"} fit on the remaining ${r.remainingNodes} node${r.remainingNodes === 1 ? "" : "s"}.`
             : `${r.pending.length} of ${moved} pods would go Pending — the cluster lacks headroom.`}
+        {blocked.length > 0 && ` kubectl drain would wait on ${plural(blocked.length, "pod")} held by a PodDisruptionBudget.`}
         {unmanaged > 0 && ` ${unmanaged} naked pod${unmanaged === 1 ? " has" : "s have"} no controller and would not be recreated.`}
       </div>
+      {r.pdbsChecked === false && <div className="sim-note">{PDB_UNCHECKED}</div>}
+
+      {blocked.length > 0 && (
+        <div className="sim-group">
+          <div className="ov-section-title">Blocked by PDB · {blocked.length}</div>
+          <div className="sim-skipped">
+            {blocked.map(b => (
+              <div key={`${b.namespace}/${b.pod}`} className="taint-row">
+                <code>{b.namespace}/{b.pod}</code>
+                <span className="taint-effect">
+                  {b.pdb} allows {plural(b.disruptionsAllowed, "disruption")}
+                  {b.disruptionsAllowed > 0 ? ", used up by this drain" : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {r.pending.length > 0 && (
         <div className="sim-group">
@@ -379,7 +533,323 @@ function DrainReport({ report, memUnit, fmtMem }) {
   );
 }
 
+/* ─────────── Which nodes could be removed? ─────────── */
+
+// `24 CPU / 96 GiB / 2 nvidia.com/gpu` — what removing the planned nodes gives back.
+// Byte-sized extended resources (ephemeral-storage, hugepages) are node disk and
+// memory carve-outs, not capacity anyone scales down for, so they stay out.
+function fmtFreed(freed, memUnit, fmtMem) {
+  const parts = [`${+(freed.cpu / 1000).toFixed(1)} CPU`, `${fmtMem(kbToMib(freed.memory), memUnit, true)} ${memUnit}`];
+  for (const [name, amount] of Object.entries(freed.extended).sort()) {
+    if (amount && !isBytes(name)) parts.push(`${amount} ${name}`);
+  }
+  return parts.join(" / ");
+}
+
+function NodeLine({ v, tone, memUnit, fmtMem, onClick, children }) {
+  return (
+    <div className={`pod-row sim-row sim-row-${tone} ${onClick ? "sim-row-click" : ""}`} onClick={onClick}>
+      <div className="pod-row-name">
+        <code>{v.node}</code>
+        {children}
+      </div>
+      <div className="pod-row-stat" title="Requests of the pods a drain would move">
+        <span className="pod-row-num">{(v.cpu / 1000).toFixed(2)}</span>
+        <span className="pod-row-unit">cores</span>
+      </div>
+      <div className="pod-row-stat" title="Requests of the pods a drain would move">
+        <span className="pod-row-num">{fmtMem(kbToMib(v.memory), memUnit)}</span>
+        <span className="pod-row-unit">{memUnit}</span>
+      </div>
+    </div>
+  );
+}
+
+function PlanStep({ index, step, v, memUnit, fmtMem }) {
+  const [open, setOpen] = useState(false);
+  const moves = step.placements.length;
+  return (
+    <>
+      <NodeLine v={v} tone="ok" memUnit={memUnit} fmtMem={fmtMem} onClick={moves ? () => setOpen(o => !o) : null}>
+        <div className="sim-reasons sim-reasons-ok">
+          <span className="sim-step">{index + 1}</span>
+          <span>{moves ? `${plural(moves, "pod")} move ${open ? "▾" : "▸"}` : "nothing to move"}</span>
+          {step.skipped.length > 0 && <span className="sim-muted">{step.skipped.length} DaemonSet/static stay</span>}
+        </div>
+      </NodeLine>
+      {open && (
+        <div className="pod-rows sim-nested">
+          {step.placements.map(p => (
+            <PodLine key={`${p.namespace}/${p.pod}`} p={p} memUnit={memUnit} fmtMem={fmtMem}>
+              <div className="sim-reasons sim-reasons-ok"><span>→ {p.to}</span></div>
+            </PodLine>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ConsolidationModal({ ctx, memUnit, fmtMem, onSimulation, onClose }) {
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let live = true;
+    window.k8sApi.consolidation(ctx)
+      .then(res => {
+        if (!live) return;
+        setResult(res);
+        onSimulation(consolidationSimulation(res));
+      })
+      .catch(err => live && setError(err.message || String(err)));
+    return () => { live = false; };
+  }, [ctx]);
+
+  const byNode = result ? new Map(result.nodes.map(v => [v.node, v])) : new Map();
+  const conflicts = result ? result.nodes.filter(v => v.removable && !v.inPlan) : [];
+  const blocked = result ? result.nodes.filter(v => !v.removable).sort((a, b) => a.node.localeCompare(b.node)) : [];
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="overlay-card sim-card" onClick={e => e.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <div className="overlay-title">Which nodes could be removed?</div>
+            <div className="overlay-sub">Drain every node, then plan a scale-down one node at a time</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
+        </div>
+
+        <div className="overlay-pods">
+          {error && <div className="sim-summary sim-summary-fail">Consolidation finder failed: {error}</div>}
+          {!result && !error && <div className="sim-note">Simulating a drain of every node…</div>}
+
+          {result && (
+            <>
+              <div className={`sim-summary ${result.plan.length ? "sim-summary-ok" : "sim-summary-neutral"}`}>
+                {result.plan.length
+                  ? `${plural(result.plan.length, "node")} of ${result.total} can go, freeing ${fmtFreed(result.freed, memUnit, fmtMem)}.`
+                  : `No node can be removed — every one of the ${result.total} is either needed for headroom or blocked.`}
+              </div>
+              {result.pdbsChecked === false && <div className="sim-note">{PDB_UNCHECKED}</div>}
+
+              {result.plan.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Removal plan · {result.plan.length}</div>
+                  <div className="pod-rows">
+                    {result.plan.map((step, i) => (
+                      <PlanStep key={step.node} index={i} step={step} v={byNode.get(step.node)}
+                        memUnit={memUnit} fmtMem={fmtMem} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {conflicts.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Removable alone, not together · {conflicts.length}</div>
+                  <div className="pod-rows">
+                    {conflicts.map(v => (
+                      <NodeLine key={v.node} v={v} tone="warn" memUnit={memUnit} fmtMem={fmtMem}>
+                        <div className="sim-reasons sim-reasons-warn">
+                          <span title={v.conflictWith.join(", ")}>
+                            its pods no longer fit after removing {plural(v.conflictWith.length, "planned node")} first
+                          </span>
+                        </div>
+                      </NodeLine>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {blocked.length > 0 && (
+                <div className="sim-group">
+                  <div className="ov-section-title">Cannot be removed · {blocked.length}</div>
+                  <div className="pod-rows">
+                    {blocked.map(v => (
+                      <NodeLine key={v.node} v={v} tone="fail" memUnit={memUnit} fmtMem={fmtMem}>
+                        <div className="sim-reasons">
+                          {v.blockers.map(b => <span key={b.slug}>{blockerLabel(b)}</span>)}
+                        </div>
+                      </NodeLine>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <SimCaveat />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────── Can I scale this workload? ─────────── */
+
+// Matches the backend's MAX_REPLICAS; the static demo stores runs of this many copies.
+const MAX_REPLICAS = 100;
+// A DaemonSet runs one pod per matching node and a static pod belongs to its kubelet.
+const UNSCALABLE = ["DaemonSet", "Node"];
+
+// The workload a pinned key names, or null when it has no replica count to scale.
+// Only owned pods have a "namespace/Kind/name" key; a name-only key is a guess.
+function scalableWorkload(key) {
+  const parts = (key || "").split("/");
+  if (parts.length !== 3 || UNSCALABLE.includes(parts[1])) return null;
+  const [namespace, kind, name] = parts;
+  return { namespace, kind, name };
+}
+
+function fmtToleration(t) {
+  if (!t.key) return "*";
+  const kv = t.operator === "Exists" ? t.key : `${t.key}=${t.value || ""}`;
+  return t.effect ? `${kv}:${t.effect}` : kv;
+}
+
+function TemplateLine({ t, memUnit, fmtMem }) {
+  const ext = Object.entries(t.extended).sort().map(([name, v]) =>
+    `${name}=${isBytes(name) ? `${fmtMem(kbToMib(v), memUnit)} ${memUnit}` : v}`);
+  const selector = Object.entries(t.nodeSelector).map(([k, v]) => `${k}=${v}`);
+  return (
+    <div className="sim-template">
+      <span>copies of <code>{t.pod}</code></span>
+      <span>requests <code>{(t.cpu / 1000).toFixed(2)} cores · {fmtMem(kbToMib(t.memory), memUnit)} {memUnit}</code></span>
+      {ext.length > 0 && <span>extended <code>{ext.join(", ")}</code></span>}
+      {selector.length > 0 && <span>nodeSelector <code>{selector.join(", ")}</code></span>}
+      {(t.nodeAffinity || []).length > 0 && <span>node affinity <code>{fmtNodeAffinity(t.nodeAffinity)}</code></span>}
+      {(t.podAffinity || []).length > 0 && <span>pod affinity <code>{fmtPodTerms(t.podAffinity)}</code></span>}
+      {(t.podAntiAffinity || []).length > 0 && <span>pod anti-affinity <code>{fmtPodTerms(t.podAntiAffinity)}</code></span>}
+      {(t.topologySpread || []).length > 0 && (
+        <span>topology spread <code>{t.topologySpread.map(c => `maxSkew ${c.maxSkew} per ${c.topologyKey}`).join("; ")}</code></span>
+      )}
+      {t.tolerations.length > 0 && <span>tolerations <code>{t.tolerations.map(fmtToleration).join(", ")}</code></span>}
+    </div>
+  );
+}
+
+function replicasHeadline(r, current) {
+  const name = r.workload.name;
+  if (r.fits) {
+    const lead = r.requested === 1 ? "1 more replica fits" : `All ${r.requested} more replicas fit`;
+    return `${lead} — ${name} can scale from ${current} to ${current + r.requested}.`;
+  }
+  if (r.placed === 0) return `No more replicas fit — replica ${current + 1} of ${name} would stay Pending.`;
+  return `Only ${r.placed} of ${r.requested} more replicas fit — ${name} can grow from ${current} to ` +
+    `${current + r.placed}, and replica ${current + r.placed + 1} would stay Pending.`;
+}
+
+function ReplicasModal({ ctx, workload, current, memUnit, fmtMem, onSimulation, onClose }) {
+  // Asking to double the workload answers the common question without typing.
+  const initial = Math.min(Math.max(current, 1), MAX_REPLICAS);
+  const [countText, setCountText] = useState(String(initial));
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const count = Number(countText);
+  const valid = Number.isInteger(count) && count >= 1 && count <= MAX_REPLICAS;
+
+  const run = async (n) => {
+    setBusy(true);
+    try {
+      const res = await window.k8sApi.replicas(ctx, workload, n);
+      setResult(res);
+      setError(null);
+      onSimulation(replicasSimulation(res));
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => { run(initial); }, []);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (valid) run(count);
+  };
+
+  const landing = result
+    ? result.nodes.filter(v => v.replicas > 0).sort((a, b) => (b.replicas - a.replicas) || a.node.localeCompare(b.node))
+    : [];
+
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="overlay-card sim-card" onClick={e => e.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <div className="overlay-title">Can I scale {workload.name}?</div>
+            <div className="overlay-sub">
+              {workload.namespace}/{workload.kind} · {plural(current, "replica")} now · copy its pod and place each copy in turn
+            </div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
+        </div>
+
+        <form className="sim-form" onSubmit={submit}>
+          <label className="sim-field">
+            <span className="ov-label">More replicas</span>
+            <input type="number" min="1" max={MAX_REPLICAS} step="1" value={countText}
+              onChange={e => setCountText(e.target.value)} />
+          </label>
+          <div className="sim-actions">
+            {!valid && <span className="sim-error">Enter a whole number from 1 to {MAX_REPLICAS}</span>}
+            {error && <span className="sim-error">{error}</span>}
+            <button type="submit" className={`btn-primary ${busy ? "spinning" : ""}`} disabled={busy || !valid}>
+              {busy ? "Simulating…" : "Simulate"}
+            </button>
+          </div>
+        </form>
+
+        {result && (
+          <div className="overlay-pods">
+            <TemplateLine t={result.template} memUnit={memUnit} fmtMem={fmtMem} />
+            <div className={`sim-summary ${result.fits ? "sim-summary-ok" : "sim-summary-fail"}`}>
+              {replicasHeadline(result, current)}
+            </div>
+
+            {!result.fits && (
+              <div className="sim-group">
+                <div className="ov-section-title">Where it stops</div>
+                <div className="sim-reasons">
+                  <span>
+                    {result.total === 0
+                      ? "the cluster has no nodes"
+                      : `0/${result.total} nodes available: ` +
+                        result.pending.map(x => `${x.nodes} ${reasonLabel(x.slug)}`).join(", ")}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {landing.length > 0 && (
+              <div className="sim-group">
+                <div className="ov-section-title">Where they land · {plural(landing.length, "node")}</div>
+                <div className="pod-rows">
+                  {landing.map(v => (
+                    <div key={v.node} className="pod-row sim-row sim-row-ok">
+                      <div className="pod-row-name"><code>{v.node}</code></div>
+                      <div className="pod-row-stat">
+                        <span className="pod-row-num">+{v.replicas}</span>
+                        <span className="pod-row-unit">{v.replicas === 1 ? "replica" : "replicas"}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <SimCaveat />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 window.k8sSimulate = {
-  REASONS, reasonLabel, parseSelector, parseTolerations, fitSimulation, drainSimulation,
-  FitModal, DrainButton, DrainReport,
+  REASONS, reasonLabel, parseSelector, parseTolerations, fitSimulation, drainSimulation, consolidationSimulation,
+  replicasSimulation, scalableWorkload, FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal,
 };

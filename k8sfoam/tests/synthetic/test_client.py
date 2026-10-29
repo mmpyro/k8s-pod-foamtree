@@ -1,4 +1,6 @@
 import pytest
+from k8sfoam.src.common.dtos import DisruptionBudget
+from k8sfoam.src.common.scheduler import simulate_drain
 from k8sfoam.src.synthetic.client import SyntheticCluster, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP, shop
 
@@ -40,6 +42,32 @@ def test_cluster_reads_like_a_cluster_cache():
     assert len(nodes) == 16 and pods
     assert cluster.get_pod_resources() is not pods
     assert cluster.version == 0
+
+
+def test_cluster_lists_the_shops_disruption_budget():
+    # Given — catalog-db requires all three replicas up, so no eviction is allowed
+    cluster = SyntheticCluster(shop())
+
+    # When
+    budgets = cluster.get_disruption_budgets()
+
+    # Then
+    assert budgets == [DisruptionBudget('catalog-db', 'catalog',
+                                        {'matchLabels': {'app': 'catalog-db'}, 'matchExpressions': []}, 0)]
+
+
+def test_draining_a_catalog_db_node_is_blocked_by_its_budget():
+    # Given
+    cluster = SyntheticCluster(shop())
+    nodes, pods = cluster.get_node_resources(), cluster.get_pod_resources()
+    db_node = next(p.node_name for p in pods if p.owner_name == 'catalog-db')
+
+    # When
+    result = simulate_drain(db_node, nodes, pods, cluster.get_disruption_budgets())
+
+    # Then
+    assert [(b['namespace'], b['pdb'], b['disruptionsAllowed']) for b in result['blocked']] == [
+        ('catalog', 'catalog-db', 0)]
 
 
 def test_churn_bumps_the_version_and_wakes_watchers():

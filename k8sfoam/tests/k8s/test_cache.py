@@ -341,6 +341,20 @@ def test_warm_cache_makes_no_api_calls_per_refresh(core_v1, fake_watch):
         released.set()
 
 
+@patch('k8sfoam.src.k8s.cache.list_disruption_budgets')
+@patch('k8sfoam.src.k8s.cache.core_v1')
+def test_cache_lists_disruption_budgets_on_demand(core_v1, list_disruption_budgets):
+    # Given — only drains read them, so no informer keeps them warm
+    cache = ClusterCache('prod', 200)
+
+    # When
+    budgets = cache.get_disruption_budgets()
+
+    # Then
+    list_disruption_budgets.assert_called_once_with('prod', 200)
+    assert budgets is list_disruption_budgets.return_value
+
+
 @patch('k8sfoam.src.k8s.cache.core_v1')
 def test_cache_stops_itself_when_the_initial_list_fails(core_v1, fake_watch):
     # Given
