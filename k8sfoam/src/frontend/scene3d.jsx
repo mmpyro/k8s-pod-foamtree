@@ -505,7 +505,10 @@ function Scene3D({
       const { top, x, z, plates } = w.meshes;
       const hit = ray.intersectObjects([top, x, z, plates], false)[0];
       if (!hit) return null;
-      if (hit.object === plates) return { node: w.plates[hit.instanceId].node };
+      if (hit.object === plates) {
+        const node = w.plates[hit.instanceId].node;
+        return node.hypothetical ? null : { node };
+      }
       return { pod: w.cubes[hit.instanceId].pod };
     };
     // Hover drives both the tooltip and the peer preview, at most once a frame.
@@ -541,7 +544,9 @@ function Scene3D({
       const dpr = window.devicePixelRatio;
       renderer.setPixelRatio(dpr * scale);
       resize();
+      if (w.showGhosts) w.showGhosts(false);
       renderer.render(scene, cam);
+      if (w.showGhosts) w.showGhosts(true);
       const src = renderer.domElement;
       const out = document.createElement("canvas");
       out.width = src.width;
@@ -636,6 +641,27 @@ function Scene3D({
     });
     root.add(plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos);
 
+    // Hypothetical plates get a dashed outline on top, like the 2D card's border.
+    const ghostPlates = [], ghostCubes = [];
+    next.plates.forEach((p, i) => { if (p.node.hypothetical) ghostPlates.push(i); });
+    next.cubes.forEach((c, i) => { if (c.node.hypothetical) ghostCubes.push(i); });
+    const edges = [];
+    for (const i of ghostPlates) {
+      const { x: px, z: pz } = next.plates[i], h = PLATE / 2, y = 0.3;
+      const corners = [[px - h, pz - h], [px + h, pz - h], [px + h, pz + h], [px - h, pz + h]];
+      corners.forEach(([ax, az], k) => {
+        const [bx, bz] = corners[(k + 1) % 4];
+        edges.push(ax, y, az, bx, y, bz);
+      });
+    }
+    const outlineGeometry = new THREE.BufferGeometry();
+    outlineGeometry.setAttribute("position", new THREE.Float32BufferAttribute(edges, 3));
+    const outline = new THREE.LineSegments(outlineGeometry, new THREE.LineDashedMaterial({
+      color: new THREE.Color(token("--text-soft", "#6b7388")), dashSize: 9, gapSize: 6,
+    }));
+    outline.computeLineDistances();
+    root.add(outline);
+
     // Zone / pool floors under their plates, framed by four thin strips. Both
     // opaque and below the plates' glow, so the glows still light them.
     const nz = Math.max(1, next.zones.length);
@@ -702,12 +728,30 @@ function Scene3D({
     Object.assign(w, {
       cubes: next.cubes, plates: next.plates, labels, zones: next.zones, zoneLabels,
       meshes: { top, x, z, rims, plates, grids, hatches, shadows, halos, plateGlows, plateInsets },
+      outline,
     });
+    // Exports leave hypothetical nodes out: zero-scale their instances for one
+    // frame, then put back the matrices they had.
+    w.showGhosts = (show) => {
+      const zero = new THREE.Matrix4().makeScale(0, 0, 0);
+      const plateMeshes = [rims, plates, grids, hatches, plateGlows, plateInsets];
+      const groups = [...plateMeshes.map(mesh => [mesh, ghostPlates]), ...[top, x, z, shadows, halos].map(mesh => [mesh, ghostCubes])];
+      for (const [mesh, indices] of groups) {
+        if (!indices.length) continue;
+        if (!show) mesh.userData.ghostMatrices = indices.map(i => { const k = new THREE.Matrix4(); mesh.getMatrixAt(i, k); return k; });
+        indices.forEach((i, k) => mesh.setMatrixAt(i, show ? mesh.userData.ghostMatrices[k] : zero));
+        mesh.instanceMatrix.needsUpdate = true;
+      }
+      for (const i of ghostPlates) labels[i].visible = show;
+      outline.visible = show;
+    };
     w.dispose = () => {
       const meshes = [plateGlows, rims, plates, grids, hatches, plateInsets, shadows, z, x, top, halos, floors, frames];
-      root.remove(...meshes, ...labels, ...zoneLabels);
+      root.remove(...meshes, ...labels, ...zoneLabels, outline);
       for (const o of meshes) { o.geometry.dispose(); o.material.dispose(); o.dispose(); }
       for (const s of [...labels, ...zoneLabels]) { s.material.map.dispose(); s.material.dispose(); }
+      outlineGeometry.dispose();
+      outline.material.dispose();
     };
 
     // Re-fit the camera only when the node count or the grouping changed, so a
@@ -780,20 +824,27 @@ function Scene3D({
       w.plates.forEach((p, i) => {
         const h = hueOf(p.idx), dim = look.plateDim(p.node), sev = worstSeverity(p.node.warnings);
         const verdict = verdicts && simColor[verdicts.get(p.node.name)];
-        set(w.meshes.plates, i, plateSurface(w.bg, h));
+        // A hypothetical plate is a ghost: page-coloured, no inlay, edged by the dashed outline.
+        const ghost = !!p.node.hypothetical;
+        set(w.meshes.plates, i, ghost ? w.bg : plateSurface(w.bg, h));
         setRGB(w.meshes.plateGlows.userData.color, i,
-          verdict ? scaled(verdict, 0.45) : scaled(hsl(h, 100, 50), GLOW.plateOuter));
-        setRGB(w.meshes.plateInsets.userData.color, i, scaled(hsl(h, 100, 55), dim ? 0 : GLOW.plateInset));
-        set(w.meshes.rims, i, verdict || mix(w.bg, hsl(h, 100, 62), GLOW.rim));
+          verdict ? scaled(verdict, ghost ? 0.3 : 0.45) : ghost ? [0, 0, 0] : scaled(hsl(h, 100, 50), GLOW.plateOuter));
+        setRGB(w.meshes.plateInsets.userData.color, i, scaled(hsl(h, 100, 55), dim || ghost ? 0 : GLOW.plateInset));
+        set(w.meshes.rims, i, ghost ? w.bg : verdict || mix(w.bg, hsl(h, 100, 62), GLOW.rim));
         // A plate the query ruled out drops its inlay, warning hatch included.
-        m.makeScale(dim ? 0 : PLATE, 1, dim ? 0 : PLATE).setPosition(p.x, 0.05, p.z);
+        m.makeScale(dim || ghost ? 0 : PLATE, 1, dim || ghost ? 0 : PLATE).setPosition(p.x, 0.05, p.z);
         w.meshes.grids.setMatrixAt(i, m);
         set(w.meshes.grids, i, [1, 1, 1]);
         m.makeScale(dim || !sev ? 0 : PLATE, 1, dim || !sev ? 0 : PLATE).setPosition(p.x, 0.1, p.z);
         w.meshes.hatches.setMatrixAt(i, m);
         set(w.meshes.hatches, i, sev ? sevColor[sev] : [0, 0, 0]);
-        w.labels[i].material.opacity = dim ? 0.38 : 1;
+        w.labels[i].material.opacity = dim ? 0.38 : ghost ? 0.7 : 1;
       });
+      // The outline takes the verdict of its plates, like the 2D dashed border; mixed verdicts stay neutral.
+      const ghostVerdicts = new Set(w.plates.filter(p => p.node.hypothetical).map(p => verdicts && verdicts.get(p.node.name)));
+      const outlineVerdict = ghostVerdicts.size === 1 ? simColor[[...ghostVerdicts][0]] : null;
+      const outlineRgb = outlineVerdict || hex(token("--text-soft", "#6b7388"));
+      w.outline.material.color.setRGB(outlineRgb[0], outlineRgb[1], outlineRgb[2], THREE.SRGBColorSpace);
       // A group whose every node the query ruled out steps back with them.
       w.zones.forEach((zn, i) => {
         const dim = zn.group.items.every(it => look.plateDim(it.node));

@@ -110,6 +110,8 @@ def shop(seed: int = DEFAULT_SEED) -> ClusterModel:
     m.deploy(Workload('catalog', 'catalog-db', 'StatefulSet', [
         Container('postgres', cpu='2', memory='8Gi', cpu_limit='2', memory_limit='8Gi',
                   extended={'ephemeral-storage': '10Gi'})], replicas=3))
+    # minAvailable equal to the replica count: no node running a replica can be drained.
+    m.add_budget('catalog', 'catalog-db', {'app': 'catalog-db'}, min_available=3)
     m.deploy(_web('cart', 'cart-api', 4, '200m', '256Mi', '512Mi'))
     # A cache that only runs on spot capacity (spof-spot).
     m.deploy(Workload('cart', 'cart-redis', 'StatefulSet', [
@@ -145,6 +147,16 @@ def shop(seed: int = DEFAULT_SEED) -> ClusterModel:
 
     # Someone's debug shell: no controller and no requests (naked-pod, BestEffort).
     m.deploy(Workload('default', 'debug-shell', None, [Container('shell')]))
+
+    # Pending pods, last so the layout above stays the same. The backfill needs an
+    # almost empty m5.2xlarge, which one more node of the general pool would be;
+    # nothing runs arm64; the import waits for Kueue to admit it.
+    m.deploy(Workload('batch', 'quarterly-backfill', 'Job', [
+        Container('backfill', cpu='7', memory='24Gi', memory_limit='24Gi')], keep_pending=True))
+    m.deploy(_web('storefront', 'web-arm-canary', 1, '250m', '512Mi', '1Gi',
+                  node_selector={'kubernetes.io/arch': 'arm64'}, keep_pending=True))
+    m.deploy(Workload('batch', 'catalog-import', 'Job', [Container('import', cpu='1', memory='2Gi', memory_limit='2Gi')],
+                      scheduling_gates=['kueue.x-k8s.io/admission']))
 
     m.cordon(general[3])
     m.set_condition(spot[1], 'MemoryPressure', True)

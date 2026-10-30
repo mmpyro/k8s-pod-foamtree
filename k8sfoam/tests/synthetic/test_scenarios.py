@@ -1,5 +1,5 @@
 import pytest
-from k8sfoam.src.common.scheduler import free_capacity
+from k8sfoam.src.common.scheduler import free_capacity, simulate_pending
 from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP, build_all, ml, platform, shop
 from k8sfoam.src.utils.extractors import ResourcesExtractor
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -85,7 +85,7 @@ def test_the_ml_cluster_offers_gpus_and_hugepages(clusters):
 
 
 @pytest.mark.parametrize('build', [shop, ml])
-def test_hand_built_clusters_leave_nothing_pending(build):
+def test_hand_built_clusters_place_every_replica(build):
     # Given
     m = build()
 
@@ -94,6 +94,37 @@ def test_hand_built_clusters_leave_nothing_pending(build):
 
     # Then
     assert short == []
+
+
+def test_only_the_shop_keeps_pending_pods_and_only_those_that_ask_for_it():
+    # Given
+    models = build_all()
+
+    # When
+    unbound = {m.context: sorted(p.metadata.labels['app'] for p in m.pods if p.spec.node_name is None)
+               for m in models}
+
+    # Then
+    assert unbound == {SHOP: ['catalog-import', 'quarterly-backfill', 'web-arm-canary'], ML: [], PLATFORM: []}
+
+
+def test_the_shop_backfill_fits_once_the_general_pool_grows(clusters):
+    # Given
+    nodes, pods, payload = clusters[SHOP]
+    general = next(n.name for n in nodes
+                   if n.labels.get('eks.amazonaws.com/nodegroup') == 'general' and not n.unschedulable)
+
+    # When
+    now = simulate_pending(nodes, pods)
+    grown = simulate_pending(nodes, pods, [{'template': general, 'count': 1}])
+
+    # Then — the arm64 canary fits nowhere either way; the gated import is never simulated
+    assert payload['pendingPods'] == 2
+    assert [p['pod'].startswith(('quarterly-backfill', 'web-arm-canary')) for p in now['pending']] == [True, True]
+    assert now['placements'] == []
+    assert [p['pod'].startswith('quarterly-backfill') for p in grown['placements']] == [True]
+    assert [p['pod'].startswith('web-arm-canary') for p in grown['pending']] == [True]
+    assert [g['gates'] for g in grown['gated']] == [['kueue.x-k8s.io/admission']]
 
 
 def test_the_platform_cluster_is_large(clusters):
@@ -115,7 +146,7 @@ def test_scheduled_pods_fit_their_nodes(clusters, context):
 
     # Then — DaemonSet pods skip the capacity check, but the layout still leaves room for them
     assert all(room['cpu'] >= 0 and room['memory'] >= 0 and room['pods'] >= 0 for room in free.values())
-    assert {p.node_name for p in pods} <= {n.name for n in nodes}
+    assert {p.node_name for p in pods if p.node_name is not None} <= {n.name for n in nodes}
 
 
 def test_platform_builds_from_any_seed():

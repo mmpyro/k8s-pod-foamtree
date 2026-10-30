@@ -7,8 +7,10 @@ from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
-from k8sfoam.src.common.dtos import PodResources
-from k8sfoam.src.common.scheduler import simulate_fit, simulate_drain
+from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_EXTRA_NODES, MAX_REPLICAS, UnknownTemplate,
+                                          simulate_consolidation, simulate_drain, simulate_fit, simulate_pending,
+                                          simulate_replicas)
 from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 
@@ -26,16 +28,42 @@ def get_version() -> str:
         return 'unknown'
 
 
-def parse_pod_spec(body) -> PodResources:
-    """Hypothetical pod from the fit form. Raises ValueError on a malformed field."""
-    if not isinstance(body, dict):
-        raise ValueError('Request body must be a JSON object')
-    node_selector = body.get('nodeSelector') or {}
-    tolerations = body.get('tolerations') or []
-    if not isinstance(node_selector, dict) or not all(isinstance(v, str) for v in node_selector.values()):
-        raise ValueError('nodeSelector must map label keys to string values')
-    if not isinstance(tolerations, list) or not all(isinstance(t, dict) for t in tolerations):
-        raise ValueError('tolerations must be a list of objects')
+NODE_SELECTOR_OPERATORS = ('In', 'NotIn', 'Exists', 'DoesNotExist', 'Gt', 'Lt')
+
+
+def parse_requirement(r) -> dict:
+    """One matchExpressions entry, validated as the API server would. Raises ValueError."""
+    if not isinstance(r, dict) or not isinstance(r.get('key'), str) or not r['key']:
+        raise ValueError(f'Node affinity requirement needs a key: {r!r}')
+    operator, values = r.get('operator'), r.get('values') or []
+    if operator not in NODE_SELECTOR_OPERATORS:
+        raise ValueError(f'Node affinity operator must be one of {", ".join(NODE_SELECTOR_OPERATORS)}: {r!r}')
+    if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+        raise ValueError(f'Node affinity values must be a list of strings: {r!r}')
+    if operator in ('In', 'NotIn') and not values:
+        raise ValueError(f'{operator} needs at least one value: {r!r}')
+    if operator in ('Exists', 'DoesNotExist') and values:
+        raise ValueError(f'{operator} takes no values: {r!r}')
+    if operator in ('Gt', 'Lt') and (len(values) != 1 or not values[0].lstrip('-').isdigit()):
+        raise ValueError(f'{operator} needs exactly one integer value: {r!r}')
+    return {'key': r['key'], 'operator': operator, 'values': list(values)}
+
+
+def parse_node_affinity(terms) -> list:
+    """Required nodeSelectorTerms of the fit form, matchExpressions only. Raises ValueError."""
+    if not isinstance(terms, list) or not all(isinstance(t, dict) for t in terms):
+        raise ValueError('nodeAffinity must be a list of nodeSelectorTerms')
+    parsed = []
+    for term in terms:
+        expressions = term.get('matchExpressions')
+        if not isinstance(expressions, list) or not expressions:
+            raise ValueError('Every nodeAffinity term needs a non-empty matchExpressions list')
+        parsed.append({'matchExpressions': [parse_requirement(r) for r in expressions], 'matchFields': []})
+    return parsed
+
+
+def parse_quantities(body: dict) -> tuple:
+    """cpu (millicores), memory (kB) and the non-zero extended quantities of a body. Raises ValueError."""
     extended_spec = body.get('extended') or {}
     if not isinstance(extended_spec, dict):
         raise ValueError('extended must map resource names to quantities')
@@ -50,9 +78,112 @@ def parse_pod_spec(body) -> PodResources:
     except Exception:
         raise ValueError(f"Invalid quantity: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}, "
                          f"extended={extended_spec!r}")
+    return cpu, memory, {k: v for k, v in extended.items() if v}
+
+
+def parse_pod_spec(body) -> PodResources:
+    """Hypothetical pod from the fit form. Raises ValueError on a malformed field."""
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    node_selector = body.get('nodeSelector') or {}
+    tolerations = body.get('tolerations') or []
+    if not isinstance(node_selector, dict) or not all(isinstance(v, str) for v in node_selector.values()):
+        raise ValueError('nodeSelector must map label keys to string values')
+    if not isinstance(tolerations, list) or not all(isinstance(t, dict) for t in tolerations):
+        raise ValueError('tolerations must be a list of objects')
+    node_affinity = parse_node_affinity(body.get('nodeAffinity') or [])
+    cpu, memory, extended = parse_quantities(body)
     tolerations = [{k: t.get(k) for k in ('key', 'operator', 'value', 'effect')} for t in tolerations]
-    return PodResources('hypothetical', None, cpu, memory, [], [], extended={k: v for k, v in extended.items() if v},
-                        node_selector=node_selector, tolerations=tolerations)
+    return PodResources('hypothetical', None, cpu, memory, [], [], extended=extended,
+                        node_selector=node_selector, tolerations=tolerations, node_affinity=node_affinity)
+
+
+TAINT_EFFECTS = ('NoSchedule', 'PreferNoSchedule', 'NoExecute')
+# The kubelet's default maxPods, for a custom shape that does not say.
+DEFAULT_MAX_PODS = 110
+
+
+def _positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def parse_taints(taints) -> list:
+    """Taints of a custom node shape. Raises ValueError."""
+    if not isinstance(taints, list) or not all(isinstance(t, dict) for t in taints):
+        raise ValueError('taints must be a list of objects')
+    parsed = []
+    for t in taints:
+        if not isinstance(t.get('key'), str) or not t['key']:
+            raise ValueError(f'Taint needs a key: {t!r}')
+        if t.get('effect') not in TAINT_EFFECTS:
+            raise ValueError(f'Taint effect must be one of {", ".join(TAINT_EFFECTS)}: {t!r}')
+        if t.get('value') is not None and not isinstance(t['value'], str):
+            raise ValueError(f'Taint value must be a string: {t!r}')
+        parsed.append({'key': t['key'], 'value': t.get('value') or None, 'effect': t['effect']})
+    return parsed
+
+
+def parse_node_shape(shape) -> NodeResources:
+    """A custom hypothetical node: {cpu, memory, extended, pods, labels, taints}. Raises ValueError."""
+    if not isinstance(shape, dict):
+        raise ValueError('shape must be a JSON object')
+    labels = shape.get('labels') or {}
+    if not isinstance(labels, dict) or not all(isinstance(v, str) for v in labels.values()):
+        raise ValueError('shape labels must map label keys to string values')
+    pods = shape.get('pods', DEFAULT_MAX_PODS)
+    if not _positive_int(pods):
+        raise ValueError(f'shape pods must be a positive integer, got {pods!r}')
+    cpu, memory, extended = parse_quantities(shape)
+    if not cpu or not memory:
+        raise ValueError('shape needs a non-zero cpu and memory')
+    return NodeResources('', cpu, memory, taints=parse_taints(shape.get('taints') or []), extended=extended,
+                         labels=dict(labels), allocatable_pods=pods)
+
+
+def parse_extra_nodes(entries) -> list:
+    """`extraNodes` of a simulation body, as hypothetical_nodes() specs. Raises ValueError."""
+    if entries is None:
+        return []
+    if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+        raise ValueError('extraNodes must be a list of objects')
+    parsed = []
+    for entry in entries:
+        count = entry.get('count', 1)
+        if not _positive_int(count):
+            raise ValueError(f'extraNodes count must be a positive integer: {entry!r}')
+        if ('template' in entry) == ('shape' in entry):
+            raise ValueError(f'Every extraNodes entry needs either a template or a shape: {entry!r}')
+        if 'template' in entry:
+            if not isinstance(entry['template'], str) or not entry['template']:
+                raise ValueError(f'template must be a node name: {entry!r}')
+            parsed.append({'template': entry['template'], 'count': count})
+        else:
+            parsed.append({'shape': parse_node_shape(entry['shape']), 'count': count})
+    total = sum(spec['count'] for spec in parsed)
+    if total > MAX_EXTRA_NODES:
+        raise ValueError(f'At most {MAX_EXTRA_NODES} hypothetical nodes per simulation, got {total}')
+    return parsed
+
+
+def parse_simulation_body(body) -> list:
+    """The optional {extraNodes} body of drain and pending simulations. Raises ValueError."""
+    if body is None:
+        return []
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    return parse_extra_nodes(body.get('extraNodes'))
+
+
+def parse_replica_count(value: Optional[str]) -> int:
+    """`count` of a replica simulation. Raises ValueError unless it is 1..MAX_REPLICAS."""
+    message = f'count must be an integer from 1 to {MAX_REPLICAS}, got {value!r}'
+    try:
+        count = int(value or '')
+    except ValueError:
+        raise ValueError(message)
+    if not 1 <= count <= MAX_REPLICAS:
+        raise ValueError(message)
+    return count
 
 
 class Registry(Protocol):
@@ -142,25 +273,80 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
 
         @app.route('/simulate/fit', methods=['POST'])
         def simulate_pod_fit():
+            body = request.get_json(silent=True)
             try:
-                pod = parse_pod_spec(request.get_json(silent=True))
+                pod = parse_pod_spec(body)
+                extra = parse_extra_nodes(body.get('extraNodes'))
             except ValueError as ex:
                 return str(ex), 400
             try:
                 k8s_client = cluster(request.args.get('context'))
-                return jsonify(simulate_fit(pod, k8s_client.get_node_resources(), k8s_client.get_pod_resources()))
+                return jsonify(simulate_fit(pod, k8s_client.get_node_resources(), k8s_client.get_pod_resources(),
+                                            extra))
+            except UnknownTemplate as ex:
+                return str(ex), 400
             except Exception as ex:
                 return str(ex), 500
 
-        @app.route('/simulate/drain/<node_name>', methods=['GET'])
+        # POST carries an {extraNodes} body; GET drains onto the cluster as it is.
+        @app.route('/simulate/drain/<node_name>', methods=['GET', 'POST'])
         def simulate_node_drain(node_name: str):
             try:
+                extra = parse_simulation_body(request.get_json(silent=True)) if request.method == 'POST' else []
+            except ValueError as ex:
+                return str(ex), 400
+            try:
                 k8s_client = cluster(request.args.get('context'))
-                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+                result = simulate_drain(node_name, k8s_client.get_node_resources(), k8s_client.get_pod_resources(),
+                                        k8s_client.get_disruption_budgets(), extra)
+            except UnknownTemplate as ex:
+                return str(ex), 400
             except Exception as ex:
                 return str(ex), 500
             if result is None:
                 return f'Node {node_name} not found', 404
+            return jsonify(result)
+
+        @app.route('/simulate/pending', methods=['POST'])
+        def simulate_pending_pods():
+            try:
+                extra = parse_simulation_body(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                return jsonify(simulate_pending(k8s_client.get_node_resources(), k8s_client.get_pod_resources(), extra))
+            except UnknownTemplate as ex:
+                return str(ex), 400
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/simulate/consolidation', methods=['GET'])
+        def simulate_cluster_consolidation():
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                return jsonify(simulate_consolidation(k8s_client.get_node_resources(), k8s_client.get_pod_resources(),
+                                                      k8s_client.get_disruption_budgets()))
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/simulate/replicas/<namespace>/<kind>/<name>', methods=['GET'])
+        def simulate_workload_replicas(namespace: str, kind: str, name: str):
+            try:
+                count = parse_replica_count(request.args.get('count'))
+            except ValueError as ex:
+                return str(ex), 400
+            # A DaemonSet runs one pod per matching node and a static pod belongs to its kubelet.
+            if kind in DRAIN_SKIPPED_OWNERS:
+                return f'{kind} pods have no replica count to scale', 400
+            try:
+                k8s_client = cluster(request.args.get('context'))
+                result = simulate_replicas(namespace, kind, name, count,
+                                           k8s_client.get_node_resources(), k8s_client.get_pod_resources())
+            except Exception as ex:
+                return str(ex), 500
+            if result is None:
+                return f'Workload {namespace}/{kind}/{name} not found', 404
             return jsonify(result)
 
         @app.route('/events', methods=['GET'])

@@ -4,8 +4,12 @@
 
 The site is the regular frontend bundle switched to static mode: instead of the
 HTTP API it reads JSON files holding what each endpoint would have answered.
-Every drain is precomputed; the fit simulator offers FIT_PRESETS only, since an
-arbitrary pod cannot be answered ahead of time.
+Every drain, the consolidation plan and the Pending pods' placement are
+precomputed against the cluster as it is; hypothetical nodes need the server.
+The fit simulator offers FIT_PRESETS only, since an arbitrary pod cannot be
+answered ahead of time. Each
+workload's replica simulation is stored once with MAX_REPLICAS copies; the
+frontend cuts it down to the count asked for.
 """
 import argparse
 import json
@@ -14,7 +18,8 @@ import shutil
 from pathlib import Path
 from typing import Any, List
 from k8sfoam.src.app import parse_pod_spec
-from k8sfoam.src.common.scheduler import simulate_drain, simulate_fit
+from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_REPLICAS, simulate_consolidation, simulate_drain,
+                                          simulate_fit, simulate_pending, simulate_replicas)
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -52,13 +57,27 @@ def _toleration_text(t: dict) -> str:
     return f"{text}:{t['effect']}" if t.get('effect') else text
 
 
+def _requirement_text(r: dict) -> str:
+    """One node affinity expression in the fit modal's syntax: `key in (a,b)`, `key`, `!key` or `key gt N`."""
+    operator, values = r['operator'], r.get('values') or []
+    if operator in ('In', 'NotIn'):
+        return f"{r['key']} {operator.lower()} ({','.join(values)})"
+    if operator == 'Exists':
+        return r['key']
+    if operator == 'DoesNotExist':
+        return f"!{r['key']}"
+    return f"{r['key']} {operator.lower()} {values[0]}"
+
+
 def preset_form(spec: dict) -> dict:
-    """The fit modal's text fields for a preset spec."""
+    """The fit modal's text fields for a preset spec. The modal holds a single node affinity term."""
+    terms = spec.get('nodeAffinity') or []
     return {
         'cpu': spec.get('cpu', ''),
         'memory': spec.get('memory', ''),
         'extended': ', '.join(f'{k}={v}' for k, v in (spec.get('extended') or {}).items()),
         'nodeSelector': ', '.join(f'{k}={v}' for k, v in (spec.get('nodeSelector') or {}).items()),
+        'nodeAffinity': ', '.join(_requirement_text(r) for r in terms[0]['matchExpressions']) if terms else '',
         'tolerations': ', '.join(_toleration_text(t) for t in spec.get('tolerations') or []),
     }
 
@@ -92,13 +111,20 @@ def export_data(data_dir: Path, seed: int = DEFAULT_SEED) -> None:
            [{'id': p['id'], 'label': p['label'], 'form': preset_form(p['spec'])} for p in FIT_PRESETS])
     for c in contexts:
         cluster = registry.get(c['context'])
-        nodes, pods = cluster.get_node_resources(), cluster.get_pod_resources()
+        nodes, pods, pdbs = cluster.get_node_resources(), cluster.get_pod_resources(), cluster.get_disruption_budgets()
         out = data_dir / context_path(c['context'])
         _write(out / 'resources.json', FoamTreeMapper(iter(nodes), pods).combined())
         for node in nodes:
-            _write(out / 'drain' / f'{node.name}.json', simulate_drain(node.name, nodes, pods))
+            _write(out / 'drain' / f'{node.name}.json', simulate_drain(node.name, nodes, pods, pdbs))
+        _write(out / 'consolidation.json', simulate_consolidation(nodes, pods, pdbs))
+        _write(out / 'pending.json', simulate_pending(nodes, pods))
         for preset in FIT_PRESETS:
             _write(out / 'fit' / f"{preset['id']}.json", simulate_fit(parse_pod_spec(preset['spec']), nodes, pods))
+        workloads = {(p.namespace, p.owner_kind, p.owner_name) for p in pods
+                     if p.owner_kind and p.owner_name and p.owner_kind not in DRAIN_SKIPPED_OWNERS}
+        for namespace, kind, name in sorted(workloads):
+            _write(out / 'replicas' / namespace / kind / f'{name}.json',
+                   simulate_replicas(namespace, kind, name, MAX_REPLICAS, nodes, pods))
 
 
 def export_site(out_dir: Path, seed: int = DEFAULT_SEED, frontend_dir: Path = FRONTEND_DIR) -> None:

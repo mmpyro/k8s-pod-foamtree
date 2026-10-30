@@ -1,7 +1,7 @@
 import logging
 import threading
 from typing import Any, Dict, List, Optional
-from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources
 from k8sfoam.src.synthetic.model import ClusterModel
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED, build_all
 from k8sfoam.src.utils.extractors import ResourcesExtractor
@@ -19,7 +19,7 @@ class SyntheticCluster():
         self.__extractor = ResourcesExtractor()
         self.__changed = threading.Condition()
         self.__version = 0
-        self.__nodes, self.__pods = self.__extract()
+        self.__nodes, self.__pods, self.__budgets = self.__extract()
 
     @property
     def context(self) -> str:
@@ -44,11 +44,15 @@ class SyntheticCluster():
         with self.__changed:
             return list(self.__pods)
 
+    def get_disruption_budgets(self) -> List[DisruptionBudget]:
+        with self.__changed:
+            return list(self.__budgets)
+
     def churn(self) -> str:
         """Apply one random change to the cluster and tell the watchers."""
         with self.__changed:
             what = self.__model.churn()
-            self.__nodes, self.__pods = self.__extract()
+            self.__nodes, self.__pods, self.__budgets = self.__extract()
             self.__version += 1
             self.__changed.notify_all()
             return what
@@ -56,7 +60,8 @@ class SyntheticCluster():
     def __extract(self) -> tuple:
         nodes = [self.__extractor.extract_node_resources(n) for n in self.__model.nodes]
         pods = [self.__extractor.extract_pod_requested_resources(p) for p in self.__model.pods]
-        return nodes, pods
+        budgets = [self.__extractor.extract_disruption_budget(b) for b in self.__model.disruption_budgets()]
+        return nodes, pods, budgets
 
 
 class SyntheticRegistry():

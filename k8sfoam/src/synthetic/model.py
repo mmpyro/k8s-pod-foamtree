@@ -9,9 +9,11 @@ import random
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
-from kubernetes.client import (V1Container, V1Node, V1NodeCondition, V1NodeSpec, V1NodeStatus,  # type: ignore
-                               V1ObjectMeta, V1OwnerReference, V1Pod, V1PodSpec, V1PodStatus,
-                               V1ResourceRequirements, V1Taint, V1Toleration)
+from kubernetes.client import (V1Container, V1LabelSelector, V1Node, V1NodeCondition, V1NodeSpec,  # type: ignore
+                               V1NodeStatus, V1ObjectMeta, V1OwnerReference, V1Pod, V1PodDisruptionBudget,
+                               V1PodCondition, V1PodDisruptionBudgetSpec, V1PodDisruptionBudgetStatus,
+                               V1PodSchedulingGate, V1PodSpec, V1PodStatus, V1ResourceRequirements, V1Taint,
+                               V1Toleration)
 from kubernetes.utils import parse_quantity  # type: ignore
 from k8sfoam.src.common.node_status import PRESSURE_CONDITIONS
 from k8sfoam.src.common.scheduler import CORDON_TAINT, FILTER_EFFECTS, tolerates
@@ -55,6 +57,11 @@ class Workload:
     tolerations: List[dict] = field(default_factory=list)
     # Pod labels on top of `app` and the model's default_labels.
     labels: Dict[str, str] = field(default_factory=dict)
+    # Gated pods are created unbound: the scheduler skips them until the gates are removed.
+    scheduling_gates: List[str] = field(default_factory=list)
+    # A replica that fits nowhere is created anyway and stays Pending, as under a real
+    # controller; otherwise the model leaves it out so the layout stays clean.
+    keep_pending: bool = False
 
 
 @dataclass
@@ -77,6 +84,10 @@ class NodePool:
 # though newer kubernetes clients type them all as Optional.
 def _name(obj) -> str:
     return obj.metadata.name
+
+
+def _namespace(obj) -> str:
+    return obj.metadata.namespace
 
 
 def _labels(obj) -> Dict[str, str]:
@@ -163,6 +174,8 @@ class ClusterModel():
         self.nodes: List[V1Node] = []
         self.pods: List[V1Pod] = []
         self.workloads: List[Workload] = []
+        # (namespace, name, matchLabels, minAvailable): the specs; status follows the pods, see disruption_budgets().
+        self.__budgets: List[Tuple[str, str, Dict[str, str], int]] = []
         self.__alloc: Dict[str, Dict[str, Decimal]] = {}
         self.__free: Dict[str, Dict[str, Decimal]] = {}
         self.__zone: Dict[str, str] = {}
@@ -271,7 +284,7 @@ class ClusterModel():
         alloc, free = self.__alloc[name], self.__free[name]
         shares = [float((free[k] - demand.get(k, Decimal(0))) / alloc[k]) for k in ('cpu', 'memory') if alloc[k]]
         zone = _labels(node).get(ZONE)
-        siblings = [_node_of(p) for p in self.__pods_of[key]]
+        siblings = [_node_of(p) for p in self.__pods_of[key] if _node_of(p) is not None]
         same_node = siblings.count(name)
         same_zone = sum(1 for s in siblings if self.__zone[s] == zone)
         return min(shares, default=0.0) - 0.5 * same_node - 0.1 * same_zone + self.rng.uniform(0, 0.15)
@@ -282,7 +295,7 @@ class ClusterModel():
             free[k] = free.get(k, Decimal(0)) - sign * v
         free['pods'] = free.get('pods', Decimal(0)) - sign
 
-    def __pod_name(self, w: Workload, key: int, node_name: str) -> str:
+    def __pod_name(self, w: Workload, key: int, node_name: Optional[str]) -> str:
         if w.kind == 'Deployment':
             return f'{w.name}-{self.__template_hash[key]}-{self.suffix()}'
         if w.kind == 'StatefulSet':
@@ -295,10 +308,12 @@ class ClusterModel():
             return w.name if w.replicas == 1 else f'{w.name}-{len(self.__pods_of[key]) + 1}'
         return f'{w.name}-{self.suffix()}'
 
-    def __owner(self, w: Workload, key: int, node_name: str) -> Optional[V1OwnerReference]:
+    def __owner(self, w: Workload, key: int, node_name: Optional[str]) -> Optional[V1OwnerReference]:
         if w.kind is None:
             return None
         if w.kind == 'Node':
+            if node_name is None:
+                return None
             return V1OwnerReference(api_version='v1', kind='Node', name=node_name, uid=self.suffix(12), controller=True)
         kind, name = w.kind, w.name
         if kind == 'Deployment':
@@ -306,7 +321,8 @@ class ClusterModel():
         api_version = 'batch/v1' if kind == 'Job' else 'apps/v1'
         return V1OwnerReference(api_version=api_version, kind=kind, name=name, uid=self.suffix(12), controller=True)
 
-    def __bind(self, w: Workload, key: int, node_name: str, demand: Dict[str, Decimal]) -> V1Pod:
+    def __bind(self, w: Workload, key: int, node_name: Optional[str], demand: Dict[str, Decimal]) -> V1Pod:
+        """Create one pod of `w` on `node_name`; None leaves it Pending, reserving nothing."""
         defaults = self.default_labels if w.kind not in ('DaemonSet', 'Node') else {}
         labels = {'app': w.name, 'app.kubernetes.io/name': w.name, **defaults, **w.labels}
         annotations = {}
@@ -328,20 +344,34 @@ class ClusterModel():
                 init_containers=[_v1_container(c) for c in sidecars + inits] or None,
                 node_selector=dict(w.node_selector) or None,
                 tolerations=[V1Toleration(**t) for t in w.tolerations] or None,
+                scheduling_gates=[V1PodSchedulingGate(name=g) for g in w.scheduling_gates] or None,
             ),
-            status=V1PodStatus(phase='Running', qos_class=qos_class(w)),
+            status=self.__status(w, node_name),
         )
-        self.__reserve(node_name, demand, +1)
+        if node_name is not None:
+            self.__reserve(node_name, demand, +1)
         self.pods.append(pod)
         self.__pods_of[key].append(pod)
         return pod
 
+    def __status(self, w: Workload, node_name: Optional[str]) -> V1PodStatus:
+        if node_name is not None:
+            return V1PodStatus(phase='Running', qos_class=qos_class(w))
+        reason = 'SchedulingGated' if w.scheduling_gates else 'Unschedulable'
+        return V1PodStatus(phase='Pending', qos_class=qos_class(w),
+                           conditions=[V1PodCondition(type='PodScheduled', status='False', reason=reason)])
+
     def __place(self, w: Workload, key: int) -> Optional[V1Pod]:
-        """Bind one more replica of `w` to the best node it fits on; None when it would stay Pending."""
+        """Bind one more replica of `w` to the best node it fits on.
+
+        None when it would stay Pending, unless `w` keeps such pods or is gated.
+        """
         demand = effective_requests(w)
+        if w.scheduling_gates:
+            return self.__bind(w, key, None, demand)
         candidates = [n for n in self.nodes if self.__eligible(n, w) and self.__fits(_name(n), demand)]
         if not candidates:
-            return None
+            return self.__bind(w, key, None, demand) if w.keep_pending else None
         target = max(candidates, key=lambda n: self.__score(n, key, demand))
         return self.__bind(w, key, _name(target), demand)
 
@@ -361,6 +391,26 @@ class ClusterModel():
             for _ in range(w.replicas):
                 self.__place(w, key)
         return self.__pods_of[key]
+
+    def add_budget(self, namespace: str, name: str, match_labels: Dict[str, str], min_available: int) -> None:
+        """A PodDisruptionBudget with minAvailable over the pods its labels select."""
+        self.__budgets.append((namespace, name, dict(match_labels), min_available))
+
+    def disruption_budgets(self) -> List[V1PodDisruptionBudget]:
+        """The budgets with the status the disruption controller would report for the pods running now."""
+        budgets = []
+        for namespace, name, match_labels, min_available in self.__budgets:
+            in_namespace = [p for p in self.pods if _namespace(p) == namespace and _node_of(p) is not None]
+            healthy = sum(1 for p in in_namespace if all(_labels(p).get(k) == v for k, v in match_labels.items()))
+            budgets.append(V1PodDisruptionBudget(
+                api_version='policy/v1', kind='PodDisruptionBudget',
+                metadata=V1ObjectMeta(name=name, namespace=namespace),
+                spec=V1PodDisruptionBudgetSpec(min_available=min_available,
+                                               selector=V1LabelSelector(match_labels=match_labels)),
+                status=V1PodDisruptionBudgetStatus(current_healthy=healthy, desired_healthy=min_available,
+                                                   expected_pods=healthy,
+                                                   disruptions_allowed=max(0, healthy - min_available))))
+        return budgets
 
     def pods_of(self, w: Workload) -> List[V1Pod]:
         return list(self.__pods_of[self.workloads.index(w)])

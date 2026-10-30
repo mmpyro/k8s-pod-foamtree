@@ -1,4 +1,6 @@
 from unittest.mock import MagicMock
+from kubernetes.client import (V1LabelSelector, V1ObjectMeta, V1PodDisruptionBudget,  # type: ignore
+                               V1PodDisruptionBudgetSpec, V1PodDisruptionBudgetStatus)
 
 
 def create_list(items, next_page=None, resource_version='1') -> MagicMock:
@@ -14,7 +16,7 @@ def create_list(items, next_page=None, resource_version='1') -> MagicMock:
 def create_pod(name: str, node_name: str, containers=[], init_containers=None,
                namespace='default', labels=None, qos_class='Burstable', node_selector=None,
                tolerations=None, owner_kind='ReplicaSet', annotations=None, phase='Running',
-               owner_name=None) -> MagicMock:
+               owner_name=None, affinity=None, topology_spread_constraints=None, scheduling_gates=None) -> MagicMock:
     pod = MagicMock()
     metadata = MagicMock()
     metadata.name = name
@@ -29,6 +31,9 @@ def create_pod(name: str, node_name: str, containers=[], init_containers=None,
     spec.node_name = node_name
     spec.node_selector = node_selector
     spec.tolerations = tolerations
+    spec.affinity = affinity
+    spec.topology_spread_constraints = topology_spread_constraints
+    spec.scheduling_gates = scheduling_gates
     spec.containers = containers
     spec.init_containers = init_containers
     status = MagicMock()
@@ -87,6 +92,15 @@ def create_condition(type: str, status: str) -> MagicMock:
     condition.type = type
     condition.status = status
     return condition
+
+
+def create_pdb(name: str, namespace: str = 'default', match_labels=None, disruptions_allowed: int = 1,
+               selector: bool = True) -> V1PodDisruptionBudget:
+    return V1PodDisruptionBudget(
+        metadata=V1ObjectMeta(name=name, namespace=namespace),
+        spec=V1PodDisruptionBudgetSpec(selector=V1LabelSelector(match_labels=match_labels) if selector else None),
+        status=V1PodDisruptionBudgetStatus(current_healthy=0, desired_healthy=0, expected_pods=0,
+                                           disruptions_allowed=disruptions_allowed))
 
 
 def create_node(name: str, cpu: str, memory: str, unschedulable=None, taints=None,

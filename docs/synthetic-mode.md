@@ -18,7 +18,7 @@ Each cluster is one context in the sidebar, named the way EKS and GKE name their
 
 | Context | Shape | What to look at |
 | --- | --- | --- |
-| `demo-shop` (EKS, eu-west-1) | 16 nodes in four managed node groups over three zones; about 170 pods | a cordoned node, a node under memory pressure, tainted system and analytics nodes; every [audit rule](audit.md); a service mesh with native sidecars; all three QoS classes |
+| `demo-shop` (EKS, eu-west-1) | 16 nodes in four managed node groups over three zones; about 170 pods | a cordoned node, a node under memory pressure, tainted system and analytics nodes; every [audit rule](audit.md); a service mesh with native sidecars; all three QoS classes; two [pending pods](simulators.md#do-the-pending-pods-fit) and a scheduling-gated one |
 | `gke_demo-ml_us-central1_ml-training` (GKE) | 12 nodes: CPU, highmem with HugePages, A100 and spot L4 GPU pools | [GPUs](extended-resources.md) and their fragmentation, a node with stranded GPUs, a GPU notebook nobody owns, inference running only on spot |
 | `demo-platform` (EKS with Karpenter, us-east-1) | 102 nodes, about 1,500 pods | the [3D view](cubes-3d.md) at scale, NotReady and pressured nodes, spot vs on-demand [topology](topology.md) |
 
@@ -64,11 +64,14 @@ It writes the dashboard (`index.html`, `bundle.js`, `styles.css`) and a `data/` 
 | `data/<context>/resources.json` | `GET /resources?context=<context>` |
 | `data/<context>/drain/<node>.json` | `GET /simulate/drain/<node>`, for every node |
 | `data/<context>/fit/<preset>.json` | `POST /simulate/fit` for each preset pod |
+| `data/<context>/pending.json` | `POST /simulate/pending` without hypothetical nodes |
 | `data/fit-presets.json` | the preset pods offered by the fit simulator |
 
-Every drain is precomputed. Any pod can be sent to the fit simulator, so its answers cannot all be computed ahead of
-time: in the demo it offers a few presets (a small service, a big batch job, an in-memory cache, a GPU inference pod, a
-scratch-heavy worker and a node agent that tolerates every taint). Run `k8sfoams --synthetic` to try any other pod.
+Every drain and the pending pods simulation are precomputed. Any pod can be sent to the fit simulator, so its answers
+cannot all be computed ahead of time: in the demo it offers a few presets (a small service, a big batch job, an
+in-memory cache, a GPU inference pod, a scratch-heavy worker and a node agent that tolerates every taint). The same
+goes for [hypothetical nodes](simulators.md#what-if-i-add-nodes), which the demo leaves out. Run
+`k8sfoams --synthetic` to try any other pod or node shape.
 
 The `index.html` the export writes sets `window.K8SFOAM_STATIC`, which switches the bundle from the HTTP API to these
 files. Add `?embed=1` to its URL to start with the sidebar collapsed and a button that opens the full-page demo; the
