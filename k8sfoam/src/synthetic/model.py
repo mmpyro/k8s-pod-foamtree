@@ -86,6 +86,10 @@ def _name(obj) -> str:
     return obj.metadata.name
 
 
+def _namespace(obj) -> str:
+    return obj.metadata.namespace
+
+
 def _labels(obj) -> Dict[str, str]:
     return obj.metadata.labels
 
@@ -308,6 +312,8 @@ class ClusterModel():
         if w.kind is None:
             return None
         if w.kind == 'Node':
+            if node_name is None:
+                return None
             return V1OwnerReference(api_version='v1', kind='Node', name=node_name, uid=self.suffix(12), controller=True)
         kind, name = w.kind, w.name
         if kind == 'Deployment':
@@ -394,7 +400,7 @@ class ClusterModel():
         """The budgets with the status the disruption controller would report for the pods running now."""
         budgets = []
         for namespace, name, match_labels, min_available in self.__budgets:
-            in_namespace = [p for p in self.pods if p.metadata.namespace == namespace and _node_of(p) is not None]
+            in_namespace = [p for p in self.pods if _namespace(p) == namespace and _node_of(p) is not None]
             healthy = sum(1 for p in in_namespace if all(_labels(p).get(k) == v for k, v in match_labels.items()))
             budgets.append(V1PodDisruptionBudget(
                 api_version='policy/v1', kind='PodDisruptionBudget',
