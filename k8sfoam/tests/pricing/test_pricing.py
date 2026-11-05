@@ -163,3 +163,67 @@ def test_fetch_azure_keeps_linux_on_demand_rows():
     with patch('k8sfoam.src.pricing.fetchers.requests.get', return_value=page) as get:
         assert fetch_azure('eastus', ['Standard_D4s_v5']) == {'Standard_D4s_v5': 0.192}
     assert "armSkuName eq 'Standard_D4s_v5'" in get.call_args.kwargs['params']['$filter']
+
+
+def test_live_fetches_are_throttled(snapshot):
+    # Given — a fetcher that fails first, then recovers; a clock the test moves
+    calls, failing, clock = [], [True], [1000.0]
+
+    def fetcher(region, types):
+        calls.append(types)
+        if failing[0]:
+            raise RuntimeError('throttled')
+        return {'m5.xlarge': 0.2}
+
+    book = PriceBook(snapshot_path=snapshot, fetchers={'aws': fetcher})
+
+    def ask_at(t):
+        clock[0] = t
+        result = book.price('aws', 'eu-west-1', 'm5.xlarge')
+        wait_for_fetch(book)
+        return result
+
+    with patch('k8sfoam.src.pricing.time.monotonic', side_effect=lambda: clock[0]):
+        ask_at(1000.0)
+        ask_at(1000.0 + 3599)
+        assert len(calls) == 1  # a failure is not retried within the hour
+        assert book.status()['liveErrors'] == {'aws': 'throttled'}
+
+        failing[0] = False
+        ask_at(1000.0 + 3601)
+        assert len(calls) == 2
+        assert book.status()['liveErrors'] == {}
+        assert book.price('aws', 'eu-west-1', 'm5.xlarge') == {'hourly': 0.2, 'source': 'live'}
+
+        ask_at(4601.0 + 24 * 3600 - 1)
+        assert len(calls) == 2  # a success is trusted for 24 h
+        ask_at(4601.0 + 24 * 3600 + 1)
+        assert len(calls) == 3
+
+
+def test_live_table_without_the_type_falls_back_to_snapshot(snapshot):
+    book = PriceBook(snapshot_path=snapshot, fetchers={'aws': lambda region, types: {'m5.large': 0.1}})
+
+    book.price('aws', 'eu-west-1', 'm5.xlarge')
+    wait_for_fetch(book)
+
+    assert book.price('aws', 'eu-west-1', 'm5.xlarge') == {'hourly': 0.214, 'source': 'snapshot'}
+
+
+def test_snapshot_keeps_the_previous_table_of_a_failing_provider(snapshot):
+    from k8sfoam.src.pricing import load_snapshot
+    from k8sfoam.src.pricing.snapshot import main
+
+    def no_credentials():
+        raise RuntimeError('Unable to locate credentials')
+
+    builders = {'aws': no_credentials, 'azure': lambda: {'eastus': {'Standard_D4s_v5': 0.192}}, 'gcp': lambda: {}}
+    with patch.dict('k8sfoam.src.pricing.snapshot.BUILDERS', builders), \
+            patch('sys.argv', ['snapshot', 'aws', 'azure', '--out', str(snapshot)]):
+        code = main()
+
+    prices = load_snapshot(snapshot)['prices']
+    assert code == 1
+    assert prices['aws'] == {'eu-west-1': {'m5.xlarge': 0.214}}
+    assert prices['azure'] == {'eastus': {'Standard_D4s_v5': 0.192}}
+    assert prices['gcp'] == {'us-central1': {'e2/core': 0.02, 'e2/ram': 0.003}}

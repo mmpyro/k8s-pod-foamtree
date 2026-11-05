@@ -1013,3 +1013,36 @@ def test_synthetic_clusters_stream_changes():
     # Then
     assert first == 'event: ready\ndata: 0\n\n'
     assert changed == 'event: changed\ndata: 1\n\n'
+
+
+def test_synthetic_mode_prices_from_the_snapshot_without_network():
+    # Given — every live price source would fail loudly if touched
+    import threading
+    fetcher = MagicMock(side_effect=AssertionError('network'))
+    registry = SyntheticRegistry(churn_interval=0)
+    try:
+        with patch.dict('k8sfoam.src.pricing.fetchers.FETCHERS', {'aws': fetcher, 'azure': fetcher, 'gcp': fetcher}), \
+                patch('k8sfoam.src.pricing.fetchers.requests.get', side_effect=AssertionError('network')) as get:
+            client = create_app(synthetic=registry).test_client()
+
+            # When
+            responses = [client.get(f'/resources?context={c}') for c in (SHOP, ML, PLATFORM)]
+            for t in threading.enumerate():
+                if t.name == 'price-fetch':
+                    t.join(5)
+
+        # Then
+        assert [r.status_code for r in responses] == [200, 200, 200]
+        fetcher.assert_not_called()
+        get.assert_not_called()
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize('context', [SHOP, ML, PLATFORM])
+def test_bundled_snapshot_prices_every_synthetic_node(synthetic_client, context):
+    response = synthetic_client.get(f'/resources?context={context}')
+
+    assert response.status_code == 200
+    assert response.json['pricing']['missing'] == []
+    assert all(n['price'] and n['price']['hourly'] > 0 for n in response.json['nodes'])
