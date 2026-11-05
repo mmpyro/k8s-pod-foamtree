@@ -127,7 +127,12 @@ function AdvisorModal({ ctx, model, consented, redact, setRedact, advice, onAsk,
           <>
             <div className="advisor-banner">AI-generated — verify before applying. The audit and health data stay the source of truth.</div>
             <div className="sim-actions advisor-actions">
-              {busy && <span className="sim-note">Asking {model}… a local model can take several minutes.</span>}
+              {busy && (
+                <span className="sim-note advisor-busy" role="status">
+                  <span className="advisor-spinner" aria-hidden="true" />
+                  Asking {model}… a local model can take several minutes.
+                </span>
+              )}
               {advice && advice.error && <span className="sim-error">{advice.error}</span>}
               {result && !busy && (
                 <span className="sim-note">{result.recommendations.length} recommendations{result.cached ? " · cached answer" : ""}</span>

@@ -1200,7 +1200,7 @@ function Sidebar({
         <div className="sidebar-section advisor-side">
           <div className="section-label">AI Advisor<span className="section-value">{advisor.model}</span></div>
           <button className={`btn-primary ${advice && advice.busy ? "spinning" : ""}`} onClick={onAdvisor}>
-            {advice && advice.busy ? "Asking…" : "Ask advisor"}
+            {advice && advice.busy ? <><span className="advisor-spinner" aria-hidden="true" />Asking…</> : "Ask advisor"}
           </button>
           {advice && advice.error && <span className="sim-error">{advice.error}</span>}
           {advice && advice.result && (
