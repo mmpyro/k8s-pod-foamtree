@@ -56,9 +56,11 @@ fixed snapshot. See [Synthetic mode](synthetic-mode.md).
 The most common ones:
 
 ```bash
-k8sfoams --host 0.0.0.0 --port 8080 -d   # listen on every interface, debug mode
-k8sfoams --page-size 200 --no-watch      # smaller LIST pages, no watch cache
-k8sfoams --synthetic --seed 7            # a different set of demo clusters
+k8sfoams --host 0.0.0.0 --allowed-host dash.internal   # listen on every interface; prints a URL with a token
+k8sfoams --page-size 200 --no-watch                     # smaller LIST pages, no watch cache
+k8sfoams --synthetic --seed 7                           # a different set of demo clusters
 ```
+
+Anything but `127.0.0.1` exposes your cluster to the network; see [Network access](cli.md#network-access).
 
 The full list is in the [command-line reference](cli.md).
