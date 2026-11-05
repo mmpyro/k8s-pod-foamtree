@@ -11,10 +11,31 @@ async function readJson(res) {
 
 const contextParam = ctx => (ctx ? `?context=${encodeURIComponent(ctx)}` : "");
 
+// A server on a non-loopback host prints http://host:port/#token=…. A fragment
+// never reaches the server or its logs; it is moved to sessionStorage and taken
+// out of the address bar, so urlstate and shared links never see it.
+const TOKEN_KEY = "k8sfoamToken";
+const TOKEN = (() => {
+  const params = new URLSearchParams(location.hash.slice(1));
+  const fromUrl = params.get("token");
+  try {
+    if (!fromUrl) return sessionStorage.getItem(TOKEN_KEY);
+    sessionStorage.setItem(TOKEN_KEY, fromUrl);
+  } catch (e) { /* storage blocked: the token lasts until a reload */ }
+  params.delete("token");
+  const rest = params.toString();
+  history.replaceState(null, "", `${location.pathname}${location.search}${rest ? `#${rest}` : ""}`);
+  return fromUrl;
+})();
+
+const apiFetch = (url, options = {}) => fetch(url, TOKEN
+  ? { ...options, headers: { ...options.headers, Authorization: `Bearer ${TOKEN}` } }
+  : options);
+
 // `workload` is { namespace, kind, name }, the owner the backend resolves pods to.
 const workloadPath = w => [w.namespace, w.kind, w.name].map(encodeURIComponent).join("/");
 
-const postJson = (url, body) => fetch(url, {
+const postJson = (url, body) => apiFetch(url, {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
@@ -23,24 +44,25 @@ const postJson = (url, body) => fetch(url, {
 // `extraNodes` is the hypothetical nodes' [{ template | shape, count }]; empty runs on the cluster as it is.
 const serverApi = {
   isStatic: false,
-  contexts: () => fetch("/contexts").then(readJson),
-  resources: ctx => fetch(`/resources${contextParam(ctx)}`).then(readJson),
+  contexts: () => apiFetch("/contexts").then(readJson),
+  resources: ctx => apiFetch(`/resources${contextParam(ctx)}`).then(readJson),
   fit: (ctx, spec) => postJson(`/simulate/fit${contextParam(ctx)}`, spec),
   drain: (ctx, nodeName, extraNodes = []) => {
     const url = `/simulate/drain/${encodeURIComponent(nodeName)}${contextParam(ctx)}`;
-    return extraNodes.length ? postJson(url, { extraNodes }) : fetch(url).then(readJson);
+    return extraNodes.length ? postJson(url, { extraNodes }) : apiFetch(url).then(readJson);
   },
   pending: (ctx, extraNodes = []) => postJson(`/simulate/pending${contextParam(ctx)}`, { extraNodes }),
-  consolidation: ctx => fetch(`/simulate/consolidation${contextParam(ctx)}`).then(readJson),
-  replicas: (ctx, workload, count) => fetch(
+  consolidation: ctx => apiFetch(`/simulate/consolidation${contextParam(ctx)}`).then(readJson),
+  replicas: (ctx, workload, count) => apiFetch(
     `/simulate/replicas/${workloadPath(workload)}?count=${count}${ctx ? `&context=${encodeURIComponent(ctx)}` : ""}`,
   ).then(readJson),
   // null when the server has no stream; the caller then polls.
-  events: ctx => new EventSource(`/events${contextParam(ctx)}`),
+  // EventSource cannot send headers, so the stream takes the token as a query parameter.
+  events: ctx => new EventSource(`/events${contextParam(ctx)}${TOKEN ? `${ctx ? "&" : "?"}token=${encodeURIComponent(TOKEN)}` : ""}`),
   fitPresets: () => Promise.resolve([]),
   // {enabled, model}; the API key never leaves the server.
-  advisorStatus: () => fetch("/advisor/status").then(readJson),
-  advisorPreview: (ctx, redact) => fetch(
+  advisorStatus: () => apiFetch("/advisor/status").then(readJson),
+  advisorPreview: (ctx, redact) => apiFetch(
     `/advisor/preview${contextParam(ctx)}${ctx ? "&" : "?"}redact=${redact}`,
   ).then(readJson),
   advisor: (ctx, redact) => postJson(`/advisor${contextParam(ctx)}`, { redact }),

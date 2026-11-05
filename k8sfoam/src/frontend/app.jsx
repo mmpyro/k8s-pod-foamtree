@@ -286,6 +286,7 @@ function App() {
       })
       .catch(err => {
         console.warn("Failed to fetch contexts:", err);
+        setError(err.message || String(err));
         setContexts([]);
         setContextIdx(0);
       });
@@ -728,6 +729,7 @@ function App() {
         query={query} setQuery={setQuery}
         cost={cost} pricing={pricing}
         advisor={advisor} advice={ctxAdvice} onAdvisor={openAdvisor} onAssistant={() => setAssistantOpen(true)}
+        error={error}
       />
 
       <main className="main">
@@ -921,7 +923,7 @@ function Sidebar({
   refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
   audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery, cost, pricing,
-  advisor, advice, onAdvisor, onAssistant
+  advisor, advice, onAdvisor, onAssistant, error
 }) {
   const is3d = view === "3d";
   return (
@@ -1233,9 +1235,9 @@ function Sidebar({
 
       <div className="sidebar-footer">
         <div className="footer-row">
-          <span className="dot dot-ok" />
-          <span>{api.isStatic ? "Synthetic demo data" : "Cluster connected"}</span>
-          <span className="footer-tail">{api.isStatic ? "Snapshot" : "Ready"}</span>
+          <span className={`dot ${error ? "dot-warn" : "dot-ok"}`} />
+          <span>{api.isStatic ? "Synthetic demo data" : error ? "Not connected" : "Cluster connected"}</span>
+          <span className="footer-tail">{api.isStatic ? "Snapshot" : error ? "Error" : "Ready"}</span>
         </div>
         <div className="footer-row dim">
           <span>{nodeCount} nodes</span>
