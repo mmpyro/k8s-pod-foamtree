@@ -1,6 +1,8 @@
 import argparse
 import hmac
 import ipaddress
+import logging
+import re
 import secrets
 import sys
 import time
@@ -28,6 +30,19 @@ DEBOUNCE = 1.0
 # A quiet stream still sends a comment this often, so a closed tab is noticed
 # (the write fails) and proxies do not drop the connection as idle.
 HEARTBEAT = 15.0
+
+TOKEN_IN_URL = re.compile(r'([?&]token=)[^&\s"]*')
+
+
+class RedactToken(logging.Filter):
+    """The dev server logs every request line, and /events carries the token in its query."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg, record.args = TOKEN_IN_URL.sub(r'\1<redacted>', record.getMessage()), ()
+        return True
+
+
+REDACT_TOKEN = RedactToken()
 
 
 # Host names that only reach this machine; always allowed as a Host header.
@@ -297,6 +312,12 @@ def non_negative_float(value: str) -> float:
     if number < 0:
         raise argparse.ArgumentTypeError(f'must be at least 0, got {value}')
     return number
+
+
+def non_empty(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError('must not be empty')
+    return value
 
 
 def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
@@ -573,7 +594,7 @@ def main():
     parser.add_argument('--churn-interval', type=non_negative_float, default=DEFAULT_CHURN_INTERVAL,
                         help='Seconds between random changes to the --synthetic clusters; 0 keeps them still')
     auth = parser.add_mutually_exclusive_group()
-    auth.add_argument('--token', type=str,
+    auth.add_argument('--token', type=non_empty,
                       help='Token every API call must carry; generated when --host is not a loopback address')
     auth.add_argument('--no-auth', action='store_true', help='Serve a non-loopback --host without a token')
     parser.add_argument('--allowed-host', action='append', default=[], metavar='NAME',
@@ -582,6 +603,9 @@ def main():
     args = parser.parse_args()
 
     exposed = not is_loopback(args.host)
+    if args.d and exposed:
+        parser.error('-d serves the Werkzeug debugger, which skips the token and Host checks; '
+                     'use it only on a loopback --host')
     token = None if args.no_auth else (args.token or (secrets.token_urlsafe(32) if exposed else None))
     if exposed:
         print(f'WARNING: listening on {args.host}: anyone who can reach port {args.port} can read this dashboard, '
@@ -596,5 +620,6 @@ def main():
     if args.synthetic:
         options['synthetic'] = SyntheticRegistry(args.seed, args.churn_interval)
     app = create_app(**options)
+    logging.getLogger('werkzeug').addFilter(REDACT_TOKEN)
     if app:
         app.run(host=args.host, port=args.port, debug=args.d)

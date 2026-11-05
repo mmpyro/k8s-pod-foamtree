@@ -1,3 +1,4 @@
+import logging
 import pytest
 import bitmath  # type: ignore
 from k8sfoam.src.app import LOOPBACK_HOSTS, create_app, main, change_events, host_name, is_loopback, DEBOUNCE
@@ -989,6 +990,35 @@ def test_main_token_options(argv, token):
 def test_main_rejects_token_with_no_auth():
     with patch('sys.argv', ['k8sfoams', '--token', 'x', '--no-auth']), pytest.raises(SystemExit):
         main()
+
+
+@pytest.mark.parametrize('token', ['', '  '])
+def test_main_rejects_an_empty_token(token):
+    with pytest.raises(SystemExit):
+        run_main('--token', token)
+
+
+@pytest.mark.parametrize('argv', [['--host', '10.0.0.5', '-d'], ['--host', '10.0.0.5', '--no-auth', '-d']])
+def test_main_refuses_debug_on_a_network_host(argv):
+    with pytest.raises(SystemExit):
+        run_main(*argv)
+
+
+def test_main_allows_debug_on_loopback():
+    assert run_main('-d')['token'] is None
+
+
+def test_server_log_redacts_the_token(caplog):
+    # Given
+    run_main()
+
+    # When: a request line as the Werkzeug dev server logs it.
+    with caplog.at_level(logging.INFO, logger='werkzeug'):
+        logging.getLogger('werkzeug').info('"%s" %s %s', 'GET /events?context=a&token=s3cret HTTP/1.1', '200', '-')
+
+    # Then
+    assert 's3cret' not in caplog.text
+    assert '"GET /events?context=a&token=<redacted> HTTP/1.1" 200 -' in caplog.text
 
 
 @pytest.fixture

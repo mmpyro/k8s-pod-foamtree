@@ -30,7 +30,7 @@ reached.
 When k8sfoams runs with a token (any non-loopback `--host`, or `--token`; see
 [Network access](cli.md#network-access)), every route except `/`, the static files and `/healthcheck` needs
 `Authorization: Bearer <token>`, and answers `401` without it. `GET /events` also takes `?token=<token>`, because a
-browser `EventSource` cannot set headers; no other route does.
+browser `EventSource` cannot set headers; no other route does. The server log shows it as `token=<redacted>`.
 
 Regardless of the token, a `Host` header the server was not told about returns `403`, and so does a `POST` whose `Origin`
 is another site. `/healthcheck` answers any `Host`, so probes can reach it by IP.
