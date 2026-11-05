@@ -92,9 +92,11 @@ def fetch_aws(region: str, types: Optional[List[str]]) -> Dict[str, float]:
 
 GCP_URL = 'https://cloudbilling.googleapis.com/v1/services/6F81-5844-456A/skus'  # Compute Engine
 # "N2 Instance Core running in Americas", "N1 Predefined Instance Ram running in Paris", "N2D AMD Instance Core …".
-# shortcut: Custom, Spot, sole-tenant, compute-/memory-optimized and GPU SKUs are not matched, so
-# c2, m1-m3, a2/a3/g2 machine types get no price (frontend warns); add their SKU wording when needed.
+# shortcut: Custom, Spot, sole-tenant and compute-/memory-optimized SKUs are not matched, so c2,
+# m1-m3 and custom machine types get no price (frontend warns); add their SKU wording when needed.
 _GCP_SKU = re.compile(r'^(?P<family>[A-Z][A-Z0-9]*) (?:Predefined |AMD )?Instance (?P<kind>Core|Ram) running in ')
+# "Nvidia Tesla A100 GPU running in Americas" (40GB), "Nvidia Tesla A100 80GB GPU …", "Nvidia L4 GPU …".
+_GCP_GPU_SKU = re.compile(r'^Nvidia (?:Tesla )?(?P<gpu>[A-Z0-9]+(?: \d+GB)?) GPU running in ')
 # GiB of memory per vCPU by family and class, from the machine type docs.
 GCP_GIB_PER_VCPU: Dict[str, Dict[str, float]] = {
     'e2': {'standard': 4, 'highmem': 8, 'highcpu': 1},
@@ -108,12 +110,29 @@ GCP_GIB_PER_VCPU: Dict[str, Dict[str, float]] = {
 # Shared-core E2: billed as a fraction of a vCPU.
 GCP_SHARED_CORE = {'e2-micro': ('e2', 0.25, 1), 'e2-small': ('e2', 0.5, 2), 'e2-medium': ('e2', 1, 4)}
 _GCP_TYPE = re.compile(r'^(?P<family>[a-z0-9]+)-(?P<cls>standard|highmem|highcpu)-(?P<vcpu>\d+)$')
+# Accelerator-optimized types: (vCPU, GiB, GPU rate key, GPU count), from the machine type docs. They bill
+# vCPU and memory at their family's rate plus every attached GPU.
+GCP_GPU_TYPES: Dict[str, Tuple[int, int, str, int]] = {
+    'a2-highgpu-1g': (12, 85, 'a100', 1), 'a2-highgpu-2g': (24, 170, 'a100', 2),
+    'a2-highgpu-4g': (48, 340, 'a100', 4), 'a2-highgpu-8g': (96, 680, 'a100', 8),
+    'a2-megagpu-16g': (96, 1360, 'a100', 16),
+    'a2-ultragpu-1g': (12, 170, 'a100-80gb', 1), 'a2-ultragpu-2g': (24, 340, 'a100-80gb', 2),
+    'a2-ultragpu-4g': (48, 680, 'a100-80gb', 4), 'a2-ultragpu-8g': (96, 1360, 'a100-80gb', 8),
+    'a3-highgpu-1g': (26, 234, 'h100-80gb', 1), 'a3-highgpu-2g': (52, 468, 'h100-80gb', 2),
+    'a3-highgpu-4g': (104, 936, 'h100-80gb', 4), 'a3-highgpu-8g': (208, 1872, 'h100-80gb', 8),
+    'g2-standard-4': (4, 16, 'l4', 1), 'g2-standard-8': (8, 32, 'l4', 1), 'g2-standard-12': (12, 48, 'l4', 1),
+    'g2-standard-16': (16, 64, 'l4', 1), 'g2-standard-24': (24, 96, 'l4', 2), 'g2-standard-32': (32, 128, 'l4', 1),
+    'g2-standard-48': (48, 192, 'l4', 4), 'g2-standard-96': (96, 384, 'l4', 8),
+}
 
 
 def gcp_shape(machine_type: str) -> Optional[Tuple[str, float, float]]:
     """(family, vCPU, GiB) of a predefined machine type; None for one the table does not know."""
     if machine_type in GCP_SHARED_CORE:
         return GCP_SHARED_CORE[machine_type]
+    if machine_type in GCP_GPU_TYPES:
+        vcpu, gib, _, _ = GCP_GPU_TYPES[machine_type]
+        return machine_type.split('-')[0], vcpu, gib
     m = _GCP_TYPE.match(machine_type)
     ratio = GCP_GIB_PER_VCPU.get(m['family'], {}).get(m['cls']) if m else None
     if m is None or ratio is None:
@@ -128,14 +147,19 @@ def _unit_price(sku: dict) -> float:
 
 
 def gcp_rates(skus: Iterator[dict]) -> Dict[str, Dict[str, float]]:
-    """{region: {'n2/core': usd per vCPU-hour, 'n2/ram': usd per GiB-hour}} from Compute SKUs."""
+    """{region: {'n2/core': usd per vCPU-hour, 'n2/ram': usd per GiB-hour, 'gpu/l4': usd per GPU-hour}}."""
     rates: Dict[str, Dict[str, float]] = {}
     for sku in skus:
-        category = sku.get('category', {})
-        m = _GCP_SKU.match(sku.get('description', ''))
-        if not m or category.get('usageType') != 'OnDemand' or not sku.get('pricingInfo'):
+        category, description = sku.get('category', {}), sku.get('description', '')
+        if category.get('usageType') != 'OnDemand' or not sku.get('pricingInfo'):
             continue
-        key = f"{m['family'].lower()}/{m['kind'].lower()}"
+        m, gpu = _GCP_SKU.match(description), _GCP_GPU_SKU.match(description)
+        if m:
+            key = f"{m['family'].lower()}/{m['kind'].lower()}"
+        elif gpu:
+            key = f"gpu/{gpu['gpu'].lower().replace(' ', '-')}"
+        else:
+            continue
         price = _unit_price(sku)
         for region in sku.get('serviceRegions') or []:
             rates.setdefault(region, {})[key] = price
@@ -171,7 +195,11 @@ def gcp_lookup(rates: dict, machine_type: str) -> Optional[float]:
         return None
     family, vcpu, gib = shape
     core, ram = rates.get(f'{family}/core'), rates.get(f'{family}/ram')
-    return vcpu * core + gib * ram if core is not None and ram is not None else None
+    if core is None or ram is None:
+        return None
+    _, _, gpu, count = GCP_GPU_TYPES.get(machine_type, (0, 0, '', 0))
+    gpu_rate = rates.get(f'gpu/{gpu}') if count else 0.0
+    return vcpu * core + gib * ram + count * gpu_rate if gpu_rate is not None else None
 
 
 def _per_type(table: dict, instance_type: str) -> Optional[float]:

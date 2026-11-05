@@ -98,7 +98,8 @@ def test_unsafe_label_values_never_reach_a_fetcher(snapshot):
     ('n2-highmem-8', ('n2', 8, 64)),
     ('n1-standard-2', ('n1', 2, 7.5)),
     ('e2-medium', ('e2', 1, 4)),
-    ('a2-highgpu-2g', None),
+    ('a2-highgpu-2g', ('a2', 24, 170)),
+    ('g2-standard-8', ('g2', 8, 32)),
     ('x9-standard-4', None),
 ])
 def test_gcp_shape(machine_type, shape):
@@ -121,6 +122,26 @@ def test_gcp_rates_from_catalog_skus():
     assert rates == {'us-central1': {'n2/core': 0.031611, 'n2/ram': 0.004237, 'n2d/core': 0.027502}}
     assert gcp_lookup(rates['us-central1'], 'n2-standard-2') == pytest.approx(2 * 0.031611 + 8 * 0.004237)
     assert gcp_lookup(rates['us-central1'], 'n2d-standard-2') is None
+
+
+def test_gcp_gpu_machine_type_adds_its_gpus():
+    rates = gcp_rates(iter([
+        {'description': d, 'category': {'usageType': 'OnDemand'}, 'serviceRegions': ['us-central1'],
+         'pricingInfo': [{'pricingExpression': {'tieredRates': [{'unitPrice': {'units': u, 'nanos': n}}]}}]}
+        for d, u, n in [('A2 Instance Core running in Americas', '0', 31611000),
+                        ('A2 Instance Ram running in Americas', '0', 4237000),
+                        ('Nvidia Tesla A100 GPU running in Americas', '2', 933908000),
+                        ('Nvidia Tesla A100 80GB GPU running in Americas', '3', 928080000),
+                        ('Nvidia H100 80GB Plus GPU running in Americas', '10', 344276000)]
+    ]))['us-central1']
+
+    assert rates['gpu/a100'] == pytest.approx(2.933908)
+    assert rates['gpu/a100-80gb'] == pytest.approx(3.92808)
+    assert 'gpu/h100-80gb' not in rates  # the Plus SKU prices a3-mega, not a3-high
+    # Google's published a2-highgpu-1g price in us-central1.
+    assert gcp_lookup(rates, 'a2-highgpu-1g') == pytest.approx(3.673385)
+    # No L4 rate in this table: a G2 type stays unpriced rather than priced without its GPU.
+    assert gcp_lookup(rates, 'g2-standard-8') is None
 
 
 def test_aws_product_price():

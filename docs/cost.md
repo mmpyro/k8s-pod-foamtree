@@ -26,8 +26,10 @@ stays hidden for them.
 | GCP | Cloud Billing Catalog | Application Default Credentials (`gcloud auth application-default login`) |
 
 GCP prices vCPU and memory per machine family, so k8sfoams prices a machine type from its shape
-(`n2-highmem-8` = 8 vCPU + 64 GiB). The predefined E2, N1, N2, N2D, N4, C3 and T2D shapes are covered. Custom, GPU
-(A2, A3, G2) and compute- or memory-optimized types get a *No price* warning.
+(`n2-highmem-8` = 8 vCPU + 64 GiB). The predefined E2, N1, N2, N2D, N4, C3 and T2D shapes are covered, and so are the
+GPU types A2 (`highgpu`, `megagpu`, `ultragpu`), A3 `highgpu` and G2, which add the price of each attached GPU
+(`g2-standard-8` = 8 vCPU + 32 GiB + 1 L4). Custom and compute- or memory-optimized types, and GPUs attached to N1
+nodes, get a *No price* warning.
 
 `--synthetic` clusters never go to the network. They use the snapshot alone.
 
