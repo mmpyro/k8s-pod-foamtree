@@ -251,7 +251,7 @@ def test_simulate_drain_honours_disruption_budgets(k8s_client, test_client):
     assert drain.status_code == 200
     assert drain.json['pdbsChecked'] is True
     assert drain.json['blocked'] == [{'pod': 'db-0', 'namespace': 'default', 'pdb': 'db-pdb',
-                                      'disruptionsAllowed': 0}]
+                                      'disruptionsAllowed': 0, 'multiplePdbs': False}]
     verdicts = {v['node']: v for v in consolidation.json['nodes']}
     assert verdicts['a']['blockers'] == [{'slug': 'pdb', 'pods': 1}]
 
@@ -535,6 +535,90 @@ def test_simulate_replicas_returns_internal_server_error(k8s_client, test_client
 
     # Then
     assert response.status_code == 500
+
+
+# --- PR #130 follow-up: input boundaries of the simulators ---
+
+@pytest.mark.parametrize('body', [{'cpu': '-1'}, {'cpu': '1', 'memory': '-1Gi'},
+                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': '-1'}},
+                                  {'cpu': '1', 'extraNodes': [{'shape': {'cpu': '-4', 'memory': '8Gi'}, 'count': 1}]},
+                                  {'cpu': '1', 'extraNodes': [{'shape': {'cpu': '4', 'memory': '-8Gi'}, 'count': 1}]}])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_rejects_negative_quantities(k8s_client, body, test_client):
+    # When — a negative request would fit every node, a negative shape would remove capacity
+    response = test_client.post('/simulate/fit', json=body)
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@pytest.mark.parametrize('value', ['--5', '\u00b2'])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_rejects_gt_values_that_are_not_integers(k8s_client, value, test_client):
+    # When — both pass isdigit() after lstrip('-') but are not integers
+    response = test_client.post('/simulate/fit', json=affinity_body({'key': 'cores', 'operator': 'Gt', 'values': [value]}))
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@pytest.mark.parametrize('counts, status', [((25, 26), 400), ((25, 25), 200)])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_limits_hypothetical_nodes_over_all_entries(k8s_client, counts, status, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+    extra = [{'template': 'a', 'count': counts[0]}, {'template': 'b', 'count': counts[1]}]
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'extraNodes': extra})
+
+    # Then
+    assert response.status_code == status
+    if status == 200:
+        assert response.json['total'] == 52
+
+
+@pytest.mark.parametrize('query', ['?count=1.5', '?count=-1'])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_rejects_counts_that_are_not_positive_integers(k8s_client, query, test_client):
+    # When
+    response = test_client.get(f'/simulate/replicas/default/Deployment/web{query}')
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_accepts_the_largest_count(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = replica_cluster()
+
+    # When — 100 is what the static demo precomputes
+    response = test_client.get('/simulate/replicas/default/Deployment/web?count=100')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['requested'] == 100
+    assert response.json['placed'] <= 100
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_post_without_a_json_body_drains_onto_the_cluster_as_it_is(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    get = test_client.get('/simulate/drain/a')
+    text = test_client.post('/simulate/drain/a', data='extraNodes', content_type='text/plain')
+    empty = test_client.post('/simulate/drain/a')
+
+    # Then
+    assert text.status_code == empty.status_code == 200
+    assert text.json == empty.json == get.json
+    assert text.json['hypotheticalNodes'] == []
 
 
 @patch('k8sfoam.src.app.K8sClient')

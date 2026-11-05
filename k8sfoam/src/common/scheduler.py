@@ -262,6 +262,16 @@ def _fits_node_affinity(pod: PodResources, node: NodeResources) -> bool:
     return not terms or any(node_selector_term_matches(t, node) for t in terms)
 
 
+def _unpinned(pod: PodResources) -> PodResources:
+    """A DaemonSet pod's node affinity as its DaemonSet asks for it.
+
+    The controller pins each pod to its node with a metadata.name matchField,
+    replacing any matchFields of the DaemonSet's own; a term left empty constrained nothing.
+    """
+    terms = [{**t, 'matchFields': []} for t in pod.node_affinity or []]
+    return pod._replace(node_affinity=[t for t in terms if t.get('matchExpressions')])
+
+
 def _tolerates_node(pod: PodResources, node: NodeResources) -> bool:
     taints = [*(node.taints or []), *([CORDON_TAINT] if node.unschedulable else [])]
     return all(t.get('effect') not in FILTER_EFFECTS or _tolerated(pod, t) for t in taints)
@@ -559,7 +569,7 @@ def daemon_pods(node: NodeResources, template: Optional[str], pods: Iterable[Pod
         for p in sorted(pods, key=lambda p: p.name):
             if p.owner_kind == 'DaemonSet' and p.node_name is not None:
                 samples.setdefault((p.namespace, p.owner_name), p)
-        own = [p for p in samples.values() if _fits_node_affinity(p, node) and _tolerates_node(p, node)]
+        own = [p for p in samples.values() if _fits_node_affinity(_unpinned(p), node) and _tolerates_node(p, node)]
     return [p._replace(name=f'{p.owner_name or p.name}-{node.name}', node_name=node.name) for p in own]
 
 
@@ -715,10 +725,15 @@ def _drain(node_name: str, nodes: list, pods: list, pdbs: Optional[list] = None,
     for pod in _biggest_first(evicted, alloc):
         budgets = [b for b in pdbs or []
                    if b.namespace == pod.namespace and label_selector_matches(b.selector, pod.labels or {})]
+        # The eviction API refuses a pod that more than one budget selects, whatever they allow.
+        if len(budgets) > 1:
+            blocked.append({'pod': pod.name, 'namespace': pod.namespace, 'pdb': ', '.join(b.name for b in budgets),
+                            'disruptionsAllowed': min(b.disruptions_allowed for b in budgets), 'multiplePdbs': True})
+            continue
         exhausted = next((b for b in budgets if allowance[(b.namespace, b.name)] < 1), None)
         if exhausted is not None:
             blocked.append({'pod': pod.name, 'namespace': pod.namespace, 'pdb': exhausted.name,
-                            'disruptionsAllowed': exhausted.disruptions_allowed})
+                            'disruptionsAllowed': exhausted.disruptions_allowed, 'multiplePdbs': False})
             continue
         for b in budgets:
             allowance[(b.namespace, b.name)] -= 1

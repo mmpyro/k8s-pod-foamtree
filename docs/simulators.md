@@ -40,7 +40,8 @@ the node and are listed separately. Naked pods (no controller) are flagged, beca
 PodDisruptionBudgets are honoured the way `kubectl drain` meets them: pods are evicted in the same biggest-first
 order, and each eviction uses up one of `status.disruptionsAllowed` of every budget in the pod's namespace whose
 selector matches it. Several evictions from one drain draw on the same budget. Once a budget is used up, its other
-pods are listed under **Blocked by PDB** and stay on the node: `kubectl drain` would keep retrying them. When the
+pods are listed under **Blocked by PDB** and stay on the node: `kubectl drain` would keep retrying them. A pod that
+more than one budget selects is blocked too, whatever they allow: the eviction API refuses it outright. When the
 server may not list PDBs (a `403` from RBAC), the report says *PodDisruptionBudgets not checked* instead of failing.
 
 Every node of every demo cluster has its drain precomputed. On demo-shop, most drains fit, but two do not:
@@ -140,7 +141,8 @@ and how many. In the drain and pending results, **+ Add nodes** sits under the s
 Every hypothetical node is Ready and schedulable, and is named `hypothetical-<instance-type>-<n>`
 (`hypothetical-custom-<n>` without an instance-type label). It also runs the DaemonSet pods a new node of its kind
 would: a copy runs its template's, and a custom shape runs one pod of every DaemonSet whose pod selects and tolerates
-it. Their requests count against its room, as they would on a real node.
+it, ignoring the `metadata.name` pin the DaemonSet controller adds to each pod. Their requests count against its room,
+as they would on a real node.
 
 On demo-shop, open *Do the pending pods fit?* and add one `m5.2xlarge`: `quarterly-backfill` lands on
 `hypothetical-m5.2xlarge-1`, while `web-arm-canary` still fits nowhere. That is the answer to *would one more general
