@@ -104,7 +104,7 @@ def create_pdb(name: str, namespace: str = 'default', match_labels=None, disrupt
 
 
 def create_node(name: str, cpu: str, memory: str, unschedulable=None, taints=None,
-                conditions=None, extended=None, labels=None, pods=None) -> MagicMock:
+                conditions=None, extended=None, labels=None, pods=None, provider_id=None) -> MagicMock:
     node = MagicMock()
     metadata = MagicMock()
     metadata.name = name
@@ -121,5 +121,6 @@ def create_node(name: str, cpu: str, memory: str, unschedulable=None, taints=Non
     spec = MagicMock()
     spec.unschedulable = unschedulable
     spec.taints = taints
+    spec.provider_id = provider_id
     node.spec = spec
     return node

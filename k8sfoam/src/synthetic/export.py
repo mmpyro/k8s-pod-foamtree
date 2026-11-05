@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 from typing import Any, List
 from k8sfoam.src.app import parse_pod_spec
+from k8sfoam.src.pricing import PriceBook
 from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_REPLICAS, simulate_consolidation, simulate_drain,
                                           simulate_fit, simulate_pending, simulate_replicas)
 from k8sfoam.src.synthetic.client import SyntheticRegistry
@@ -103,6 +104,7 @@ def static_index(frontend_dir: Path = FRONTEND_DIR) -> str:
 def export_data(data_dir: Path, seed: int = DEFAULT_SEED) -> None:
     """Every endpoint's answer for every synthetic context, as JSON files under `data_dir`."""
     registry = SyntheticRegistry(seed, churn_interval=0)
+    prices = PriceBook(live=False)
     contexts = registry.contexts()
     if data_dir.exists():
         shutil.rmtree(data_dir)
@@ -113,7 +115,7 @@ def export_data(data_dir: Path, seed: int = DEFAULT_SEED) -> None:
         cluster = registry.get(c['context'])
         nodes, pods, pdbs = cluster.get_node_resources(), cluster.get_pod_resources(), cluster.get_disruption_budgets()
         out = data_dir / context_path(c['context'])
-        _write(out / 'resources.json', FoamTreeMapper(iter(nodes), pods).combined())
+        _write(out / 'resources.json', FoamTreeMapper(iter(nodes), pods, prices).combined())
         for node in nodes:
             _write(out / 'drain' / f'{node.name}.json', simulate_drain(node.name, nodes, pods, pdbs))
         _write(out / 'consolidation.json', simulate_consolidation(nodes, pods, pdbs))

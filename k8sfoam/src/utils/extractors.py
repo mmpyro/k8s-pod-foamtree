@@ -203,6 +203,7 @@ class ResourcesExtractor():
         labels = dict(node.metadata.labels or {})
         # The pod slot count backs the simulator's pod-limit check; None when unreported.
         alloc_pods = int(parse_quantity(allocatable['pods'])) if 'pods' in allocatable else None
+        provider_id = node.spec.provider_id if node.spec is not None else None
         return NodeResources(node.metadata.name, cpu, memory, unschedulable,
                              self.__extract_node_taints(node), self.__extract_node_conditions(node),
-                             extract_extended(allocatable), labels, alloc_pods)
+                             extract_extended(allocatable), labels, alloc_pods, provider_id)

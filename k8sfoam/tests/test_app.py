@@ -606,6 +606,31 @@ def test_get_all_k8s_resources_lists_the_cluster_once(k8s_client, test_client):
 
 
 @patch('k8sfoam.src.app.K8sClient')
+def test_resources_answer_when_every_price_source_fails(k8s_client, tmp_path):
+    # Given — no snapshot on disk and a live fetcher that always raises
+    from k8sfoam.src.pricing import PriceBook
+
+    def broken(region, types):
+        raise RuntimeError('token expired')
+
+    prices = PriceBook(snapshot_path=tmp_path / 'missing.json.gz', fetchers={'aws': broken})
+    labels = {'topology.kubernetes.io/region': 'eu-west-1', 'node.kubernetes.io/instance-type': 'm5.xlarge'}
+    k8s_client.return_value.get_node_resources.return_value = [
+        NodeResources('worker', 2000, float(bitmath.GiB(1).kB), labels=labels, provider_id='aws:///eu-west-1a/i-1')]
+    k8s_client.return_value.get_pod_resources.return_value = []
+    test_client = create_app(watch=False, prices=prices).test_client()
+
+    # When
+    response = test_client.get('/resources')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['nodes'][0]['price'] is None
+    assert response.json['pricing']['missing'] == [
+        {'provider': 'aws', 'region': 'eu-west-1', 'instanceType': 'm5.xlarge', 'count': 1}]
+
+
+@patch('k8sfoam.src.app.K8sClient')
 def test_get_all_k8s_resources_returns_internal_server_error(k8s_client, test_client):
     # Given
     k8s_client.return_value.get_node_resources.side_effect = Exception('Cannot connect to k8s api')

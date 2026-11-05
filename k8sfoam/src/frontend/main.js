@@ -6,6 +6,7 @@ import "./resources.jsx";
 import "./nodestatus.jsx";
 import "./podaudit.jsx";
 import "./qos.jsx";
+import "./cost.jsx";
 import "./simulate.jsx";
 import "./topology.jsx";
 import "./query.jsx";

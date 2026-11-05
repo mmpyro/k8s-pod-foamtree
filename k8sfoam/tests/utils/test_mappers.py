@@ -503,3 +503,33 @@ def test_workload_rules_skip_pending_naked_and_static_pods():
     assert 'single-replica' in out['web-1']
     assert 'single-replica' not in out['debug']
     assert 'single-replica' not in out['etcd-a']
+
+
+def test_nodes_carry_price_and_unpriced_cloud_nodes_are_reported():
+    # Given — two priced m5s, one aws type the book lacks, one kind node that no cloud prices
+    from unittest.mock import MagicMock
+    labels = {'topology.kubernetes.io/region': 'eu-west-1', 'node.kubernetes.io/instance-type': 'm5.xlarge'}
+    unknown = {**labels, 'node.kubernetes.io/instance-type': 'x9.huge'}
+    nodes = [NodeResources('a', 2000, 1, labels=labels, provider_id='aws:///eu-west-1a/i-a'),
+             NodeResources('b', 2000, 1, labels=labels, provider_id='aws:///eu-west-1a/i-b'),
+             NodeResources('c', 2000, 1, labels=unknown, provider_id='aws:///eu-west-1a/i-c'),
+             NodeResources('kind', 2000, 1, provider_id='kind://docker/kind/kind')]
+    prices = MagicMock()
+    prices.price.side_effect = lambda provider, region, t: \
+        {'hourly': 0.214, 'source': 'snapshot'} if t == 'm5.xlarge' else None
+    prices.status.return_value = {'generated': '2026-11-01', 'liveErrors': {}}
+
+    # When
+    result = FoamTreeMapper(nodes, [], prices).combined()
+
+    # Then
+    assert [n['price'] for n in result['nodes']] == [{'hourly': 0.214, 'source': 'snapshot'}] * 2 + [None, None]
+    assert result['pricing'] == {'generated': '2026-11-01', 'liveErrors': {}, 'missing': [
+        {'provider': 'aws', 'region': 'eu-west-1', 'instanceType': 'x9.huge', 'count': 1}]}
+
+
+def test_mapper_without_price_book_emits_no_pricing():
+    result = FoamTreeMapper([NodeResources('minikube', 2000, 1)], []).combined()
+
+    assert result['nodes'][0]['price'] is None
+    assert result['pricing'] is None

@@ -219,6 +219,13 @@ class ClusterModel():
             labels['eks.amazonaws.com/capacityType'] = 'SPOT' if pool.spot else 'ON_DEMAND'
         return {**labels, **pool.labels}
 
+    def __provider_id(self, name: str, zone: str) -> str:
+        """spec.providerID as the cloud's node controller writes it; pricing reads the cloud from it."""
+        if self.provider == 'gke':
+            return f'gce://synthetic-project/{zone}/{name}'
+        # Named after the node, not drawn from the rng, so adding it left the seeded layouts as they were.
+        return f'aws:///{zone}/{name}'
+
     # ---- nodes -------------------------------------------------------------
 
     def add_pool(self, pool: NodePool) -> List[str]:
@@ -228,18 +235,19 @@ class ClusterModel():
             name = self.__node_name(pool)
             allocatable = {'cpu': pool.cpu, 'memory': pool.memory, 'pods': str(pool.pods),
                            'ephemeral-storage': pool.ephemeral_storage, **pool.extended}
+            zone = pool.zones[i % len(pool.zones)]
             conditions = [V1NodeCondition(type=t, status='False') for t in PRESSURE_CONDITIONS]
             conditions.append(V1NodeCondition(type='Ready', status='True'))
             taints = [V1Taint(key=t['key'], value=t.get('value'), effect=t['effect']) for t in pool.taints]
             self.nodes.append(V1Node(
                 api_version='v1', kind='Node',
-                metadata=V1ObjectMeta(name=name, labels=self.__node_labels(pool, name, pool.zones[i % len(pool.zones)])),
-                spec=V1NodeSpec(taints=taints or None),
+                metadata=V1ObjectMeta(name=name, labels=self.__node_labels(pool, name, zone)),
+                spec=V1NodeSpec(taints=taints or None, provider_id=self.__provider_id(name, zone)),
                 status=V1NodeStatus(allocatable=allocatable, capacity=dict(allocatable), conditions=conditions),
             ))
             self.__alloc[name] = _quantities(allocatable)
             self.__free[name] = dict(self.__alloc[name])
-            self.__zone[name] = pool.zones[i % len(pool.zones)]
+            self.__zone[name] = zone
             names.append(name)
         return names
 

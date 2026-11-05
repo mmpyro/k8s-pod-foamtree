@@ -50,6 +50,10 @@ tests_ci: check_types_ci static_code_analysis_ci bandit_ci unit_tests_ci
 build: web
 	uv build
 
+# Bundled on-demand price table; AWS and GCP need credentials, see docs/cost.md.
+prices:
+	uv run python -m k8sfoam.src.pricing.snapshot
+
 # The live demo the docs embed: the UI in static mode plus the synthetic clusters' data.
 docs-demo: web
 	uv run python -m k8sfoam.src.synthetic.export docs/demo

@@ -1,9 +1,10 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.common.node_status import node_warnings, stranded_devices
 from k8sfoam.src.common.node_topology import node_topology
 from k8sfoam.src.common.pod_audit import pod_findings, workload_findings
-from typing import Callable, Iterator
+from k8sfoam.src.pricing import PriceBook, provider_of
+from typing import Callable, Iterator, Optional
 
 
 def _value_getter(resource: str) -> Callable:
@@ -14,7 +15,9 @@ def _value_getter(resource: str) -> Callable:
 
 
 class FoamTreeMapper():
-    def __init__(self, node_resources: Iterator[NodeResources], pod_resources: list[PodResources]):
+    def __init__(self, node_resources: Iterator[NodeResources], pod_resources: list[PodResources],
+                 prices: Optional[PriceBook] = None):
+        self.__prices = prices
         # Materialised: available_resources() and transform() both walk the nodes.
         self.__nodes = list(node_resources)
         # Grouped once: scanning every pod for every node was O(nodes x pods).
@@ -85,20 +88,41 @@ class FoamTreeMapper():
 
         `warnings` is the render-ready verdict; `taints`/`conditions` are the raw
         facts the focus overlay spells out; `topology` drives the zone / pool grouping.
+        `price` is {hourly, source}, None when unpriced or no PriceBook was given.
         """
         taints = list(node.taints or [])
         conditions = dict(node.conditions or {})
         warnings = node_warnings(bool(node.unschedulable), taints, conditions)
         if stranded_devices(node, self.__node_usage(node)):
             warnings.append('stranded-devices')
+        topology = node_topology(node.labels)
+        price = self.__prices.price(provider_of(node.provider_id), topology['region'], topology['instanceType']) \
+            if self.__prices is not None else None
         return {
             'unschedulable': bool(node.unschedulable),
             'taints': taints,
             'conditions': conditions,
             'warnings': warnings,
             'extended': dict(node.extended or {}),
-            'topology': node_topology(node.labels),
+            'topology': topology,
+            'price': price,
         }
+
+    def __pricing(self, nodes: list) -> Optional[dict]:
+        """Snapshot date, live fetch errors and the cloud nodes left without a price.
+
+        Nodes on no known cloud (kind, bare metal) are not "missing": nothing could price them.
+        """
+        if self.__prices is None:
+            return None
+        missing: Counter = Counter()
+        for node, mapped in zip(self.__nodes, nodes):
+            provider = provider_of(node.provider_id)
+            if provider and mapped['price'] is None:
+                missing[(provider, mapped['topology']['region'], mapped['topology']['instanceType'])] += 1
+        return {**self.__prices.status(),
+                'missing': [{'provider': p, 'region': r, 'instanceType': t, 'count': c}
+                            for (p, r, t), c in sorted(missing.items(), key=str)]}
 
     def available_resources(self) -> list:
         """cpu and memory, then every extended resource some node can actually allocate."""
@@ -130,6 +154,7 @@ class FoamTreeMapper():
 
         `pendingPods` counts the unbound pods the scheduler is trying to place,
         i.e. without schedulingGates; the pending simulation says where they would go.
+        `pricing` is __pricing(), None without a PriceBook.
         """
         nodes = []
         for node in self.__nodes:
@@ -143,7 +168,8 @@ class FoamTreeMapper():
             nodes.append({'name': node.name, 'cpu': node.cpu or 0, 'memory': node.memory or 0,
                           'pods': pods, **self.__node_metadata(node)})
         pending = sum(1 for pod in self.__pods_by_node.get(None, []) if not pod.scheduling_gates)
-        return {'resources': self.available_resources(), 'nodes': nodes, 'pendingPods': pending}
+        return {'resources': self.available_resources(), 'nodes': nodes, 'pendingPods': pending,
+                'pricing': self.__pricing(nodes)}
 
     def transform_cpu_resources_to_foamtree(self) -> dict:
         return self.transform('cpu')
