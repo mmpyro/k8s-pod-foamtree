@@ -88,7 +88,8 @@ def parse_requirement(r) -> dict:
         raise ValueError(f'{operator} needs at least one value: {r!r}')
     if operator in ('Exists', 'DoesNotExist') and values:
         raise ValueError(f'{operator} takes no values: {r!r}')
-    if operator in ('Gt', 'Lt') and (len(values) != 1 or not values[0].lstrip('-').isdigit()):
+    # ASCII digits with an optional sign, like the API server's int64 parse; int() would also take '5_0' or '٣'.
+    if operator in ('Gt', 'Lt') and (len(values) != 1 or not re.fullmatch(r'[+-]?[0-9]+', values[0])):
         raise ValueError(f'{operator} needs exactly one integer value: {r!r}')
     return {'key': r['key'], 'operator': operator, 'values': list(values)}
 
@@ -121,6 +122,10 @@ def parse_quantities(body: dict) -> tuple:
         extended = {name: convert_extended(name, str(q)) for name, q in extended_spec.items()}
     except Exception:
         raise ValueError(f"Invalid quantity: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}, "
+                         f"extended={extended_spec!r}")
+    # A negative request would fit every node, a negative shape would take capacity away.
+    if cpu < 0 or memory < 0 or any(v < 0 for v in extended.values()):
+        raise ValueError(f"Quantities must not be negative: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}, "
                          f"extended={extended_spec!r}")
     return cpu, memory, {k: v for k, v in extended.items() if v}
 

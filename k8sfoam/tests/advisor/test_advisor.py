@@ -172,3 +172,45 @@ def test_advisor_rejects_a_bad_body(client, openai_client, body):
 
     assert response.status_code == 400
     openai_client.chat.completions.create.assert_not_called()
+
+
+def test_advisor_asks_again_when_redaction_flips(client, openai_client):
+    openai_client.chat.completions.create.return_value = _completion(json.dumps({'recommendations': []}))
+
+    redacted = client.post(f'/advisor?context={SHOP}', json={'redact': True})
+    real = client.post(f'/advisor?context={SHOP}', json={'redact': False})
+
+    assert redacted.json['cached'] is False and real.json['cached'] is False
+    assert openai_client.chat.completions.create.call_count == 2
+
+
+def test_advisor_asks_again_after_the_cluster_changes(openai_client):
+    # Own registry: churning the shared one would change what the other tests see.
+    registry = SyntheticRegistry(churn_interval=0)
+    try:
+        client = create_app(synthetic=registry, advisor=CONFIG).test_client()
+        openai_client.chat.completions.create.return_value = _completion(json.dumps({'recommendations': []}))
+        before = client.get(f'/advisor/preview?context={SHOP}').json
+        assert client.post(f'/advisor?context={SHOP}', json={}).json['cached'] is False
+
+        # A churn step may leave the summary as it was (a node flaps back); step until it differs.
+        for _ in range(20):
+            registry.get(SHOP).churn()
+            if client.get(f'/advisor/preview?context={SHOP}').json != before:
+                break
+        else:
+            pytest.fail('20 churn steps never changed the summary')
+
+        assert client.post(f'/advisor?context={SHOP}', json={}).json['cached'] is False
+        assert openai_client.chat.completions.create.call_count == 2
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize('value', ['False', 'FALSE', '0', 'no', ''])
+def test_preview_stays_redacted_unless_redact_is_exactly_false(client, value):
+    default = client.get(f'/advisor/preview?context={SHOP}').json
+
+    assert client.get(f'/advisor/preview?context={SHOP}&redact={value}').json == default
+    # The one value that turns it off really does, so the comparison above can fail.
+    assert client.get(f'/advisor/preview?context={SHOP}&redact=false').json != default

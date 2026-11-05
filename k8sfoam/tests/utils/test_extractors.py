@@ -756,3 +756,17 @@ def test_node_reads_allocatable_and_skips_non_requestable_keys():
     # Then
     assert node_resources.cpu == 8000
     assert node_resources.extended == {'nvidia.com/gpu': 4, 'ephemeral-storage': bitmath.GB(100).kB, 'hugepages-2Mi': 0}
+
+
+def test_should_extract_a_budget_without_status_as_allowing_no_disruptions():
+    # Given — the disruption controller has not processed the budget yet
+    from kubernetes.client import V1ObjectMeta, V1PodDisruptionBudget, V1PodDisruptionBudgetSpec  # type: ignore
+    pdb = V1PodDisruptionBudget(metadata=V1ObjectMeta(name='fresh', namespace='shop'),
+                                spec=V1PodDisruptionBudgetSpec(selector=V1LabelSelector()), status=None)
+
+    # When
+    budget = ResourcesExtractor().extract_disruption_budget(pdb)
+
+    # Then — an empty selector selects every pod of the namespace (policy/v1), and nothing may be evicted
+    assert budget.disruptions_allowed == 0
+    assert budget.selector == {'matchLabels': {}, 'matchExpressions': []}

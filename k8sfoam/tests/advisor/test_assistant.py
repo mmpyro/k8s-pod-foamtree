@@ -113,3 +113,43 @@ def test_assistant_redacts_names_and_restores_them_in_the_answer(client, openai_
     # The docs excerpts are public text and may name demo namespaces; the summary and the turns may not.
     assert namespace not in sent[0]['content'].split('Cluster summary:\n')[1].split('\nDocumentation pages:')[0] + json.dumps(sent[1:])
     assert response.json['sources'][0] == QUERY_REFERENCE
+
+
+def test_assistant_ignores_a_non_json_body(client, openai_client):
+    # A cross-site text/plain POST skips the CORS preflight; even a valid JSON payload must not reach the model.
+    response = client.post(f'/assistant?context={SHOP}', data=json.dumps({'question': 'hi'}), content_type='text/plain')
+
+    assert response.status_code >= 400
+    openai_client.chat.completions.create.assert_not_called()
+
+
+def _turns(count: int, content: str = 'ok') -> list:
+    return [{'role': ('user', 'assistant')[i % 2], 'content': content} for i in range(count)]
+
+
+@pytest.mark.parametrize('body, status', [
+    ({'question': 'x' * 2000}, 200),
+    ({'question': 'hi', 'history': _turns(20)}, 200),
+    ({'question': 'hi', 'history': _turns(21)}, 400),
+    ({'question': 'hi', 'history': _turns(1, 'x' * 8000)}, 200),
+    ({'question': 'hi', 'history': _turns(1, 'x' * 8001)}, 400),
+    ({'question': 'hi', 'history': None}, 400),
+])
+def test_assistant_body_limits(client, openai_client, body, status):
+    openai_client.chat.completions.create.return_value = _completion('An answer.')
+
+    response = client.post(f'/assistant?context={SHOP}', json={**body, 'redact': False})
+
+    assert response.status_code == status
+    assert openai_client.chat.completions.create.called == (status == 200)
+
+
+def test_assistant_sends_only_the_last_six_turns(client, openai_client):
+    openai_client.chat.completions.create.return_value = _completion('An answer.')
+    history = [{'role': ('user', 'assistant')[i % 2], 'content': f'turn {i}'} for i in range(20)]
+
+    response = client.post(f'/assistant?context={SHOP}', json={'question': 'last', 'history': history, 'redact': False})
+
+    assert response.status_code == 200
+    sent = openai_client.chat.completions.create.call_args.kwargs['messages']
+    assert [m['content'] for m in sent[1:]] == ['turn 14', 'turn 15', 'turn 16', 'turn 17', 'turn 18', 'turn 19', 'last']

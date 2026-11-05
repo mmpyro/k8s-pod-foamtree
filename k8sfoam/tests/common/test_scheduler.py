@@ -502,7 +502,8 @@ def test_simulate_drain_blocks_pods_beyond_the_disruption_budget():
     # Then — the bigger pod goes first and uses the budget up
     assert result['pdbsChecked'] is True
     assert [p['pod'] for p in result['placements']] == ['db-0', 'web']
-    assert result['blocked'] == [{'pod': 'db-1', 'namespace': 'default', 'pdb': 'db-pdb', 'disruptionsAllowed': 1}]
+    assert result['blocked'] == [{'pod': 'db-1', 'namespace': 'default', 'pdb': 'db-pdb', 'disruptionsAllowed': 1,
+                                  'multiplePdbs': False}]
     assert result['fits'] is True
 
 
@@ -1208,3 +1209,133 @@ def test_simulate_pending_reports_pods_that_never_fit_and_lists_gated_ones():
     assert [(p['pod'], p['reasons']) for p in result['pending']] == [('arm', [{'slug': 'node-selector', 'nodes': 4}])]
     assert result['gated'] == [{'pod': 'queued', 'namespace': 'default', 'gates': ['kueue.x-k8s.io/admission']}]
     assert result['total'] == 1
+
+
+# --- PR #130 follow-up: real-cluster shapes, budgets and consolidation edges ---
+
+def pinned(node_name):
+    """The node affinity the DaemonSet controller injects into each pod it creates."""
+    return [{'matchExpressions': [], 'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [node_name]}]}]
+
+
+def test_custom_shapes_run_daemonsets_pinned_to_their_node():
+    # Given — real DaemonSet pods are pinned to their own node by name (DaemonSet docs, "Scheduled by default scheduler")
+    pods = [daemon('proxy-a', 'a', 100, 'proxy', node_affinity=pinned('a')),
+            daemon('proxy-b', 'b', 100, 'proxy', node_affinity=pinned('b'))]
+
+    # When
+    result = simulate_fit(pod('new'), [node('a'), node('b')], pods, [{'shape': node(''), 'count': 1}])
+
+    # Then — a fresh node gets its own copy of the DaemonSet, so its overhead counts
+    assert [p['pod'] for p in result['hypotheticalNodes'][0]['daemonPods']] == ['proxy-hypothetical-custom-1']
+
+
+def test_simulate_pending_sends_a_pinned_daemonset_pod_only_to_its_node():
+    # Given — a has far more headroom, but the pending DaemonSet pod is pinned to b
+    nodes = [node('a', cpu=16000), node('b')]
+    pods = [daemon('proxy-b', None, 100, 'proxy', node_affinity=pinned('b'))]
+
+    # When
+    result = simulate_pending(nodes, pods)
+
+    # Then
+    assert [p['to'] for p in result['placements']] == ['b']
+
+
+def test_simulate_drain_blocks_a_pod_selected_by_two_budgets():
+    # Given — the eviction API refuses a pod with more than one PodDisruptionBudget, whatever they allow
+    pods = [pod('db-0', 'a', 100, labels={'app': 'db', 'tier': 'data'})]
+    pdbs = [budget('by-app', 1, app='db'), budget('by-tier', 1, tier='data')]
+
+    # When
+    result = simulate_drain('a', [node('a'), node('b')], pods, pdbs)
+
+    # Then
+    assert result['placements'] == []
+    assert result['blocked'] == [{'pod': 'db-0', 'namespace': 'default', 'pdb': 'by-app, by-tier',
+                                  'disruptionsAllowed': 1, 'multiplePdbs': True}]
+
+
+def test_simulate_drain_empty_budget_selector_blocks_every_pod_in_its_namespace():
+    # Given — in policy/v1 an empty selector selects every pod of the namespace
+    everything = DisruptionBudget('all', 'default', {'matchLabels': {}, 'matchExpressions': []}, 0)
+    pods = [pod('web', 'a', 100, labels={'app': 'web'}), pod('api', 'a', 100)._replace(namespace='other')]
+
+    # When
+    result = simulate_drain('a', [node('a'), node('b')], pods, [everything])
+
+    # Then
+    assert [b['pod'] for b in result['blocked']] == ['web']
+    assert [p['pod'] for p in result['placements']] == ['api']
+
+
+def test_simulate_drain_ignores_budgets_of_other_namespaces():
+    # Given — same labels, but the budget lives in another namespace
+    pods = [pod('db-0', 'a', 100, labels={'app': 'db'})]
+
+    # When
+    result = simulate_drain('a', [node('a'), node('b')], pods, [budget('db-pdb', 0, namespace='shop', app='db')])
+
+    # Then
+    assert result['blocked'] == []
+    assert [p['pod'] for p in result['placements']] == ['db-0']
+
+
+def test_simulate_consolidation_refills_budgets_between_steps():
+    # Given — one disruption allowed; b only has room for its own db pod, so a's goes to c
+    nodes = [node('a'), node('b', cpu=150), node('c', cpu=16000)]
+    pods = [pod('db-0', 'a', 100, labels={'app': 'db'}), pod('db-1', 'b', 100, labels={'app': 'db'}),
+            pod('filler', 'c', 3000)]
+
+    # When
+    result = simulate_consolidation(nodes, pods, [budget('db-pdb', 1, app='db')])
+
+    # Then — each step evicts one db pod, and the budget is whole again before the next step
+    assert [step['node'] for step in result['plan']] == ['a', 'b']
+    verdicts = {v['node']: v for v in result['nodes']}
+    assert verdicts['c']['conflictWith'] == ['a']
+
+
+def test_simulate_consolidation_conflict_from_a_budget_after_earlier_moves():
+    # Given — c is control plane; a and b are each removable alone
+    nodes = [node('a'), node('b'), node('c', cpu=1000, labels={'node-role.kubernetes.io/control-plane': ''})]
+    pods = [pod('db-0', 'a', 100, labels={'app': 'db'}), pod('db-1', 'b', 100, labels={'app': 'db'})]
+
+    # When
+    result = simulate_consolidation(nodes, pods, [budget('db-pdb', 1, app='db')])
+
+    # Then — removing a moves db-0 onto b, and then b holds two db pods against one disruption
+    verdicts = {v['node']: v for v in result['nodes']}
+    assert verdicts['b']['removable'] is True
+    assert [step['node'] for step in result['plan']] == ['a']
+    assert verdicts['b']['inPlan'] is False
+    assert verdicts['b']['conflictWith'] == ['a']
+
+
+def test_hypothetical_node_names_stay_unique_across_entries():
+    # Given
+    nodes = [node('a', labels={INSTANCE_TYPE: 'm5.large'}), node('b', labels={INSTANCE_TYPE: 'm5.large'})]
+    specs = [{'template': 'a', 'count': 2}, {'template': 'b', 'count': 1}, {'shape': node(''), 'count': 1}]
+
+    # When
+    made = hypothetical_nodes(specs, nodes)
+
+    # Then
+    assert [n.name for n in made] == ['hypothetical-m5.large-1', 'hypothetical-m5.large-2',
+                                      'hypothetical-m5.large-3', 'hypothetical-custom-1']
+
+
+def test_simulate_consolidation_on_a_5k_pod_cluster_runs_in_reasonable_time():
+    # Given — 100 nodes with 50 pods each; the UI asks for this on a GET
+    import time
+    nodes = [host(f'n{i}', f'z{i % 3}', cpu=64000, memory=256 * GI) for i in range(100)]
+    pods = [pod(f'p{i}-{j}', f'n{i}', 500, GI) for i in range(100) for j in range(50)]
+
+    # When
+    started = time.monotonic()
+    result = simulate_consolidation(nodes, pods)
+    elapsed = time.monotonic() - started
+
+    # Then — same bound as the inter-pod affinity test above
+    assert elapsed < 10, f'{elapsed:.1f}s'
+    assert result['total'] == 100
