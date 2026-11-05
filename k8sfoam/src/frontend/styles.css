@@ -1497,3 +1497,17 @@ button.advisor-chip:hover { color: var(--text); border-color: var(--accent); }
 .advisor-busy .advisor-spinner { width: 14px; height: 14px; color: var(--accent); }
 @media (prefers-reduced-motion: reduce) { .advisor-spinner { animation-duration: 2.5s; } }
 .advisor-side .sim-error, .advisor-side .sim-note { margin: 0; }
+.assistant-log { display: flex; flex-direction: column; gap: 10px; margin: 14px 22px 0; max-height: 52vh; min-height: 120px; overflow: auto; }
+.assistant-turn { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12.5px; line-height: 1.55; }
+.assistant-user { align-self: flex-end; max-width: 80%; background: var(--bg-2); }
+.assistant-assistant { background: var(--panel-2); }
+.assistant-text { white-space: pre-wrap; color: var(--text); }
+.assistant-text + .assistant-text, .assistant-code + .assistant-text { margin-top: 8px; }
+.assistant-code { margin: 8px 0; padding: 8px 10px; background: var(--bg-2); border-radius: 8px; overflow: auto; font-size: 11.5px; }
+.assistant-sources { margin-top: 8px; font-size: 10.5px; color: var(--text-soft); }
+.assistant-input { padding: 10px 22px 8px; }
+.assistant-input textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; padding: 8px 10px; font: inherit; font-size: 12.5px;
+  color: var(--text); background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.assistant-input textarea:focus { outline: none; border-color: var(--accent); }

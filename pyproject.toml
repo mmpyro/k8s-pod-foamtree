@@ -55,13 +55,21 @@ k8sfoams = "k8sfoam.src.app:main"
 artifacts = ["k8sfoam/src/frontend/bundle.js"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["k8sfoam"]
-only-include = ["k8sfoam"]
+# docs/*.md ship as k8sfoam/docs: the AI assistant answers from them.
+only-include = ["k8sfoam", "docs"]
 exclude = [
     "k8sfoam/tests",
+    "docs/demo",
+    "docs/images",
+    "docs/stylesheets",
+    "docs/requirements.txt",
 ]
+
+[tool.hatch.build.targets.wheel.sources]
+"docs" = "k8sfoam/docs"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/k8sfoam",
+    "/docs/*.md",
 ]

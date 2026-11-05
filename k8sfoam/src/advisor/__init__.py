@@ -93,15 +93,27 @@ def cache_key(config: AdvisorConfig, messages: List[dict]) -> str:
 
 def ask(config: AdvisorConfig, messages: List[dict]) -> List[dict]:
     """The model's recommendations, most severe first. Raises AdvisorError; never retries."""
+    return parse_recommendations(_complete(config, messages, response_format={
+        'type': 'json_schema', 'json_schema': {'name': 'recommendations', 'strict': True, 'schema': RESPONSE_SCHEMA}}))
+
+
+def chat(config: AdvisorConfig, messages: List[dict]) -> str:
+    """The model's free-text answer to the assistant's messages. Raises AdvisorError; never retries."""
+    answer = (_complete(config, messages) or '').strip()
+    if not answer:
+        raise AdvisorError('The model returned an empty answer', 502)
+    return answer
+
+
+def _complete(config: AdvisorConfig, messages: List[dict], **kwargs) -> Optional[str]:
+    """The text of one chat completion, provider errors mapped to AdvisorError."""
     import openai  # the optional `advisor` extra: load_config() returned None without it
 
     client = openai.OpenAI(api_key=config.api_key, base_url=config.base_url, max_retries=0, timeout=TIMEOUT)
     try:
         # Plain dicts, not the SDK's TypedDicts: the schema and messages are also served to the consent dialog.
-        response = client.chat.completions.create(  # type: ignore[call-overload]
-            model=config.model, messages=messages, temperature=0,
-            response_format={'type': 'json_schema',
-                             'json_schema': {'name': 'recommendations', 'strict': True, 'schema': RESPONSE_SCHEMA}})
+        response = client.chat.completions.create(
+            model=config.model, messages=messages, temperature=0, **kwargs)  # type: ignore[arg-type]
     except openai.AuthenticationError:
         raise AdvisorError('The LLM provider rejected the API key (OPENAI_API_KEY)', 401)
     except openai.RateLimitError:
@@ -114,7 +126,7 @@ def ask(config: AdvisorConfig, messages: List[dict]) -> List[dict]:
         raise AdvisorError(f'The LLM provider answered {ex.status_code}: {ex.message}', 502)
     if not response.choices:
         raise AdvisorError('The model returned no answer', 502)
-    return parse_recommendations(response.choices[0].message.content)
+    return response.choices[0].message.content
 
 
 def _strings(item: dict, keys: tuple, where: str) -> None:

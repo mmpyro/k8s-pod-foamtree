@@ -26,7 +26,7 @@ It visualizes **resource requests** — what the scheduler reserves — not live
 - **[Extended resources](https://mmpyro.github.io/k8s-pod-foamtree/extended-resources/)**: GPUs, ephemeral storage and HugePages, with fragmentation and stranded devices.
 - **[Export](https://mmpyro.github.io/k8s-pod-foamtree/export/)** to PNG, SVG, JSON or CSV, and **[shareable links](https://mmpyro.github.io/k8s-pod-foamtree/shareable-links/)** to any view.
 - **Live updates** from a watch cache, so scaling a Deployment shows up within seconds.
-- **[AI advisor](https://mmpyro.github.io/k8s-pod-foamtree/advisor/)** (optional): with an OpenAI-compatible key (or a local Ollama model), prioritised recommendations with YAML / `kubectl` fixes. Off by default; shows what it sends first and can redact names.
+- **[AI advisor](https://mmpyro.github.io/k8s-pod-foamtree/advisor/)** (optional): with an OpenAI-compatible key (or a local Ollama model), prioritised recommendations with YAML / `kubectl` fixes, and a chat that answers questions about k8sfoams and the cluster on screen. Off by default; shows what it sends first and can redact names.
 
 ## Installation
 

@@ -2,8 +2,9 @@ import argparse
 import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
-from typing import Any, Dict, Iterator, Optional, Protocol, Tuple
-from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, load_config
+from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
+from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, chat, load_config
+from k8sfoam.src.advisor.assistant import build_chat_messages
 from k8sfoam.src.advisor.summary import build_summary, unredact
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
@@ -204,6 +205,30 @@ def parse_advisor_body(body) -> bool:
     return redact
 
 
+MAX_QUESTION = 2000
+MAX_HISTORY = 20
+MAX_TURN = 8000
+
+
+def parse_assistant_body(body) -> Tuple[str, List[Dict[str, str]], bool]:
+    """(question, history, redact) of an assistant request. Raises ValueError."""
+    redact = parse_advisor_body(body)
+    question = body.get('question') if isinstance(body, dict) else None
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError('question must be a non-empty string')
+    if len(question) > MAX_QUESTION:
+        raise ValueError(f'question is longer than {MAX_QUESTION} characters')
+    history = body.get('history', [])
+    if not isinstance(history, list) or len(history) > MAX_HISTORY:
+        raise ValueError(f'history must be a list of at most {MAX_HISTORY} turns')
+    for turn in history:
+        if not isinstance(turn, dict) or turn.get('role') not in ('user', 'assistant') or not isinstance(turn.get('content'), str):
+            raise ValueError('each history turn must be {"role": "user" or "assistant", "content": "..."}')
+        if len(turn['content']) > MAX_TURN:
+            raise ValueError(f'a history turn is longer than {MAX_TURN} characters')
+    return question.strip(), [{'role': t['role'], 'content': t['content']} for t in history], redact
+
+
 class Registry(Protocol):
     """Where the clusters of each context come from: the watch caches, or the synthetic clusters."""
 
@@ -398,10 +423,13 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         # Last answer per context, keyed by a hash of model + messages: a page refresh spends no tokens.
         advice: Dict[Optional[str], Tuple[str, list]] = {}
 
-        def advisor_messages(context: Optional[str], redact: bool) -> Tuple[list, dict]:
+        def cluster_summary(context: Optional[str], redact: bool) -> Tuple[dict, dict]:
             k8s_client = cluster(context)
             combined = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book).combined()
-            payload, mapping = build_summary(combined, redact)
+            return build_summary(combined, redact)
+
+        def advisor_messages(context: Optional[str], redact: bool) -> Tuple[list, dict]:
+            payload, mapping = cluster_summary(context, redact)
             return build_messages(payload), mapping
 
         @app.route('/advisor/preview', methods=['GET'])
@@ -436,6 +464,24 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
                 return str(ex), 500
             advice[context] = (key, recommendations)
             return jsonify({'model': advisor.model, 'cached': False, 'recommendations': recommendations})
+
+        @app.route('/assistant', methods=['POST'])
+        def ask_assistant():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            try:
+                question, history, redact = parse_assistant_body(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            try:
+                payload, mapping = cluster_summary(request.args.get('context'), redact)
+                messages, sources = build_chat_messages(question, history, payload, mapping)
+                answer = unredact(chat(advisor, messages), mapping)
+            except AdvisorError as ex:
+                return str(ex), ex.status
+            except Exception as ex:
+                return str(ex), 500
+            return jsonify({'model': advisor.model, 'answer': answer, 'sources': sources})
 
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():

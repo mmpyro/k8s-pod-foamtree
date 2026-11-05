@@ -29,15 +29,15 @@ class _Names():
                              ('workload', {_workload(p)[1:] for p in pods})):
             for i, key in enumerate(sorted(keys, key=str), 1):
                 self.__ids[(prefix, key)] = f'{prefix}-{i}'
+                if redact:  # every name, not only those in the payload: the assistant redacts free text with it
+                    self.mapping[f'{prefix}-{i}'] = key[-1] if isinstance(key, tuple) else key
 
     def __call__(self, prefix: str, key: Any) -> Optional[str]:
         """The name to send for a node, pool, namespace or (kind, name) workload."""
         real = key[-1] if isinstance(key, tuple) else key
         if not self.redact or real is None:
             return real
-        placeholder = self.__ids[(prefix, key)]
-        self.mapping[placeholder] = real
-        return placeholder
+        return self.__ids[(prefix, key)]
 
 
 def _workload(pod: dict) -> Tuple[str, str, str]:
@@ -192,3 +192,15 @@ def unredact(value: Any, mapping: Dict[str, str]) -> Any:
     if isinstance(value, dict):
         return {k: unredact(v, mapping) for k, v in value.items()}
     return value
+
+
+def redact_text(text: str, mapping: Dict[str, str]) -> str:
+    """`text` with every real name of `mapping` swapped for its placeholder; the inverse of unredact.
+
+    Longest name first, and only whole names: `api` inside `payments-api` stays; a full stop may end a name.
+    """
+    placeholders = {real: placeholder for placeholder, real in sorted(mapping.items(), reverse=True)}
+    if not placeholders:
+        return text
+    names = '|'.join(re.escape(n) for n in sorted(placeholders, key=len, reverse=True))
+    return re.sub(rf'(?<![\w.-])(?:{names})(?![\w-]|\.\w)', lambda m: placeholders[m.group(0)], text)

@@ -16,7 +16,7 @@ const {
   FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal, PendingModal, drainSimulation,
   scalableWorkload,
 } = window.k8sSimulate;
-const { AdvisorModal } = window.k8sAdvisor;
+const { AdvisorModal, AssistantModal } = window.k8sAdvisor;
 
 const SIM_KINDS = {
   fit: "Fit simulation", drain: "Drain simulation", consolidation: "Consolidation", replicas: "Replica simulation",
@@ -235,6 +235,9 @@ function App() {
   const [advisorRedact, setAdvisorRedact] = useState(true);
   // Last ask: { ctx, busy } while waiting, then { ctx, result } or { ctx, error }.
   const [advice, setAdvice] = useState(null);
+  // Assistant chat: { ctx, turns, busy, error }; a new context starts a new chat.
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [chat, setChat] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
   // Unbound pods the scheduler is trying to place; offers the pending pods simulation.
@@ -310,6 +313,18 @@ function App() {
   const openAdvisor = () => {
     setAdvisorOpen(true);
     if (advisorConsent && !ctxAdvice) askAdvisor();
+  };
+  // Like askAdvisor: the request outlives the modal, and an answer for a context since left is dropped.
+  const ctxChat = chat && chat.ctx === ctxName ? chat : null;
+  const askAssistant = question => {
+    const ctx = ctxName;
+    const history = (ctxChat ? ctxChat.turns : []).map(({ role, content }) => ({ role, content }));
+    const turns = [...history, { role: "user", content: question }];
+    setChat({ ctx, turns, busy: true });
+    const settle = next => setChat(c => (c && c.ctx === ctx ? next : c));
+    api.assistant(ctx, { question, history, redact: advisorRedact })
+      .then(r => settle({ ctx, turns: [...turns, { role: "assistant", content: r.answer, sources: r.sources }] }))
+      .catch(err => settle({ ctx, turns, error: err.message || String(err) }));
   };
   const highlightAdvice = target => {
     if (target.workload) setSelectedWorkload(target.workload);
@@ -570,6 +585,7 @@ function App() {
       setReplicasOpen(false);
       setPendingOpen(false);
       setAdvisorOpen(false);
+      setAssistantOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -711,7 +727,7 @@ function App() {
         topology={topology}
         query={query} setQuery={setQuery}
         cost={cost} pricing={pricing}
-        advisor={advisor} advice={ctxAdvice} onAdvisor={openAdvisor}
+        advisor={advisor} advice={ctxAdvice} onAdvisor={openAdvisor} onAssistant={() => setAssistantOpen(true)}
       />
 
       <main className="main">
@@ -859,6 +875,11 @@ function App() {
           onCopy={copyText} onHighlight={highlightAdvice} onClose={() => setAdvisorOpen(false)} />
       )}
 
+      {assistantOpen && advisor && advisor.enabled && (
+        <AssistantModal model={advisor.model} redact={advisorRedact} setRedact={setAdvisorRedact} chat={ctxChat}
+          onSend={askAssistant} onClear={() => setChat(null)} onClose={() => setAssistantOpen(false)} />
+      )}
+
       <TweaksPanel>
         <TweakSection label="Color">
           <TweakRadio label="Color scheme" value={tw.colorScheme}
@@ -900,7 +921,7 @@ function Sidebar({
   refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
   audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery, cost, pricing,
-  advisor, advice, onAdvisor
+  advisor, advice, onAdvisor, onAssistant
 }) {
   const is3d = view === "3d";
   return (
@@ -1206,6 +1227,7 @@ function Sidebar({
           {advice && advice.result && (
             <span className="sim-note">{advice.result.recommendations.length} recommendations · AI-generated</span>
           )}
+          <button className="sim-preset" onClick={onAssistant}>Ask a question</button>
         </div>
       )}
 

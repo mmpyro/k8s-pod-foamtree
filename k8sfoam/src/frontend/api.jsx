@@ -44,6 +44,8 @@ const serverApi = {
     `/advisor/preview${contextParam(ctx)}${ctx ? "&" : "?"}redact=${redact}`,
   ).then(readJson),
   advisor: (ctx, redact) => postJson(`/advisor${contextParam(ctx)}`, { redact }),
+  // body: { question, history: [{ role, content }], redact } -> { model, answer, sources }
+  assistant: (ctx, body) => postJson(`/assistant${contextParam(ctx)}`, body),
 };
 
 // Shown when a fit is asked for a pod no file holds an answer for.
@@ -109,6 +111,7 @@ function staticApi(base) {
     advisorStatus: () => Promise.resolve({ enabled: false, model: null }),
     advisorPreview: () => Promise.reject(new Error(ADVISOR_OFF)),
     advisor: () => Promise.reject(new Error(ADVISOR_OFF)),
+    assistant: () => Promise.reject(new Error(ADVISOR_OFF)),
   };
 }
 

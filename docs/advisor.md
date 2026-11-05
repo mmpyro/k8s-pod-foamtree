@@ -80,5 +80,32 @@ Errors from the provider come back as a message in the panel, and nothing is ret
 invalid key (`401`), a rate limit (`429`), a timeout (`504`), an unreachable endpoint or malformed model output
 (`502`).
 
+## Ask a question
+
+**Ask a question**, under **Ask advisor** in the sidebar, opens a chat with the same model. It answers questions
+about using k8sfoams ("How do I simulate draining a node?") and about the cluster on screen ("Which namespace
+requests the most CPU?"), and follow-ups such as "How do I find its pods on the map?".
+
+![AI assistant answering a question](images/assistant.jpg)
+
+Each question sends:
+
+- the question, and the last 6 turns of the chat
+- the sections of these docs that best match the question and the previous one (a keyword search, about 6000
+  characters), plus the [query token reference](filtering.md#token-reference), which is always sent
+- the same cluster summary the advisor sends (see [What is sent](#what-is-sent))
+
+The docs ship inside the package, so it works offline with a local model. Type a question and press **Enter**
+(**Shift+Enter** adds a new line). Answers are AI-generated: they can be wrong, so check a fact on the map before you
+act on it.
+
+**Redact names** is shared with the advisor. With it on, real node, pool, namespace and workload names in your
+question and in the earlier turns are replaced by their placeholders before sending, and the answer is mapped back.
+So you can ask about `payments-api` by name. The chat lasts until the page is reloaded or the context is switched,
+and **Clear** starts it over. Answers are not cached.
+
+The keyword search finds a docs section when the question uses its words. If an answer misses, rephrase with the
+feature's name: *drain*, *query*, *consolidation*, *QoS*.
+
 The [live demo](demo/index.html) has no server and no LLM, so the panel is hidden there. See
 [HTTP API](http-api.md) for the endpoints.

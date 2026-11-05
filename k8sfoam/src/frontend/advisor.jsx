@@ -155,4 +155,73 @@ function AdvisorModal({ ctx, model, consented, redact, setRedact, advice, onAsk,
   );
 }
 
-window.k8sAdvisor = { AdvisorModal, SEVERITY_INFO, highlightOf };
+// Model answers are markdown; without a markdown library, fenced code goes in <pre> and the rest stays as text.
+function AnswerText({ text }) {
+  return text.split(/```[^\n]*\n?/).map((part, i) => (i % 2
+    ? <pre key={i} className="assistant-code">{part.replace(/\n$/, "")}</pre>
+    : part.trim() && <div key={i} className="assistant-text">{part.trim()}</div>));
+}
+
+// `chat` is App's { ctx, turns: [{ role, content, sources }], busy, error } for the current context, or null.
+function AssistantModal({ model, redact, setRedact, chat, onSend, onClear, onClose }) {
+  const [draft, setDraft] = React.useState("");
+  const endRef = React.useRef(null);
+  const turns = chat ? chat.turns : [];
+  const busy = !!(chat && chat.busy);
+  React.useEffect(() => { endRef.current && endRef.current.scrollIntoView({ block: "end" }); }, [turns.length, busy]);
+  const send = () => {
+    if (!draft.trim() || busy) return;
+    onSend(draft.trim());
+    setDraft("");
+  };
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="overlay-card sim-card advisor-modal" onClick={e => e.stopPropagation()}>
+        <div className="overlay-head">
+          <div>
+            <div className="overlay-title">Ask a question</div>
+            <div className="overlay-sub">About using k8sfoams or about this cluster · answered by {model}</div>
+          </div>
+          <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
+        </div>
+        <div className="assistant-log" aria-live="polite">
+          {turns.length === 0 && (
+            <div className="sim-note">Try "How do I simulate draining a node?" or "Which namespace requests the most CPU?"</div>
+          )}
+          {turns.map((t, i) => (
+            <div key={i} className={`assistant-turn assistant-${t.role}`}>
+              {t.role === "user" ? <div className="assistant-text">{t.content}</div> : <AnswerText text={t.content} />}
+              {t.sources && t.sources.length > 0 && <div className="assistant-sources">Docs: {t.sources.join(" · ")}</div>}
+            </div>
+          ))}
+          {busy && (
+            <span className="sim-note advisor-busy" role="status">
+              <span className="advisor-spinner" aria-hidden="true" />
+              Asking {model}… a local model can take a few minutes.
+            </span>
+          )}
+          {chat && chat.error && <span className="sim-error">{chat.error}</span>}
+          <div ref={endRef} />
+        </div>
+        <div className="advisor-intro">
+          AI-generated — verify before applying. <b>Send</b> posts your question, the earlier turns, the matching docs
+          sections and this cluster's summary to <b>{model}</b>; labels are never included.
+        </div>
+        <div className="assistant-input">
+          <textarea value={draft} rows={2} maxLength={2000} placeholder="Ask about k8sfoams or this cluster… (Enter sends, Shift+Enter new line)"
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+        </div>
+        <div className="sim-actions advisor-actions">
+          <RedactToggle redact={redact} setRedact={setRedact} disabled={busy} />
+          <button className="sim-preset" disabled={busy || turns.length === 0} onClick={onClear}>Clear</button>
+          <button className="btn-primary" disabled={busy || !draft.trim()} onClick={send}>
+            {busy ? <><span className="advisor-spinner" aria-hidden="true" />Asking…</> : "Send"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+window.k8sAdvisor = { AdvisorModal, AssistantModal, SEVERITY_INFO, highlightOf };
