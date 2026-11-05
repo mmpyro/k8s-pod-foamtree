@@ -1,6 +1,8 @@
 import bitmath  # type: ignore
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
+from k8sfoam.src.utils.extractors import ResourcesExtractor
+from k8sfoam.tests.common.mocks import create_container, create_pod
 from pydash import py_ as _  # type: ignore
 
 
@@ -503,6 +505,25 @@ def test_workload_rules_skip_pending_naked_and_static_pods():
     assert 'single-replica' in out['web-1']
     assert 'single-replica' not in out['debug']
     assert 'single-replica' not in out['etcd-a']
+
+
+def test_deployment_mid_rollout_is_one_workload():
+    # Given — one pod from the old ReplicaSet and one from the new, both on node a
+    def rollout_pod(name, template_hash):
+        return create_pod(name, 'a', containers=[create_container('app', '100m', '100Mi', memory_limit='100Mi')],
+                          labels={'pod-template-hash': template_hash},
+                          owner_kind='ReplicaSet', owner_name=f'web-{template_hash}')
+
+    extractor = ResourcesExtractor()
+    pods = [extractor.extract_pod_requested_resources(p)
+            for p in (rollout_pod('web-old', '5d8f7c9b6'), rollout_pod('web-new', '7c4b9d8f5'))]
+    nodes = [NodeResources('a', 4000, 16_000_000)]
+
+    # When
+    out = {p['name']: p['findings'] for p in _.head(FoamTreeMapper(nodes, pods).combined()['nodes'])['pods']}
+
+    # Then — two replicas of Deployment web, not two single-replica ReplicaSets
+    assert out == {'web-old': ['spof-node'], 'web-new': ['spof-node']}
 
 
 def test_nodes_carry_price_and_unpriced_cloud_nodes_are_reported():

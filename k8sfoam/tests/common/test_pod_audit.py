@@ -271,3 +271,43 @@ def test_one_replica_is_not_a_spread_problem():
 
     # Then
     assert not any(f.startswith('spof-') for fs in findings.values() for f in fs)
+
+
+def test_limit_overcommit_is_judged_per_container():
+    # Given — 'app' sits at 1×, 'cache' at 8×
+    sane = ContainerResources('app', 200, 3 * GI, 3 * GI)
+    greedy = ContainerResources('cache', 200, GI, 8 * GI)
+    two = PodResources('app', 'worker', 400, 4 * GI, [sane, greedy], [], owner_kind='ReplicaSet')
+
+    # When / Then — 11Gi of limits over 4Gi of requests is 2.75× for the pod, but one container is 8×
+    assert pod_findings(two, NODE) == ['limit-overcommit']
+
+
+def test_workload_findings_stay_in_their_namespace():
+    # Given — both namespaces run a pod named web-0; only prod's Deployment has one replica
+    nodes = by_name(worker('a'), worker('b'))
+    workloads = {
+        ('prod', 'Deployment', 'web'): [PodResources('web-0', 'a', 100, 100_000, [], [], 'prod',
+                                                     owner_kind='Deployment', owner_name='web')],
+        ('staging', 'Deployment', 'web'): [PodResources(f'web-{i}', n, 100, 100_000, [], [], 'staging',
+                                                        owner_kind='Deployment', owner_name='web')
+                                           for i, n in enumerate(['a', 'b'])],
+    }
+
+    # When
+    findings = workload_findings(workloads, nodes)
+
+    # Then
+    assert findings == {('prod', 'web-0'): ['single-replica']}
+
+
+def test_eks_and_karpenter_spot_labels_are_both_spot():
+    # Given — an EKS managed node group node and a Karpenter node, both spot
+    eks = NodeResources('a', 4000, 16_000_000, labels={'eks.amazonaws.com/capacityType': 'SPOT'})
+    karpenter = worker('b', capacity='spot')
+
+    # When
+    findings = workload_findings(replicas(['a', 'b']), by_name(eks, karpenter))
+
+    # Then
+    assert findings[('default', 'web-0')] == ['spof-spot']
