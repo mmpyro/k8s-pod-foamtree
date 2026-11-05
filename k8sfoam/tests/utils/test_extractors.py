@@ -3,7 +3,7 @@ import pytest
 from k8sfoam.src.utils.extractors import ResourcesExtractor
 from pydash import py_ as _  # type: ignore
 from k8sfoam.tests.common.mocks import (create_container, create_pod, create_node, create_taint, create_condition,
-                                        create_toleration)
+                                        create_toleration, create_owner)
 from unittest.mock import MagicMock
 from kubernetes.client import (V1Affinity, V1LabelSelector, V1LabelSelectorRequirement,  # type: ignore
                                V1NodeAffinity, V1NodeSelector, V1NodeSelectorRequirement, V1NodeSelectorTerm,
@@ -679,6 +679,32 @@ def test_should_extract_pod_workload_identity(owner_kind, owner_name, labels, an
 
     # Then
     assert (result.owner_kind, result.owner_name) == expected
+
+
+def test_the_controlling_owner_wins_over_the_first_one():
+    # Given — a garbage-collection-only owner listed before the controller
+    pod = create_pod('p', 'node', containers=[create_container('app', '100m', '100Mi')])
+    pod.metadata.owner_references = [create_owner('ConfigMap', 'settings', controller=False),
+                                     create_owner('StatefulSet', 'db')]
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert (result.owner_kind, result.owner_name) == ('StatefulSet', 'db')
+
+
+@pytest.mark.parametrize('controller', [False, None])
+def test_pod_whose_owners_are_not_controllers_is_naked(controller):
+    # Given — the owner only garbage-collects the pod; nothing recreates it after an eviction
+    pod = create_pod('p', 'node', containers=[create_container('app', '100m', '100Mi')])
+    pod.metadata.owner_references = [create_owner('ConfigMap', 'settings', controller=controller)]
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert (result.owner_kind, result.owner_name) == (None, None)
 
 
 def test_gpu_set_as_limit_only_counts_as_request():

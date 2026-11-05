@@ -91,8 +91,8 @@ class ResourcesExtractor():
         nothing brings back."""
         if MIRROR_POD_ANNOTATION in (pod.metadata.annotations or {}):
             return 'Node', None
-        refs = pod.metadata.owner_references or []
-        controller = next((r for r in refs if r.controller), refs[0] if refs else None)
+        # A non-controller owner only garbage-collects the pod; nothing recreates it.
+        controller = next((r for r in pod.metadata.owner_references or [] if r.controller), None)
         if controller is None:
             return None, None
         kind, name = controller.kind, controller.name
