@@ -1171,5 +1171,5 @@ function PendingModal({ ctx, nodes, memUnit, fmtMem, onSimulation, onClose }) {
 window.k8sSimulate = {
   REASONS, reasonLabel, parseSelector, parseTolerations, parseTaints, toExtraNodes, fitSimulation, drainSimulation,
   consolidationSimulation, replicasSimulation, pendingSimulation, scalableWorkload, FitModal, DrainButton, DrainReport,
-  ConsolidationModal, ReplicasModal, PendingModal,
+  ConsolidationModal, ReplicasModal, PendingModal, CloseIcon,
 };

@@ -16,4 +16,5 @@ import "./treemap.jsx";
 import "./export.jsx";
 import "./scene3d.jsx";
 import "./urlstate.jsx";
+import "./advisor.jsx";
 import "./app.jsx";

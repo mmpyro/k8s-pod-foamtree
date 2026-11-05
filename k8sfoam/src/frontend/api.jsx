@@ -38,12 +38,21 @@ const serverApi = {
   // null when the server has no stream; the caller then polls.
   events: ctx => new EventSource(`/events${contextParam(ctx)}`),
   fitPresets: () => Promise.resolve([]),
+  // {enabled, model}; the API key never leaves the server.
+  advisorStatus: () => fetch("/advisor/status").then(readJson),
+  advisorPreview: (ctx, redact) => fetch(
+    `/advisor/preview${contextParam(ctx)}${ctx ? "&" : "?"}redact=${redact}`,
+  ).then(readJson),
+  advisor: (ctx, redact) => postJson(`/advisor${contextParam(ctx)}`, { redact }),
+  // body: { question, history: [{ role, content }], redact } -> { model, answer, sources }
+  assistant: (ctx, body) => postJson(`/assistant${contextParam(ctx)}`, body),
 };
 
 // Shown when a fit is asked for a pod no file holds an answer for.
 const CUSTOM_FIT = "The demo only has answers for the presets. To try any pod, run k8sfoams --synthetic locally.";
 // Shown when a simulation asks for nodes the cluster does not have.
 const EXTRA_NODES = "The demo has no answers with hypothetical nodes. To add nodes, run k8sfoams --synthetic locally.";
+const ADVISOR_OFF = "The demo has no AI advisor. Run k8sfoams with OPENAI_API_KEY set to try it.";
 const withoutExtra = (extraNodes, answer) => ((extraNodes || []).length
   ? Promise.reject(new Error(EXTRA_NODES)) : answer());
 
@@ -98,6 +107,11 @@ function staticApi(base) {
       .then(result => firstReplicas(result, count)),
     events: () => null,
     fitPresets: () => fetch(`${base}fit-presets.json`).then(readJson),
+    // No server, no LLM: the advisor panel stays hidden in the demo.
+    advisorStatus: () => Promise.resolve({ enabled: false, model: null }),
+    advisorPreview: () => Promise.reject(new Error(ADVISOR_OFF)),
+    advisor: () => Promise.reject(new Error(ADVISOR_OFF)),
+    assistant: () => Promise.reject(new Error(ADVISOR_OFF)),
   };
 }
 

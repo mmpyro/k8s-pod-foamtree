@@ -2,7 +2,10 @@ import argparse
 import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
-from typing import Any, Iterator, Optional, Protocol
+from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
+from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, chat, load_config
+from k8sfoam.src.advisor.assistant import build_chat_messages
+from k8sfoam.src.advisor.summary import build_summary, unredact
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -187,6 +190,45 @@ def parse_replica_count(value: Optional[str]) -> int:
     return count
 
 
+ADVISOR_OFF = 'The advisor is not configured: set OPENAI_API_KEY and install k8sfoams[advisor]'
+
+
+def parse_advisor_body(body) -> bool:
+    """`redact` of an advisor request; names are redacted unless the body says otherwise. Raises ValueError."""
+    if body is None:
+        return True
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    redact = body.get('redact', True)
+    if not isinstance(redact, bool):
+        raise ValueError(f'redact must be true or false, got {redact!r}')
+    return redact
+
+
+MAX_QUESTION = 2000
+MAX_HISTORY = 20
+MAX_TURN = 8000
+
+
+def parse_assistant_body(body) -> Tuple[str, List[Dict[str, str]], bool]:
+    """(question, history, redact) of an assistant request. Raises ValueError."""
+    redact = parse_advisor_body(body)
+    question = body.get('question') if isinstance(body, dict) else None
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError('question must be a non-empty string')
+    if len(question) > MAX_QUESTION:
+        raise ValueError(f'question is longer than {MAX_QUESTION} characters')
+    history = body.get('history', [])
+    if not isinstance(history, list) or len(history) > MAX_HISTORY:
+        raise ValueError(f'history must be a list of at most {MAX_HISTORY} turns')
+    for turn in history:
+        if not isinstance(turn, dict) or turn.get('role') not in ('user', 'assistant') or not isinstance(turn.get('content'), str):
+            raise ValueError('each history turn must be {"role": "user" or "assistant", "content": "..."}')
+        if len(turn['content']) > MAX_TURN:
+            raise ValueError(f'a history turn is longer than {MAX_TURN} characters')
+    return question.strip(), [{'role': t['role'], 'content': t['content']} for t in history], redact
+
+
 class Registry(Protocol):
     """Where the clusters of each context come from: the watch caches, or the synthetic clusters."""
 
@@ -233,8 +275,12 @@ def non_negative_float(value: str) -> float:
 
 
 def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
-               synthetic: Optional[SyntheticRegistry] = None, prices: Optional[PriceBook] = None) -> Optional[Flask]:
-    """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read."""
+               synthetic: Optional[SyntheticRegistry] = None, prices: Optional[PriceBook] = None,
+               advisor: Optional[AdvisorConfig] = None) -> Optional[Flask]:
+    """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read.
+
+    Without `advisor` the advisor endpoints say it is off and nothing is sent anywhere.
+    """
     try:
         app = Flask(__name__, static_url_path='', static_folder='frontend')
         # Synthetic clusters never touch the network: snapshot prices only.
@@ -370,6 +416,73 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
             return Response(stream(), mimetype='text/event-stream',
                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
+        @app.route('/advisor/status', methods=['GET'])
+        def get_advisor_status():
+            return jsonify({'enabled': advisor is not None, 'model': advisor.model if advisor else None})
+
+        # Last answer per context, keyed by a hash of model + messages: a page refresh spends no tokens.
+        advice: Dict[Optional[str], Tuple[str, list]] = {}
+
+        def cluster_summary(context: Optional[str], redact: bool) -> Tuple[dict, dict]:
+            k8s_client = cluster(context)
+            combined = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book).combined()
+            return build_summary(combined, redact)
+
+        def advisor_messages(context: Optional[str], redact: bool) -> Tuple[list, dict]:
+            payload, mapping = cluster_summary(context, redact)
+            return build_messages(payload), mapping
+
+        @app.route('/advisor/preview', methods=['GET'])
+        def get_advisor_preview():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            try:
+                messages, _ = advisor_messages(request.args.get('context'), request.args.get('redact') != 'false')
+                return jsonify({'model': advisor.model, 'messages': messages})
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/advisor', methods=['POST'])
+        def ask_advisor():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            try:
+                redact = parse_advisor_body(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            context = request.args.get('context')
+            try:
+                messages, mapping = advisor_messages(context, redact)
+                key = cache_key(advisor, messages)
+                cached = advice.get(context)
+                if cached and cached[0] == key:
+                    return jsonify({'model': advisor.model, 'cached': True, 'recommendations': cached[1]})
+                recommendations = unredact(ask(advisor, messages), mapping)
+            except AdvisorError as ex:
+                return str(ex), ex.status
+            except Exception as ex:
+                return str(ex), 500
+            advice[context] = (key, recommendations)
+            return jsonify({'model': advisor.model, 'cached': False, 'recommendations': recommendations})
+
+        @app.route('/assistant', methods=['POST'])
+        def ask_assistant():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            try:
+                question, history, redact = parse_assistant_body(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            try:
+                payload, mapping = cluster_summary(request.args.get('context'), redact)
+                messages, sources = build_chat_messages(question, history, payload, mapping)
+                answer = unredact(chat(advisor, messages), mapping)
+            except AdvisorError as ex:
+                return str(ex), ex.status
+            except Exception as ex:
+                return str(ex), 500
+            return jsonify({'model': advisor.model, 'answer': answer, 'sources': sources})
+
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
             if synthetic is not None:
@@ -408,7 +521,7 @@ def main():
     parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
     args = parser.parse_args()
 
-    options = {'page_size': args.page_size, 'watch': not args.no_watch}
+    options = {'page_size': args.page_size, 'watch': not args.no_watch, 'advisor': load_config()}
     if args.synthetic:
         options['synthetic'] = SyntheticRegistry(args.seed, args.churn_interval)
     app = create_app(**options)

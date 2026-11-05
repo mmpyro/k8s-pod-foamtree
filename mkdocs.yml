@@ -32,6 +32,7 @@ nav:
       - Extended resources: extended-resources.md
       - Export: export.md
       - Shareable links: shareable-links.md
+      - AI advisor: advisor.md
   - Reference:
       - Command line: cli.md
       - HTTP API: http-api.md

@@ -16,6 +16,7 @@ const {
   FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal, PendingModal, drainSimulation,
   scalableWorkload,
 } = window.k8sSimulate;
+const { AdvisorModal, AssistantModal } = window.k8sAdvisor;
 
 const SIM_KINDS = {
   fit: "Fit simulation", drain: "Drain simulation", consolidation: "Consolidation", replicas: "Replica simulation",
@@ -226,6 +227,17 @@ function App() {
   const [consolidationOpen, setConsolidationOpen] = useState(false);
   const [replicasOpen, setReplicasOpen] = useState(false);
   const [pendingOpen, setPendingOpen] = useState(false);
+  // AI advisor: {enabled, model} from the server, null until known or when it fails.
+  const [advisor, setAdvisor] = useState(null);
+  const [advisorOpen, setAdvisorOpen] = useState(false);
+  // Consent is per page load: until Send in the consent step, nothing goes to the model.
+  const [advisorConsent, setAdvisorConsent] = useState(false);
+  const [advisorRedact, setAdvisorRedact] = useState(true);
+  // Last ask: { ctx, busy } while waiting, then { ctx, result } or { ctx, error }.
+  const [advice, setAdvice] = useState(null);
+  // Assistant chat: { ctx, turns, busy, error }; a new context starts a new chat.
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [chat, setChat] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
   // Unbound pods the scheduler is trying to place; offers the pending pods simulation.
@@ -281,6 +293,44 @@ function App() {
 
   const currentCtx = contexts[contextIdx];
   const ctxName = currentCtx ? currentCtx.context : null;
+
+  useEffect(() => {
+    api.advisorStatus().then(setAdvisor).catch(() => setAdvisor(null));
+  }, []);
+
+  // Lives in App, not the modal: a local model answers in minutes and the modal may be closed meanwhile.
+  // An answer for a context the user has since left is dropped.
+  const askAdvisor = () => {
+    const ctx = ctxName;
+    setAdvisorConsent(true);
+    setAdvice({ ctx, busy: true });
+    const settle = next => setAdvice(a => (a && a.ctx === ctx ? next : a));
+    api.advisor(ctx, advisorRedact)
+      .then(result => settle({ ctx, result }))
+      .catch(err => settle({ ctx, error: err.message || String(err) }));
+  };
+  const ctxAdvice = advice && advice.ctx === ctxName ? advice : null;
+  const openAdvisor = () => {
+    setAdvisorOpen(true);
+    if (advisorConsent && !ctxAdvice) askAdvisor();
+  };
+  // Like askAdvisor: the request outlives the modal, and an answer for a context since left is dropped.
+  const ctxChat = chat && chat.ctx === ctxName ? chat : null;
+  const askAssistant = question => {
+    const ctx = ctxName;
+    const history = (ctxChat ? ctxChat.turns : []).map(({ role, content }) => ({ role, content }));
+    const turns = [...history, { role: "user", content: question }];
+    setChat({ ctx, turns, busy: true });
+    const settle = next => setChat(c => (c && c.ctx === ctx ? next : c));
+    api.assistant(ctx, { question, history, redact: advisorRedact })
+      .then(r => settle({ ctx, turns: [...turns, { role: "assistant", content: r.answer, sources: r.sources }] }))
+      .catch(err => settle({ ctx, turns, error: err.message || String(err) }));
+  };
+  const highlightAdvice = target => {
+    if (target.workload) setSelectedWorkload(target.workload);
+    if (target.query) setQuery(target.query);
+    setAdvisorOpen(false);
+  };
 
   // One load at a time: a request made meanwhile (a change event, a context
   // switch) runs once the current one ends, with the latest context.
@@ -534,6 +584,8 @@ function App() {
       setConsolidationOpen(false);
       setReplicasOpen(false);
       setPendingOpen(false);
+      setAdvisorOpen(false);
+      setAssistantOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -675,6 +727,7 @@ function App() {
         topology={topology}
         query={query} setQuery={setQuery}
         cost={cost} pricing={pricing}
+        advisor={advisor} advice={ctxAdvice} onAdvisor={openAdvisor} onAssistant={() => setAssistantOpen(true)}
       />
 
       <main className="main">
@@ -816,6 +869,17 @@ function App() {
           onSimulation={setSim} onClose={() => setReplicasOpen(false)} />
       )}
 
+      {advisorOpen && advisor && advisor.enabled && (
+        <AdvisorModal ctx={ctxName} model={advisor.model} consented={advisorConsent}
+          redact={advisorRedact} setRedact={setAdvisorRedact} advice={ctxAdvice} onAsk={askAdvisor}
+          onCopy={copyText} onHighlight={highlightAdvice} onClose={() => setAdvisorOpen(false)} />
+      )}
+
+      {assistantOpen && advisor && advisor.enabled && (
+        <AssistantModal model={advisor.model} redact={advisorRedact} setRedact={setAdvisorRedact} chat={ctxChat}
+          onSend={askAssistant} onClear={() => setChat(null)} onClose={() => setAssistantOpen(false)} />
+      )}
+
       <TweaksPanel>
         <TweakSection label="Color">
           <TweakRadio label="Color scheme" value={tw.colorScheme}
@@ -856,7 +920,8 @@ function Sidebar({
   open, onToggle, view, setView, zoom, setZoom, metric, setMetric, metrics, totals, memUnit, setMemUnit,
   refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
-  audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery, cost, pricing
+  audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery, cost, pricing,
+  advisor, advice, onAdvisor, onAssistant
 }) {
   const is3d = view === "3d";
   return (
@@ -1148,6 +1213,21 @@ function Sidebar({
               );
             })}
           </div>
+        </div>
+      )}
+
+      {/* Only when the server has an LLM configured; the static demo never does. */}
+      {nodeCount > 0 && advisor && advisor.enabled && (
+        <div className="sidebar-section advisor-side">
+          <div className="section-label">AI Advisor<span className="section-value">{advisor.model}</span></div>
+          <button className={`btn-primary ${advice && advice.busy ? "spinning" : ""}`} onClick={onAdvisor}>
+            {advice && advice.busy ? <><span className="advisor-spinner" aria-hidden="true" />Asking…</> : "Ask advisor"}
+          </button>
+          {advice && advice.error && <span className="sim-error">{advice.error}</span>}
+          {advice && advice.result && (
+            <span className="sim-note">{advice.result.recommendations.length} recommendations · AI-generated</span>
+          )}
+          <button className="sim-preset" onClick={onAssistant}>Ask a question</button>
         </div>
       )}
 

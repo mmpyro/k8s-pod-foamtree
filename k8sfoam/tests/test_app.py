@@ -822,15 +822,16 @@ def test_change_events_follow_a_replaced_cache_after_a_heartbeat():
     ([], {'page_size': 500, 'watch': True}),
     (['--page-size', '100', '--no-watch'], {'page_size': 100, 'watch': False}),
 ])
+@patch('k8sfoam.src.app.load_config')
 @patch('k8sfoam.src.app.create_app')
-def test_main_passes_cache_options(create_app, argv, expected):
+def test_main_passes_cache_options(create_app, load_config, argv, expected):
     # Given
     with patch('sys.argv', ['k8sfoams', *argv]):
         # When
         main()
 
     # Then
-    create_app.assert_called_once_with(**expected)
+    create_app.assert_called_once_with(**expected, advisor=load_config.return_value)
 
 
 @pytest.mark.parametrize('page_size', ['0', '-5', 'many'])
@@ -842,9 +843,10 @@ def test_main_rejects_a_page_size_below_one(page_size):
             main()
 
 
+@patch('k8sfoam.src.app.load_config')
 @patch('k8sfoam.src.app.SyntheticRegistry')
 @patch('k8sfoam.src.app.create_app')
-def test_main_serves_synthetic_clusters(create_app, registry):
+def test_main_serves_synthetic_clusters(create_app, registry, load_config):
     # Given
     with patch('sys.argv', ['k8sfoams', '--synthetic', '--seed', '7', '--churn-interval', '2.5']):
         # When
@@ -852,7 +854,8 @@ def test_main_serves_synthetic_clusters(create_app, registry):
 
     # Then
     registry.assert_called_once_with(7, 2.5)
-    create_app.assert_called_once_with(page_size=500, watch=True, synthetic=registry.return_value)
+    create_app.assert_called_once_with(page_size=500, watch=True, synthetic=registry.return_value,
+                                       advisor=load_config.return_value)
 
 
 def test_main_rejects_a_negative_churn_interval():
