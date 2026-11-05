@@ -8,6 +8,7 @@ from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.pricing import PriceBook
 from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_EXTRA_NODES, MAX_REPLICAS, UnknownTemplate,
                                           simulate_consolidation, simulate_drain, simulate_fit, simulate_pending,
                                           simulate_replicas)
@@ -232,10 +233,12 @@ def non_negative_float(value: str) -> float:
 
 
 def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
-               synthetic: Optional[SyntheticRegistry] = None) -> Optional[Flask]:
+               synthetic: Optional[SyntheticRegistry] = None, prices: Optional[PriceBook] = None) -> Optional[Flask]:
     """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read."""
     try:
         app = Flask(__name__, static_url_path='', static_folder='frontend')
+        # Synthetic clusters never touch the network: snapshot prices only.
+        price_book = prices or PriceBook(live=synthetic is None)
         registry: Optional[Registry] = synthetic or (CacheRegistry(page_size) if watch else None)
 
         def cluster(context: Optional[str]) -> Any:
@@ -250,7 +253,7 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def get_all_k8s_resources():
             try:
                 k8s_client = cluster(request.args.get('context'))
-                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
+                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book)
                 return jsonify(mapper.combined())
             except Exception as ex:
                 return str(ex), 500
@@ -260,7 +263,7 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def get_k8s_resources(resource_type: str):
             try:
                 k8s_client = cluster(request.args.get('context'))
-                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
+                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book)
                 # cpu/memory keep their case-insensitive match; extended names are case-sensitive in Kubernetes.
                 resource = resource_type.lower() if resource_type.lower() in ('cpu', 'memory') else resource_type
                 supported = mapper.available_resources()

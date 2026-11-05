@@ -1070,12 +1070,13 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   font: inherit; font-size: 11px; text-align: left;
   cursor: default; font-style: italic;
 }
-.topo-util {
+.topo-util, .topo-cost {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   width: 32px; text-align: right;
 }
+.topo-cost { width: 56px; color: var(--text-soft); }
 
 /* Audit findings on a focus-overlay workload row. */
 .pod-row-findings { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }

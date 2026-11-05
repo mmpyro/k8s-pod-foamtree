@@ -494,6 +494,13 @@ def test_node_without_pod_limit_or_labels_emits_neutral_values():
     # Then
     assert result.labels == {}
     assert result.allocatable_pods is None
+    assert result.provider_id is None
+
+
+def test_should_extract_node_provider_id():
+    node = create_node('worker', '4', '16Gi', provider_id='aws:///eu-west-1a/i-0abc')
+
+    assert ResourcesExtractor().extract_node_resources(node).provider_id == 'aws:///eu-west-1a/i-0abc'
 
 
 def test_should_extract_pod_scheduling_constraints():

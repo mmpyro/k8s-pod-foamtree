@@ -4,6 +4,7 @@
 // so the 2D map, the cubes, the sidebar panel and the exporter agree.
 
 const { nodeCap, nodeUsed } = window.k8sResources;
+const { nodeCost } = window.k8sCost;
 
 // `field` is the node.topology key, `token` the query prefix that selects one
 // group (query.jsx owns the grammar), `none` names the group of nodes missing
@@ -30,7 +31,8 @@ function groupKey(node, mode) {
 
 // Nodes bucketed by one topology fact, each bucket with its capacity totals.
 // `value` is the bucket's capacity on `metric` (cpu, mem or an extended
-// resource), which is what the 2D map sizes it by, and `util` its usage of it. Largest first, the unlabelled bucket always last. Every item keeps the
+// resource), which is what the 2D map sizes it by, and `util` its usage of it.
+// `cost`/`idleCost` sum the monthly cost of its `priced` nodes. Largest first, the unlabelled bucket always last. Every item keeps the
 // node's index in `nodes`, so node hues stay put when grouping is switched on.
 function groupNodes(nodes, mode, metric) {
   const m = groupMode(mode);
@@ -42,7 +44,7 @@ function groupNodes(nodes, mode, metric) {
         key, label: key === null ? (m.none || "all nodes") : key, labelled: key !== null,
         // Label values are [A-Za-z0-9._-] only, so they never need quoting.
         token: key !== null && m.token ? `${m.token}:${key}` : null,
-        items: [], cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, value: 0, used: 0,
+        items: [], cpuCap: 0, cpuUsed: 0, memCap: 0, memUsed: 0, value: 0, used: 0, cost: 0, idleCost: 0, priced: 0,
       });
     }
     const b = buckets.get(key);
@@ -53,6 +55,12 @@ function groupNodes(nodes, mode, metric) {
     b.memUsed += node.memUsed;
     b.value += nodeCap(node, metric);
     b.used += nodeUsed(node, metric);
+    const c = nodeCost(node);
+    if (c) {
+      b.cost += c.monthly;
+      b.idleCost += c.idle;
+      b.priced += 1;
+    }
   });
   const groups = [...buckets.values()];
   for (const g of groups) {
