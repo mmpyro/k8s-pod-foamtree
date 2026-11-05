@@ -9,7 +9,7 @@ from k8sfoam.src.utils.mappers import FoamTreeMapper
 
 # The payload must stay this small however big the cluster grows.
 MAX_PAYLOAD_CHARS = 24000
-SECRET = 'secret-'
+MARKER = 'leak-'
 
 
 @pytest.fixture(scope='module')
@@ -36,16 +36,16 @@ def _scaled(combined: dict, copies: int) -> dict:
 
 
 def _marked(combined: dict) -> dict:
-    """Every node, pool, namespace, workload and pod name prefixed with SECRET, so a leak is easy to spot."""
+    """Every node, pool, namespace, workload and pod name prefixed with MARKER, so a leak is easy to spot."""
     marked = copy.deepcopy(combined)
     for node in marked['nodes']:
-        node['name'] = SECRET + node['name']
+        node['name'] = MARKER + node['name']
         if node['topology']['nodePool']:
-            node['topology']['nodePool'] = SECRET + node['topology']['nodePool']
+            node['topology']['nodePool'] = MARKER + node['topology']['nodePool']
         for pod in node['pods']:
-            pod['name'], pod['namespace'] = SECRET + pod['name'], SECRET + pod['namespace']
+            pod['name'], pod['namespace'] = MARKER + pod['name'], MARKER + pod['namespace']
             if pod['owner']:
-                pod['owner']['name'] = SECRET + pod['owner']['name']
+                pod['owner']['name'] = MARKER + pod['owner']['name']
     return marked
 
 
@@ -72,8 +72,8 @@ def test_redaction_round_trip(combined, context):
     cluster = _marked(combined[context])
     payload, mapping = build_summary(cluster, True)
 
-    assert SECRET not in json.dumps(payload)
-    assert SECRET in json.dumps(build_summary(cluster, False)[0])
+    assert MARKER not in json.dumps(payload)
+    assert MARKER in json.dumps(build_summary(cluster, False)[0])
     restored = unredact(payload, mapping)
     restored['redacted'] = False
     assert restored == build_summary(cluster, False)[0]

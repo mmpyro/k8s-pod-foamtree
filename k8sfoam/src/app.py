@@ -2,8 +2,9 @@ import argparse
 import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
-from typing import Any, Iterator, Optional, Protocol
-from k8sfoam.src.advisor import AdvisorConfig, load_config
+from typing import Any, Dict, Iterator, Optional, Protocol, Tuple
+from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, load_config
+from k8sfoam.src.advisor.summary import build_summary, unredact
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -186,6 +187,21 @@ def parse_replica_count(value: Optional[str]) -> int:
     if not 1 <= count <= MAX_REPLICAS:
         raise ValueError(message)
     return count
+
+
+ADVISOR_OFF = 'The advisor is not configured: set OPENAI_API_KEY and install k8sfoams[advisor]'
+
+
+def parse_advisor_body(body) -> bool:
+    """`redact` of an advisor request; names are redacted unless the body says otherwise. Raises ValueError."""
+    if body is None:
+        return True
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    redact = body.get('redact', True)
+    if not isinstance(redact, bool):
+        raise ValueError(f'redact must be true or false, got {redact!r}')
+    return redact
 
 
 class Registry(Protocol):
@@ -378,6 +394,48 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         @app.route('/advisor/status', methods=['GET'])
         def get_advisor_status():
             return jsonify({'enabled': advisor is not None, 'model': advisor.model if advisor else None})
+
+        # Last answer per context, keyed by a hash of model + messages: a page refresh spends no tokens.
+        advice: Dict[Optional[str], Tuple[str, list]] = {}
+
+        def advisor_messages(context: Optional[str], redact: bool) -> Tuple[list, dict]:
+            k8s_client = cluster(context)
+            combined = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book).combined()
+            payload, mapping = build_summary(combined, redact)
+            return build_messages(payload), mapping
+
+        @app.route('/advisor/preview', methods=['GET'])
+        def get_advisor_preview():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            try:
+                messages, _ = advisor_messages(request.args.get('context'), request.args.get('redact') != 'false')
+                return jsonify({'model': advisor.model, 'messages': messages})
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/advisor', methods=['POST'])
+        def ask_advisor():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            try:
+                redact = parse_advisor_body(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            context = request.args.get('context')
+            try:
+                messages, mapping = advisor_messages(context, redact)
+                key = cache_key(advisor, messages)
+                cached = advice.get(context)
+                if cached and cached[0] == key:
+                    return jsonify({'model': advisor.model, 'cached': True, 'recommendations': cached[1]})
+                recommendations = unredact(ask(advisor, messages), mapping)
+            except AdvisorError as ex:
+                return str(ex), ex.status
+            except Exception as ex:
+                return str(ex), 500
+            advice[context] = (key, recommendations)
+            return jsonify({'model': advisor.model, 'cached': False, 'recommendations': recommendations})
 
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
