@@ -25,6 +25,20 @@ Every route reads the cluster; none changes it. `?context=<name>` picks a kubeco
 Errors other than `400` and `404` return `500` with the reason as plain text, e.g. when the API server cannot be
 reached.
 
+## Authentication
+
+When k8sfoams runs with a token (any non-loopback `--host`, or `--token`; see
+[Network access](cli.md#network-access)), every route except `/`, the static files and `/healthcheck` needs
+`Authorization: Bearer <token>`, and answers `401` without it. `GET /events` also takes `?token=<token>`, because a
+browser `EventSource` cannot set headers; no other route does.
+
+Regardless of the token, a `Host` header the server was not told about returns `403`, and so does a `POST` whose `Origin`
+is another site. `/healthcheck` answers any `Host`, so probes can reach it by IP.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H "Host: dash.internal:8080" http://10.0.0.5:8080/contexts
+```
+
 ## Hypothetical nodes
 
 `extraNodes` lists nodes to add for one simulation, at most 50 in all:

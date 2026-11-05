@@ -1,8 +1,12 @@
 import argparse
+import hmac
+import ipaddress
+import secrets
+import sys
 import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
-from typing import Any, Dict, Iterator, List, Optional, Protocol, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
 from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, chat, load_config
 from k8sfoam.src.advisor.assistant import build_chat_messages
 from k8sfoam.src.advisor.summary import build_summary, unredact
@@ -17,12 +21,33 @@ from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_EXTRA_NODES,
                                           simulate_replicas)
 from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
+from urllib.parse import urlparse
 
 # Minimum seconds between two `changed` events; a burst in between becomes one.
 DEBOUNCE = 1.0
 # A quiet stream still sends a comment this often, so a closed tab is noticed
 # (the write fails) and proxies do not drop the connection as idle.
 HEARTBEAT = 15.0
+
+
+# Host names that only reach this machine; always allowed as a Host header.
+LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
+
+
+def is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == 'localhost'
+
+
+def host_name(host: str) -> str:
+    """A Host header or --host value without its port or IPv6 brackets: `[::1]:8080` -> `::1`."""
+    host = host.lower()
+    if host.startswith('['):
+        return host[1:].partition(']')[0]
+    # A bare IPv6 address (`::1`) has several colons and no port.
+    return host.rpartition(':')[0] if host.count(':') == 1 else host
 
 
 def get_version() -> str:
@@ -276,11 +301,15 @@ def non_negative_float(value: str) -> float:
 
 def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
                synthetic: Optional[SyntheticRegistry] = None, prices: Optional[PriceBook] = None,
-               advisor: Optional[AdvisorConfig] = None) -> Optional[Flask]:
+               advisor: Optional[AdvisorConfig] = None, token: Optional[str] = None,
+               allowed_hosts: Iterable[str] = LOOPBACK_HOSTS) -> Optional[Flask]:
     """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read.
 
     Without `advisor` the advisor endpoints say it is off and nothing is sent anywhere.
+    With `token`, every API call needs `Authorization: Bearer <token>`. Requests whose Host is not in
+    `allowed_hosts` are refused, which defeats DNS rebinding.
     """
+    allowed = {host_name(h) for h in allowed_hosts}
     try:
         app = Flask(__name__, static_url_path='', static_folder='frontend')
         # Synthetic clusters never touch the network: snapshot prices only.
@@ -290,6 +319,28 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def cluster(context: Optional[str]) -> Any:
             """Nodes and pods of a context: from its watch cache, or listed right now with --no-watch."""
             return registry.get(context) if registry is not None else K8sClient(context, page_size)
+
+        @app.before_request
+        def guard():
+            # Probes reach the server by pod IP and carry no token.
+            if request.endpoint == 'healthcheck':
+                return None
+            if host_name(request.host) not in allowed:
+                return (f'Host {request.host} is not allowed; '
+                        f'start k8sfoams with --allowed-host {host_name(request.host)} to reach it by this name'), 403
+            origin = request.headers.get('Origin')
+            if request.method == 'POST' and origin is not None and urlparse(origin).netloc.lower() != request.host.lower():
+                return f'Cross-origin request from {origin} refused', 403
+            # The page itself must load, to read the token from its URL fragment.
+            if token is None or request.endpoint in ('web', 'static'):
+                return None
+            scheme, _, given = request.headers.get('Authorization', '').partition(' ')
+            if scheme.lower() != 'bearer':
+                # EventSource cannot set headers, so the live stream alone takes the token as a query parameter.
+                given = request.args.get('token', '') if request.endpoint == 'get_change_events' else ''
+            if not hmac.compare_digest(given.encode(), token.encode()):
+                return 'Missing or wrong token: open the URL k8sfoams printed at startup', 401
+            return None
 
         @app.route('/healthcheck', methods=['GET'])
         def healthcheck():
@@ -521,10 +572,27 @@ def main():
                         help='Seed of the --synthetic clusters; the same seed builds the same clusters')
     parser.add_argument('--churn-interval', type=non_negative_float, default=DEFAULT_CHURN_INTERVAL,
                         help='Seconds between random changes to the --synthetic clusters; 0 keeps them still')
+    auth = parser.add_mutually_exclusive_group()
+    auth.add_argument('--token', type=str,
+                      help='Token every API call must carry; generated when --host is not a loopback address')
+    auth.add_argument('--no-auth', action='store_true', help='Serve a non-loopback --host without a token')
+    parser.add_argument('--allowed-host', action='append', default=[], metavar='NAME',
+                        help='Extra Host header the server answers to (repeatable), e.g. the name you reach it by')
     parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
     args = parser.parse_args()
 
-    options = {'page_size': args.page_size, 'watch': not args.no_watch, 'advisor': load_config()}
+    exposed = not is_loopback(args.host)
+    token = None if args.no_auth else (args.token or (secrets.token_urlsafe(32) if exposed else None))
+    if exposed:
+        print(f'WARNING: listening on {args.host}: anyone who can reach port {args.port} can read this dashboard, '
+              'which uses your kubeconfig credentials. Pass --allowed-host NAME for every name or IP '
+              'you open it by.', file=sys.stderr)
+    if token:
+        url_host = f'[{args.host}]' if ':' in args.host else args.host
+        print(f'Open http://{url_host}:{args.port}/#token={token}', file=sys.stderr)
+
+    options = {'page_size': args.page_size, 'watch': not args.no_watch, 'advisor': load_config(), 'token': token,
+               'allowed_hosts': [*LOOPBACK_HOSTS, args.host, *args.allowed_host]}
     if args.synthetic:
         options['synthetic'] = SyntheticRegistry(args.seed, args.churn_interval)
     app = create_app(**options)
