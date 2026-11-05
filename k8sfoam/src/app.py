@@ -3,6 +3,7 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
 from typing import Any, Iterator, Optional, Protocol
+from k8sfoam.src.advisor import AdvisorConfig, load_config
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -233,8 +234,12 @@ def non_negative_float(value: str) -> float:
 
 
 def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
-               synthetic: Optional[SyntheticRegistry] = None, prices: Optional[PriceBook] = None) -> Optional[Flask]:
-    """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read."""
+               synthetic: Optional[SyntheticRegistry] = None, prices: Optional[PriceBook] = None,
+               advisor: Optional[AdvisorConfig] = None) -> Optional[Flask]:
+    """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read.
+
+    Without `advisor` the advisor endpoints say it is off and nothing is sent anywhere.
+    """
     try:
         app = Flask(__name__, static_url_path='', static_folder='frontend')
         # Synthetic clusters never touch the network: snapshot prices only.
@@ -370,6 +375,10 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
             return Response(stream(), mimetype='text/event-stream',
                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
+        @app.route('/advisor/status', methods=['GET'])
+        def get_advisor_status():
+            return jsonify({'enabled': advisor is not None, 'model': advisor.model if advisor else None})
+
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
             if synthetic is not None:
@@ -408,7 +417,7 @@ def main():
     parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
     args = parser.parse_args()
 
-    options = {'page_size': args.page_size, 'watch': not args.no_watch}
+    options = {'page_size': args.page_size, 'watch': not args.no_watch, 'advisor': load_config()}
     if args.synthetic:
         options['synthetic'] = SyntheticRegistry(args.seed, args.churn_interval)
     app = create_app(**options)
