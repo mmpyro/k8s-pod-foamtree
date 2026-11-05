@@ -1,6 +1,7 @@
+import logging
 import pytest
 import bitmath  # type: ignore
-from k8sfoam.src.app import create_app, main, change_events, DEBOUNCE
+from k8sfoam.src.app import LOOPBACK_HOSTS, create_app, main, change_events, host_name, is_loopback, DEBOUNCE
 from k8sfoam.src.k8s.k8s_client import DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock
 from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources, ContainerResources
@@ -915,7 +916,8 @@ def test_main_passes_cache_options(create_app, load_config, argv, expected):
         main()
 
     # Then
-    create_app.assert_called_once_with(**expected, advisor=load_config.return_value)
+    create_app.assert_called_once_with(**expected, advisor=load_config.return_value, token=None,
+                                       allowed_hosts=[*LOOPBACK_HOSTS, '127.0.0.1'])
 
 
 @pytest.mark.parametrize('page_size', ['0', '-5', 'many'])
@@ -939,7 +941,8 @@ def test_main_serves_synthetic_clusters(create_app, registry, load_config):
     # Then
     registry.assert_called_once_with(7, 2.5)
     create_app.assert_called_once_with(page_size=500, watch=True, synthetic=registry.return_value,
-                                       advisor=load_config.return_value)
+                                       advisor=load_config.return_value, token=None,
+                                       allowed_hosts=[*LOOPBACK_HOSTS, '127.0.0.1'])
 
 
 def test_main_rejects_a_negative_churn_interval():
@@ -1046,3 +1049,159 @@ def test_bundled_snapshot_prices_every_synthetic_node(synthetic_client, context)
     assert response.status_code == 200
     assert response.json['pricing']['missing'] == []
     assert all(n['price'] and n['price']['hourly'] > 0 for n in response.json['nodes'])
+
+
+@pytest.mark.parametrize('host, expected', [
+    ('127.0.0.1', True), ('127.0.0.2', True), ('::1', True), ('localhost', True), ('LOCALHOST', True),
+    ('0.0.0.0', False), ('::', False), ('10.0.0.5', False), ('example.com', False),  # nosec B104
+])
+def test_is_loopback(host, expected):
+    assert is_loopback(host) is expected
+
+
+@pytest.mark.parametrize('host, expected', [
+    ('localhost:8080', 'localhost'), ('Example.COM', 'example.com'), ('[::1]:8080', '::1'), ('[::1]', '::1'),
+    ('::1', '::1'), ('10.0.0.5:80', '10.0.0.5'),
+])
+def test_host_name_drops_port_and_brackets(host, expected):
+    assert host_name(host) == expected
+
+
+def run_main(*argv):
+    with patch('sys.argv', ['k8sfoams', *argv]), patch('k8sfoam.src.app.load_config'), \
+            patch('k8sfoam.src.app.create_app') as create_app:
+        main()
+    return create_app.call_args.kwargs
+
+
+def test_main_on_loopback_warns_nothing_and_needs_no_token(capsys):
+    # Given / When
+    options = run_main()
+
+    # Then
+    assert options['token'] is None
+    assert capsys.readouterr().err == ''
+
+
+def test_main_on_a_network_host_warns_and_generates_a_token(capsys):
+    # Given / When
+    options = run_main('--host', '0.0.0.0', '--allowed-host', 'dash.example')  # nosec B104
+
+    # Then
+    err = capsys.readouterr().err
+    assert 'WARNING' in err and 'kubeconfig credentials' in err
+    assert len(options['token']) >= 32
+    assert f'http://0.0.0.0:8080/#token={options["token"]}' in err
+    assert options['allowed_hosts'] == [*LOOPBACK_HOSTS, '0.0.0.0', 'dash.example']  # nosec B104
+
+
+@pytest.mark.parametrize('argv, token', [
+    (['--host', '10.0.0.5', '--token', 's3cret'], 's3cret'),
+    (['--host', '10.0.0.5', '--no-auth'], None),
+    (['--token', 's3cret'], 's3cret'),
+])
+def test_main_token_options(argv, token):
+    assert run_main(*argv)['token'] == token
+
+
+def test_main_rejects_token_with_no_auth():
+    with patch('sys.argv', ['k8sfoams', '--token', 'x', '--no-auth']), pytest.raises(SystemExit):
+        main()
+
+
+@pytest.mark.parametrize('token', ['', '  '])
+def test_main_rejects_an_empty_token(token):
+    with pytest.raises(SystemExit):
+        run_main('--token', token)
+
+
+@pytest.mark.parametrize('argv', [['--host', '10.0.0.5', '-d'], ['--host', '10.0.0.5', '--no-auth', '-d']])
+def test_main_refuses_debug_on_a_network_host(argv):
+    with pytest.raises(SystemExit):
+        run_main(*argv)
+
+
+def test_main_allows_debug_on_loopback():
+    assert run_main('-d')['token'] is None
+
+
+def test_server_log_redacts_the_token(caplog):
+    # Given
+    run_main()
+
+    # When: a request line as the Werkzeug dev server logs it.
+    with caplog.at_level(logging.INFO, logger='werkzeug'):
+        logging.getLogger('werkzeug').info('"%s" %s %s', 'GET /events?context=a&token=s3cret HTTP/1.1', '200', '-')
+
+    # Then
+    assert 's3cret' not in caplog.text
+    assert '"GET /events?context=a&token=<redacted> HTTP/1.1" 200 -' in caplog.text
+
+
+@pytest.fixture
+def token_client():
+    with patch('k8sfoam.src.app.K8sClient'):
+        yield create_app(watch=False, token='s3cret').test_client()  # nosec B106
+
+
+@pytest.mark.parametrize('headers, status', [
+    ({}, 401),
+    ({'Authorization': 'Bearer wrong'}, 401),
+    ({'Authorization': 's3cret'}, 401),
+    ({'Authorization': 'Bearer s3cret'}, 200),
+])
+def test_token_is_required_on_api_routes(token_client, headers, status):
+    # Given / When
+    response = token_client.get('/advisor/status', headers=headers)
+
+    # Then
+    assert response.status_code == status
+
+
+@pytest.mark.parametrize('path', ['/healthcheck', '/'])
+def test_token_is_not_required_for_healthcheck_and_page(token_client, path):
+    assert token_client.get(path).status_code != 401
+
+
+def test_token_query_parameter_only_counts_on_the_event_stream(token_client):
+    # Given / When / Then: without the watch cache /events answers 404, past the token check.
+    assert token_client.get('/events?token=s3cret').status_code == 404
+    assert token_client.get('/events?token=wrong').status_code == 401
+    assert token_client.get('/advisor/status?token=s3cret').status_code == 401
+
+
+@pytest.mark.parametrize('host, status', [
+    ('localhost:8080', 200), ('127.0.0.1:8080', 200), ('[::1]:8080', 200), ('dash.example:8080', 200),
+    ('evil.example', 403), ('evil.example:8080', 403),
+])
+def test_host_header_must_be_allowed(host, status):
+    # Given
+    client = create_app(watch=False, allowed_hosts=[*LOOPBACK_HOSTS, 'Dash.Example']).test_client()
+
+    # When
+    response = client.get('/advisor/status', headers={'Host': host})
+
+    # Then
+    assert response.status_code == status
+
+
+def test_healthcheck_answers_any_host():
+    client = create_app(watch=False).test_client()
+    assert client.get('/healthcheck', headers={'Host': '10.1.2.3:8080'}).status_code == 200
+
+
+@pytest.mark.parametrize('origin, refused', [
+    ('http://evil.example', True),
+    ('null', True),
+    ('http://localhost:8080', False),
+    (None, False),
+])
+def test_cross_origin_posts_are_refused(test_client, origin, refused):
+    # Given
+    headers = {'Host': 'localhost:8080', **({'Origin': origin} if origin else {})}
+
+    # When: an empty body fails validation (400) once past the origin check.
+    response = test_client.post('/simulate/fit', json={}, headers=headers)
+
+    # Then
+    assert (response.status_code == 403) is refused
