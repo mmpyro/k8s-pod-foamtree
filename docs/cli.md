@@ -25,6 +25,16 @@ k8sfoams --page-size 200 --no-watch
 k8sfoams --synthetic --churn-interval 2
 ```
 
+## Environment
+
+| Variable | Meaning |
+| --- | --- |
+| `OPENAI_API_KEY` | turns on the [AI advisor](advisor.md); needs `pip install 'k8sfoams[advisor]'` |
+| `OPENAI_BASE_URL` | OpenAI-compatible endpoint for the advisor, e.g. `http://localhost:11434/v1` for Ollama |
+| `K8SFOAMS_ADVISOR_MODEL` | advisor model, default `gpt-4o-mini` |
+
+The API key is never a flag, so it stays out of shell history and `ps`.
+
 ## Exporting the demo site
 
 ```bash
