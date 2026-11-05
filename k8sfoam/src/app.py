@@ -446,6 +446,9 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def ask_advisor():
             if advisor is None:
                 return ADVISOR_OFF, 404
+            # A JSON body needs a CORS preflight, so another website cannot send the summary without consent.
+            if not request.is_json:
+                return 'Request body must be JSON (Content-Type: application/json)', 415
             try:
                 redact = parse_advisor_body(request.get_json(silent=True))
             except ValueError as ex:

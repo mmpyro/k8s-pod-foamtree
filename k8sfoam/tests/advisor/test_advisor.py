@@ -158,6 +158,14 @@ def test_malformed_model_output_is_a_readable_error(client, openai_client):
     assert response.data.startswith(b'The model returned malformed recommendations')
 
 
+def test_advisor_rejects_a_non_json_body(client, openai_client):
+    # A cross-site form or text/plain POST skips the CORS preflight; it must not reach the model.
+    response = client.post(f'/advisor?context={SHOP}', data='x', content_type='text/plain')
+
+    assert response.status_code == 415
+    openai_client.chat.completions.create.assert_not_called()
+
+
 @pytest.mark.parametrize('body', [[1], {'redact': 'yes'}])
 def test_advisor_rejects_a_bad_body(client, openai_client, body):
     response = client.post('/advisor', json=body)
