@@ -261,6 +261,15 @@ def test_scope_narrows_the_summary_to_the_selected_pods(client, openai_client, r
     assert preview.json['messages'] == openai_client.chat.completions.create.call_args.kwargs['messages']
 
 
+@pytest.mark.parametrize('scope', [[], ['nobody/gone-pod']])
+@pytest.mark.parametrize('url', ['/advisor/preview', '/advisor'])
+def test_a_scope_with_no_pods_is_rejected_before_the_model(client, openai_client, scope, url):
+    response = client.post(f'{url}?context={SHOP}', json={'scope': scope})
+
+    assert response.status_code == 400 and b'matches no pods' in response.data
+    openai_client.chat.completions.create.assert_not_called()
+
+
 def test_preview_post_needs_json(client):
     assert client.post(f'/advisor/preview?context={SHOP}', data='x', content_type='text/plain').status_code == 415
     assert client.post(f'/advisor/preview?context={SHOP}', json={'scope': 3}).status_code == 400

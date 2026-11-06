@@ -535,6 +535,8 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
 
         def advisor_messages(context: Optional[str], redact: bool, scope: Optional[List[str]]) -> Tuple[list, dict]:
             payload, mapping = cluster_summary(context, redact, scope=scope)
+            if scope is not None and not payload['scope']['pods']:  # empty, or its pods are gone: nothing to advise on
+                raise AdvisorError('scope matches no pods: change the query or the pin, or clear them to ask about the whole cluster', 400)
             return build_messages(payload), mapping
 
         @app.route('/advisor/preview', methods=['GET', 'POST'])
@@ -554,6 +556,8 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
             try:
                 messages, _ = advisor_messages(request.args.get('context'), redact, scope)
                 return jsonify({'model': advisor.model, 'messages': messages})
+            except AdvisorError as ex:
+                return str(ex), ex.status
             except Exception as ex:
                 return str(ex), 500
 
