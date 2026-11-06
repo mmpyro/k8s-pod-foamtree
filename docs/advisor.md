@@ -54,8 +54,21 @@ same data as the dashboard, and needs no extra calls to the cluster:
 - the QoS mix and the namespaces with the most BestEffort / Burstable pods
 - per device resource (GPUs): allocatable, requested, and how the free units are spread over nodes
 - the 10 namespaces requesting the most CPU
+- the [pending pods simulation](simulators.md): how many waiting pods would fit now, how many are gated, and why the
+  rest cannot be placed, per reason and for the 10 namespaces with the most of them
+- the [consolidation simulation](simulators.md): how many nodes could go alone, which could be emptied together, the
+  CPU, memory and hourly cost that frees, and what blocks the other nodes
+
+The simulations run on every ask. On 100 nodes and 1.5k pods they take about 0.4 s.
 
 Labels, annotations, images, environment variables and anything else from pod specs are never sent.
+
+### Advice on what you are looking at
+
+With a [query](filtering.md) or a pinned workload on the map, the advisor looks only at those pods and the nodes they
+run on. The consent step says so ("Scoped to 51 pods of the query"), and the summary carries
+`"scope": {"pods": 51, "ofPods": 169}`. The cluster-wide simulations are left out of a scoped summary. Clear the
+query and the pin to ask about the whole cluster.
 
 **Redact names**, on by default, replaces node, node pool, namespace and workload names with stable placeholders
 (`node-3`, `pool-1`, `ns-2`, `workload-7`). The mapping stays on the server, which turns the placeholders in the answer
@@ -72,6 +85,7 @@ Cards are sorted by severity (high, medium, low) and carry a category. Each affe
 - a node, node pool or namespace chip sets the `node:`, `pool:` or `ns:` [query](filtering.md)
 
 **Copy** puts the suggested change on the clipboard. Every answer is marked *AI-generated — verify before applying*.
+When the provider reports token usage, the status line shows it (`· 2,412 tokens`).
 
 The last answer per context is cached on the server. Asking again while the cluster is unchanged returns it
 immediately and spends no tokens. A changed cluster produces a new summary, and a new request.
@@ -93,11 +107,19 @@ Each question sends:
 - the question, and the last 6 turns of the chat
 - the sections of these docs that best match the question and the previous one (a keyword search, about 6000
   characters), plus the [query token reference](filtering.md#token-reference), which is always sent
-- the same cluster summary the advisor sends (see [What is sent](#what-is-sent))
+- the same cluster summary the advisor sends (see [What is sent](#what-is-sent)), for the whole cluster
+- details of up to 3 nodes, namespaces or workloads the question or the previous one names: for a workload its pod
+  count, nodes, QoS, findings and one pod's per-container requests; for a node its pool, zone, instance type,
+  warnings, taints, allocation and biggest workloads; for a namespace its QoS mix, findings and biggest workloads.
+  A pod's name stands for its workload. Container names are sent only with **Redact names** off
 
 The docs ship inside the package, so it works offline with a local model. Type a question and press **Enter**
-(**Shift+Enter** adds a new line). Answers are AI-generated: they can be wrong, so check a fact on the map before you
-act on it.
+(**Shift+Enter** adds a new line). The answer appears as the model writes it. Answers are AI-generated: they can be
+wrong, so check a fact on the map before you act on it.
+
+A query in the answer, such as `ns:payments qos:BestEffort`, is a chip: a click applies it to the map. A one-line code
+block holding a query gets an **Apply query** button. Commands such as `kubectl get pods` stay plain code. Under each
+answer are the docs sections sent and, when the provider reports it, the token count.
 
 **Redact names** is shared with the advisor. With it on, real node, pool, namespace and workload names in your
 question and in the earlier turns are replaced by their placeholders before sending, and the answer is mapped back.

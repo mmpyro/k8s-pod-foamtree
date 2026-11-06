@@ -6,10 +6,11 @@ cluster always gives the same bytes (the answer cache keys on them).
 """
 import re
 from collections import Counter, defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Collection, Dict, Iterable, Iterator, List, Optional, Pattern, Tuple
 from k8sfoam.src.common.resources import is_device
 
 TOP_N = 10
+MENTIONED = 3  # objects named in a question that get their own details
 UNITS = {'cpu': 'cores', 'memory': 'GiB', 'hourlyCost': 'USD'}
 PLACEHOLDER = re.compile(r'\b(?:node|ns|workload|pool)-\d+\b')
 
@@ -17,7 +18,8 @@ PLACEHOLDER = re.compile(r'\b(?:node|ns|workload|pool)-\d+\b')
 class _Names():
     """Real names, or stable placeholders (`ns-1`, `workload-7`) numbered in sorted order."""
 
-    def __init__(self, combined: dict, redact: bool):
+    def __init__(self, combined: dict, redact: bool, namespaces: Collection[str] = ()):
+        """`namespaces` adds those only pods off the map use (pending, gated)."""
         self.redact = redact
         self.mapping: Dict[str, str] = {}
         self.__ids: Dict[Tuple[str, Any], str] = {}
@@ -25,7 +27,7 @@ class _Names():
         pods = [pod for node in nodes for pod in node['pods']]
         for prefix, keys in (('node', {n['name'] for n in nodes}),
                              ('pool', {n['topology']['nodePool'] for n in nodes} - {None}),
-                             ('ns', {p['namespace'] for p in pods}),
+                             ('ns', {p['namespace'] for p in pods} | set(namespaces)),
                              ('workload', {_workload(p)[1:] for p in pods})):
             for i, key in enumerate(sorted(keys, key=str), 1):
                 self.__ids[(prefix, key)] = f'{prefix}-{i}'
@@ -159,12 +161,127 @@ def _namespaces(pods: List[dict], names: _Names) -> List[dict]:
             for ns, ps in biggest]
 
 
-def build_summary(combined: dict, redact: bool) -> Tuple[dict, Dict[str, str]]:
+def _pending(pending: dict, names: _Names) -> dict:
+    """The pending simulation: how many waiting pods would fit now, and why the rest cannot, per namespace."""
+    reasons: Counter = Counter()
+    by_ns: Dict[str, Counter] = defaultdict(Counter)
+    for pod in pending['pending']:
+        slugs = {r['slug'] for r in pod['reasons']}
+        reasons.update(slugs)
+        by_ns[pod['namespace']].update(slugs)
+    count = Counter(p['namespace'] for p in pending['pending'])
+    return {'unschedulable': len(pending['pending']), 'wouldFit': len(pending['placements']),
+            'gated': len(pending['gated']), 'podsByReason': dict(sorted(reasons.items())),
+            'namespaces': [{'namespace': names('ns', ns), 'pods': c, 'podsByReason': dict(sorted(by_ns[ns].items()))}
+                           for ns, c in _top(count)]}
+
+
+def _consolidation(consolidation: dict, nodes: List[dict], names: _Names) -> dict:
+    """The consolidation simulation: which nodes could be emptied together, what that frees, what blocks the rest."""
+    prices = {n['name']: (n.get('price') or {}).get('hourly') for n in nodes}
+    plan = [step['node'] for step in consolidation['plan']]
+    saving: List[Optional[float]] = [prices.get(node) for node in plan]
+    blockers = Counter(b['slug'] for v in consolidation['nodes'] for b in v['blockers'])
+    return {'removableAlone': sum(1 for v in consolidation['nodes'] if v['removable']),
+            'plan': {'nodes': len(plan), 'cpu': _cores(consolidation['freed']['cpu']),
+                     'memory': _gib(consolidation['freed']['memory']),
+                     'hourlySaving': None if None in saving else round(sum(p or 0 for p in saving), 2),
+                     'names': [names('node', n) for n in plan[:TOP_N]]},
+            'nodesByBlocker': dict(sorted(blockers.items())), 'pdbsChecked': consolidation['pdbsChecked']}
+
+
+def _workloads(pods: List[dict], names: _Names) -> List[dict]:
+    """The TOP_N workloads of some pods by requested CPU."""
+    groups: Dict[Tuple[str, str, str], List[dict]] = defaultdict(list)
+    for pod in pods:
+        groups[_workload(pod)].append(pod)
+    biggest = sorted(groups.items(), key=lambda kv: (-sum(p['cpu'] for p in kv[1]), kv[0]))[:TOP_N]
+    return [{'namespace': names('ns', ns), 'kind': kind, 'name': names('workload', (kind, name)), 'pods': len(ps),
+             'cpu': _cores(sum(p['cpu'] for p in ps)), 'memory': _gib(sum(p['memory'] for p in ps)),
+             'findings': dict(sorted(Counter(f for p in ps for f in p['findings']).items()))}
+            for (ns, kind, name), ps in biggest]
+
+
+def _node_details(node: dict, names: _Names) -> dict:
+    topology = node['topology']
+    return {'kind': 'Node', 'name': names('node', node['name']), 'pool': names('pool', topology['nodePool']),
+            'zone': topology['zone'], 'instanceType': topology['instanceType'], 'capacityType': topology['capacityType'],
+            'warnings': list(node['warnings']),
+            'taints': [f"{t.get('key')}:{t.get('effect')}" for t in node['taints']],
+            **_allocation([node]), 'pods': len(node['pods']), 'topWorkloads': _workloads(node['pods'], names)}
+
+
+def _namespace_details(namespace: str, pods: List[dict], names: _Names) -> dict:
+    return {'kind': 'Namespace', 'name': names('ns', namespace), 'pods': len(pods),
+            'qos': dict(sorted(Counter(str(p['qos']) for p in pods).items())),
+            'findings': dict(sorted(Counter(f for p in pods for f in p['findings']).items())),
+            'topWorkloads': _workloads(pods, names)}
+
+
+def _workload_details(key: Tuple[str, str, str], placed: List[Tuple[dict, dict]], names: _Names) -> dict:
+    """A workload's pods; container names only without redaction, as they can carry the same names."""
+    ns, kind, name = key
+    pods = [pod for pod, _ in placed]
+    first = min(pods, key=lambda p: p['name'])
+    return {'kind': kind, 'namespace': names('ns', ns), 'name': names('workload', (kind, name)), 'pods': len(pods),
+            'nodes': sorted({names('node', node['name']) for _, node in placed}, key=str)[:TOP_N],
+            'qos': dict(sorted(Counter(str(p['qos']) for p in pods).items())),
+            'findings': dict(sorted(Counter(f for p in pods for f in p['findings']).items())),
+            'podRequests': {'cpu': _cores(first['cpu']), 'memory': _gib(first['memory']),
+                            'containers': [{'name': f'container-{i}' if names.redact else c['name'], 'init': c['init'],
+                                            'cpu': _cores(c['cpu']), 'memory': _gib(c['memory'])}
+                                           for i, c in enumerate(first.get('containers', []), 1)]}}
+
+
+def _mentioned(text: str, combined: dict, names: _Names) -> List[dict]:
+    """Details of up to MENTIONED nodes, namespaces and workloads named in `text`, in order of appearance.
+
+    A pod's name stands for its workload.
+    """
+    nodes = combined['nodes']
+    placed = [(pod, node) for node in nodes for pod in node['pods']]
+    by_name: Dict[str, Dict[Tuple[str, Any], None]] = defaultdict(dict)  # an ordered set per name
+    for node in nodes:
+        by_name[node['name']][('node', node['name'])] = None
+    for pod, _ in placed:
+        by_name[pod['namespace']][('ns', pod['namespace'])] = None
+        by_name[_workload(pod)[2]][('workload', _workload(pod))] = None
+        by_name[pod['name']][('workload', _workload(pod))] = None
+    if not text or not by_name:
+        return []
+    wanted = list(dict.fromkeys(obj for m in _whole_names(by_name).finditer(text) for obj in by_name[m.group(0)]))
+    details = []
+    for kind, key in wanted[:MENTIONED]:
+        if kind == 'node':
+            details.append(_node_details(next(n for n in nodes if n['name'] == key), names))
+        elif kind == 'ns':
+            details.append(_namespace_details(key, [p for p, _ in placed if p['namespace'] == key], names))
+        else:
+            details.append(_workload_details(key, [(p, n) for p, n in placed if _workload(p) == key], names))
+    return details
+
+
+def _scoped(combined: dict, scope: Collection[str]) -> dict:
+    """Only the pods named "namespace/pod" in `scope`, and the nodes they run on."""
+    wanted = set(scope)
+    nodes = [{**n, 'pods': [p for p in n['pods'] if f"{p['namespace']}/{p['name']}" in wanted]} for n in combined['nodes']]
+    return {**combined, 'nodes': [n for n in nodes if n['pods']], 'pendingPods': None}
+
+
+def build_summary(combined: dict, redact: bool, pending: Optional[dict] = None, consolidation: Optional[dict] = None,
+                  mentioned: str = '', scope: Optional[Collection[str]] = None) -> Tuple[dict, Dict[str, str]]:
     """(payload, mapping) for one context; mapping turns placeholders back into real names and stays server side.
 
+    `pending` / `consolidation` are simulate_pending() / simulate_consolidation() of the same cluster.
+    `mentioned` is free text whose node, namespace, workload and pod names get their own details.
+    `scope` ("namespace/pod" names) narrows the summary to those pods; the cluster-wide simulations are then left out.
     Labels are never sent, redacted or not.
     """
-    names = _Names(combined, redact)
+    if scope is not None:
+        total = sum(len(n['pods']) for n in combined['nodes'])
+        combined, pending, consolidation = _scoped(combined, scope), None, None
+    waiting = {p['namespace'] for p in pending['pending'] + pending['gated']} if pending else set()
+    names = _Names(combined, redact, waiting)
     nodes = combined['nodes']
     pods = [pod for node in nodes for pod in node['pods']]
     payload = {
@@ -180,6 +297,15 @@ def build_summary(combined: dict, redact: bool) -> Tuple[dict, Dict[str, str]]:
         'devices': _devices(nodes),
         'namespaces': _namespaces(pods, names),
     }
+    if scope is not None:
+        payload['scope'] = {'pods': len(pods), 'ofPods': total}
+    if pending is not None:
+        payload['pending'] = _pending(pending, names)
+    if consolidation is not None:
+        payload['consolidation'] = _consolidation(consolidation, nodes, names)
+    details = _mentioned(mentioned, combined, names)
+    if details:
+        payload['mentioned'] = details
     return payload, names.mapping
 
 
@@ -194,13 +320,32 @@ def unredact(value: Any, mapping: Dict[str, str]) -> Any:
     return value
 
 
-def redact_text(text: str, mapping: Dict[str, str]) -> str:
-    """`text` with every real name of `mapping` swapped for its placeholder; the inverse of unredact.
+def _whole_names(names: Iterable[str]) -> Pattern:
+    """Any of `names` as a whole name, longest first: `api` inside `payments-api` does not match; a full stop may end one."""
+    alternatives = '|'.join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(rf'(?<![\w.-])(?:{alternatives})(?![\w-]|\.\w)')
 
-    Longest name first, and only whole names: `api` inside `payments-api` stays; a full stop may end a name.
-    """
+
+def redact_text(text: str, mapping: Dict[str, str]) -> str:
+    """`text` with every real name of `mapping` swapped for its placeholder; the inverse of unredact."""
     placeholders = {real: placeholder for placeholder, real in sorted(mapping.items(), reverse=True)}
     if not placeholders:
         return text
-    names = '|'.join(re.escape(n) for n in sorted(placeholders, key=len, reverse=True))
-    return re.sub(rf'(?<![\w.-])(?:{names})(?![\w-]|\.\w)', lambda m: placeholders[m.group(0)], text)
+    return _whole_names(placeholders).sub(lambda m: placeholders[m.group(0)], text)
+
+
+_WORD_TAIL = re.compile(r'[\w-]*\Z')
+
+
+def unredact_stream(deltas: Iterable[str], mapping: Dict[str, str]) -> Iterator[str]:
+    """unredact() over a streamed answer: a trailing run of name characters is held back until it ends,
+    so a placeholder split over two deltas (`work` + `load-7`) is still swapped. Joined, equals unredact(whole)."""
+    held = ''
+    for delta in deltas:
+        held += delta
+        cut = _WORD_TAIL.search(held).start()  # type: ignore[union-attr]
+        if cut:
+            yield unredact(held[:cut], mapping)
+            held = held[cut:]
+    if held:
+        yield unredact(held, mapping)

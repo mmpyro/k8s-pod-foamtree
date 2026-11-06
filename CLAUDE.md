@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`k8sfoams`: a local, read-only Flask dashboard that visualizes Kubernetes **resource requests** (not live usage) per node and pod. It reads `~/.kube/config` / `$KUBECONFIG`, never writes to the cluster or the kubeconfig. Python package in `k8sfoam/`, React UI bundled with esbuild. Supports Python >= 3.9, so keep `typing.Optional`/`List` style, no `X | None`.
+`k8sfoams`: a local, read-only Flask dashboard that visualizes Kubernetes **resource requests** (not live usage) per node and pod. It reads `~/.kube/config` / `$KUBECONFIG`, never writes to the cluster or the kubeconfig. Python package in `k8sfoam/`, React UI bundled with esbuild. Supports Python >= 3.10.
 
 ## Commands
 

@@ -22,6 +22,11 @@ function highlightOf(a) {
   return null;
 }
 
+// " · 1,234 tokens" when the provider reported usage; empty otherwise.
+const tokens = usage => (usage ? ` · ${usage.total.toLocaleString()} tokens` : "");
+// scope is App's { label, pods } or null for the whole cluster.
+const scopeText = scope => `Scoped to ${scope.pods.length} pod${scope.pods.length === 1 ? "" : "s"} of ${scope.label}`;
+
 // The user message is "Cluster summary:\n<json>"; pretty-print the JSON so the preview is readable.
 function messageText(m) {
   const [lead, json] = m.content.split(/\n(.*)/s);
@@ -37,23 +42,26 @@ function RedactToggle({ redact, setRedact, disabled }) {
   );
 }
 
-function Consent({ ctx, model, redact, setRedact, onAsk, onClose }) {
+function Consent({ ctx, model, scope, redact, setRedact, onAsk, onClose }) {
   const [preview, setPreview] = React.useState(null);
   const [error, setError] = React.useState(null);
+  // A string, so a live update that leaves the same pods in scope does not rebuild the preview.
+  const scopeKey = scope ? scope.pods.join(",") : null;
   React.useEffect(() => {
     let live = true;
     setPreview(null);
-    window.k8sApi.advisorPreview(ctx, redact)
+    window.k8sApi.advisorPreview(ctx, redact, scope && scope.pods)
       .then(p => live && (setPreview(p), setError(null)))
       .catch(err => live && setError(err.message || String(err)));
     return () => { live = false; };
-  }, [ctx, redact]);
+  }, [ctx, redact, scopeKey]);
 
   return (
     <>
       <div className="advisor-intro">
         Nothing has been sent yet. <b>Send</b> posts the messages below to <b>{model}</b>, the model the server is
         configured with. They summarise this cluster's requests, health and audit findings; labels are never included.
+        {scope && <> {scopeText(scope)}: clear the query or the pin to ask about the whole cluster.</>}
       </div>
       <div className="advisor-pre">
         {!preview && !error && <div className="sim-note">Building the summary…</div>}
@@ -108,7 +116,7 @@ function RecommendationCard({ r, onCopy, onHighlight }) {
 }
 
 // `advice` is App's { ctx, busy, error, result } for the current context, or null before the first ask.
-function AdvisorModal({ ctx, model, consented, redact, setRedact, advice, onAsk, onCopy, onHighlight, onClose }) {
+function AdvisorModal({ ctx, model, consented, scope, redact, setRedact, advice, onAsk, onCopy, onHighlight, onClose }) {
   const result = advice && advice.result;
   const busy = !!(advice && advice.busy);
   return (
@@ -122,7 +130,7 @@ function AdvisorModal({ ctx, model, consented, redact, setRedact, advice, onAsk,
           <button className="icon-btn" onClick={onClose}><CloseIcon /></button>
         </div>
         {!consented ? (
-          <Consent ctx={ctx} model={model} redact={redact} setRedact={setRedact} onAsk={onAsk} onClose={onClose} />
+          <Consent ctx={ctx} model={model} scope={scope} redact={redact} setRedact={setRedact} onAsk={onAsk} onClose={onClose} />
         ) : (
           <>
             <div className="advisor-banner">AI-generated — verify before applying. The audit and health data stay the source of truth.</div>
@@ -135,7 +143,10 @@ function AdvisorModal({ ctx, model, consented, redact, setRedact, advice, onAsk,
               )}
               {advice && advice.error && <span className="sim-error">{advice.error}</span>}
               {result && !busy && (
-                <span className="sim-note">{result.recommendations.length} recommendations{result.cached ? " · cached answer" : ""}</span>
+                <span className="sim-note">
+                  {result.recommendations.length} recommendations{result.cached ? " · cached answer" : ""}{tokens(result.usage)}
+                  {advice.scope && <> · {scopeText(advice.scope)}</>}
+                </span>
               )}
               <RedactToggle redact={redact} setRedact={setRedact} disabled={busy} />
               <button className={`btn-primary ${busy ? "spinning" : ""}`} disabled={busy} onClick={onAsk}>Ask again</button>
@@ -155,20 +166,45 @@ function AdvisorModal({ ctx, model, consented, redact, setRedact, advice, onAsk,
   );
 }
 
+// Code the user can apply to the map: a valid query of filters and label selectors, not bare words
+// (which would make every `kubectl get pods` a name search).
+function isQuery(code) {
+  const q = window.k8sQuery.parseQuery(code);
+  return q.terms.length > 0 && q.errors.length === 0 && q.terms.every(t => t.kind !== "text");
+}
+
+// Inline `code`; a query becomes a chip that applies it.
+function InlineText({ text, onQuery }) {
+  return text.split(/`([^`\n]+)`/).map((part, i) => {
+    if (i % 2 === 0) return part;
+    return isQuery(part)
+      ? <button key={i} className="advisor-chip" title="Apply this query to the map" onClick={() => onQuery(part.trim())}>{part}</button>
+      : <code key={i}>{part}</code>;
+  });
+}
+
 // Model answers are markdown; without a markdown library, fenced code goes in <pre> and the rest stays as text.
-function AnswerText({ text }) {
-  return text.split(/```[^\n]*\n?/).map((part, i) => (i % 2
-    ? <pre key={i} className="assistant-code">{part.replace(/\n$/, "")}</pre>
-    : part.trim() && <div key={i} className="assistant-text">{part.trim()}</div>));
+function AnswerText({ text, onQuery }) {
+  return text.split(/```[^\n]*\n?/).map((part, i) => {
+    if (i % 2 === 0) return part.trim() && <div key={i} className="assistant-text"><InlineText text={part.trim()} onQuery={onQuery} /></div>;
+    const code = part.replace(/\n$/, "");
+    return (
+      <React.Fragment key={i}>
+        <pre className="assistant-code">{code}</pre>
+        {!code.includes("\n") && isQuery(code) && <button className="sim-preset" onClick={() => onQuery(code.trim())}>Apply query</button>}
+      </React.Fragment>
+    );
+  });
 }
 
 // `chat` is App's { ctx, turns: [{ role, content, sources }], busy, error } for the current context, or null.
-function AssistantModal({ model, redact, setRedact, chat, onSend, onClear, onClose }) {
+function AssistantModal({ model, redact, setRedact, chat, onSend, onQuery, onClear, onClose }) {
   const [draft, setDraft] = React.useState("");
   const endRef = React.useRef(null);
   const turns = chat ? chat.turns : [];
   const busy = !!(chat && chat.busy);
-  React.useEffect(() => { endRef.current && endRef.current.scrollIntoView({ block: "end" }); }, [turns.length, busy]);
+  const last = turns.length ? turns[turns.length - 1].content.length : 0;
+  React.useEffect(() => { endRef.current && endRef.current.scrollIntoView({ block: "end" }); }, [turns.length, last, busy]);
   const send = () => {
     if (!draft.trim() || busy) return;
     onSend(draft.trim());
@@ -190,11 +226,15 @@ function AssistantModal({ model, redact, setRedact, chat, onSend, onClear, onClo
           )}
           {turns.map((t, i) => (
             <div key={i} className={`assistant-turn assistant-${t.role}`}>
-              {t.role === "user" ? <div className="assistant-text">{t.content}</div> : <AnswerText text={t.content} />}
-              {t.sources && t.sources.length > 0 && <div className="assistant-sources">Docs: {t.sources.join(" · ")}</div>}
+              {t.role === "user" ? <div className="assistant-text">{t.content}</div> : <AnswerText text={t.content} onQuery={onQuery} />}
+              {(t.sources || t.usage) && (
+                <div className="assistant-sources">
+                  {t.sources && t.sources.length > 0 && `Docs: ${t.sources.join(" · ")}`}{tokens(t.usage)}
+                </div>
+              )}
             </div>
           ))}
-          {busy && (
+          {busy && turns[turns.length - 1].role === "user" && (
             <span className="sim-note advisor-busy" role="status">
               <span className="advisor-spinner" aria-hidden="true" />
               Asking {model}… a local model can take a few minutes.

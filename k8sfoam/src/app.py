@@ -1,5 +1,6 @@
 import argparse
 import hmac
+import json
 import ipaddress
 import logging
 import re
@@ -9,9 +10,9 @@ import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
-from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, chat, load_config
+from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, chat, chat_stream, load_config
 from k8sfoam.src.advisor.assistant import build_chat_messages
-from k8sfoam.src.advisor.summary import build_summary, unredact
+from k8sfoam.src.advisor.summary import build_summary, unredact, unredact_stream
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
@@ -250,13 +251,26 @@ def parse_advisor_body(body) -> bool:
     return redact
 
 
+MAX_SCOPE = 20000
+
+
+def parse_scope(body) -> Optional[List[str]]:
+    """The "namespace/pod" names an advisor request is narrowed to, None for the whole cluster. Raises ValueError."""
+    scope = body.get('scope') if isinstance(body, dict) else None
+    if scope is None:
+        return None
+    if not isinstance(scope, list) or len(scope) > MAX_SCOPE or not all(isinstance(p, str) for p in scope):
+        raise ValueError(f'scope must be a list of at most {MAX_SCOPE} "namespace/pod" names')
+    return scope
+
+
 MAX_QUESTION = 2000
 MAX_HISTORY = 20
 MAX_TURN = 8000
 
 
-def parse_assistant_body(body) -> Tuple[str, List[Dict[str, str]], bool]:
-    """(question, history, redact) of an assistant request. Raises ValueError."""
+def parse_assistant_body(body) -> Tuple[str, List[Dict[str, str]], bool, bool]:
+    """(question, history, redact, stream) of an assistant request. Raises ValueError."""
     redact = parse_advisor_body(body)
     question = body.get('question') if isinstance(body, dict) else None
     if not isinstance(question, str) or not question.strip():
@@ -271,7 +285,10 @@ def parse_assistant_body(body) -> Tuple[str, List[Dict[str, str]], bool]:
             raise ValueError('each history turn must be {"role": "user" or "assistant", "content": "..."}')
         if len(turn['content']) > MAX_TURN:
             raise ValueError(f'a history turn is longer than {MAX_TURN} characters')
-    return question.strip(), [{'role': t['role'], 'content': t['content']} for t in history], redact
+    stream = body.get('stream', False)
+    if not isinstance(stream, bool):
+        raise ValueError(f'stream must be true or false, got {stream!r}')
+    return question.strip(), [{'role': t['role'], 'content': t['content']} for t in history], redact, stream
 
 
 class Registry(Protocol):
@@ -497,25 +514,50 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def get_advisor_status():
             return jsonify({'enabled': advisor is not None, 'model': advisor.model if advisor else None})
 
-        # Last answer per context, keyed by a hash of model + messages: a page refresh spends no tokens.
-        advice: Dict[Optional[str], Tuple[str, list]] = {}
+        # Last (key, recommendations, usage) per context, keyed by a hash of model + messages: a refresh spends no tokens.
+        advice: Dict[Optional[str], Tuple[str, list, Optional[dict]]] = {}
 
-        def cluster_summary(context: Optional[str], redact: bool) -> Tuple[dict, dict]:
+        def cluster_summary(context: Optional[str], redact: bool, mentioned: str = '',
+                            scope: Optional[List[str]] = None) -> Tuple[dict, dict]:
+            """build_summary() of a context, with the pending and consolidation simulations of the same snapshot.
+
+            shortcut: the simulations rerun on every ask (0.4 s at 100 nodes and 1.5k pods, growing with nodes x pods);
+            memoize per (context, version) if big clusters make asking slow.
+            """
             k8s_client = cluster(context)
-            combined = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book).combined()
-            return build_summary(combined, redact)
+            nodes, pods = k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()]
+            combined = FoamTreeMapper(nodes, pods, price_book).combined()
+            pending = consolidation = None
+            if scope is None:  # cluster-wide facts; a scoped summary leaves them out anyway
+                pending = simulate_pending(nodes, pods)
+                consolidation = simulate_consolidation(nodes, pods, k8s_client.get_disruption_budgets())
+            return build_summary(combined, redact, pending, consolidation, mentioned, scope)
 
-        def advisor_messages(context: Optional[str], redact: bool) -> Tuple[list, dict]:
-            payload, mapping = cluster_summary(context, redact)
+        def advisor_messages(context: Optional[str], redact: bool, scope: Optional[List[str]]) -> Tuple[list, dict]:
+            payload, mapping = cluster_summary(context, redact, scope=scope)
+            if scope is not None and not payload['scope']['pods']:  # empty, or its pods are gone: nothing to advise on
+                raise AdvisorError('scope matches no pods: change the query or the pin, or clear them to ask about the whole cluster', 400)
             return build_messages(payload), mapping
 
-        @app.route('/advisor/preview', methods=['GET'])
+        @app.route('/advisor/preview', methods=['GET', 'POST'])
         def get_advisor_preview():
             if advisor is None:
                 return ADVISOR_OFF, 404
+            if request.method == 'POST':  # JSON only, like POST /advisor: a scope does not fit in a URL
+                if not request.is_json:
+                    return 'Request body must be JSON (Content-Type: application/json)', 415
+                try:
+                    body = request.get_json(silent=True)
+                    redact, scope = parse_advisor_body(body), parse_scope(body)
+                except ValueError as ex:
+                    return str(ex), 400
+            else:
+                redact, scope = request.args.get('redact') != 'false', None
             try:
-                messages, _ = advisor_messages(request.args.get('context'), request.args.get('redact') != 'false')
+                messages, _ = advisor_messages(request.args.get('context'), redact, scope)
                 return jsonify({'model': advisor.model, 'messages': messages})
+            except AdvisorError as ex:
+                return str(ex), ex.status
             except Exception as ex:
                 return str(ex), 500
 
@@ -527,41 +569,72 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
             if not request.is_json:
                 return 'Request body must be JSON (Content-Type: application/json)', 415
             try:
-                redact = parse_advisor_body(request.get_json(silent=True))
+                body = request.get_json(silent=True)
+                redact, scope = parse_advisor_body(body), parse_scope(body)
             except ValueError as ex:
                 return str(ex), 400
             context = request.args.get('context')
             try:
-                messages, mapping = advisor_messages(context, redact)
+                messages, mapping = advisor_messages(context, redact, scope)
                 key = cache_key(advisor, messages)
                 cached = advice.get(context)
                 if cached and cached[0] == key:
-                    return jsonify({'model': advisor.model, 'cached': True, 'recommendations': cached[1]})
-                recommendations = unredact(ask(advisor, messages), mapping)
+                    return jsonify({'model': advisor.model, 'cached': True, 'recommendations': cached[1], 'usage': cached[2]})
+                recommendations, usage = ask(advisor, messages)
+                recommendations = unredact(recommendations, mapping)
             except AdvisorError as ex:
                 return str(ex), ex.status
             except Exception as ex:
                 return str(ex), 500
-            advice[context] = (key, recommendations)
-            return jsonify({'model': advisor.model, 'cached': False, 'recommendations': recommendations})
+            advice[context] = (key, recommendations, usage)
+            return jsonify({'model': advisor.model, 'cached': False, 'recommendations': recommendations, 'usage': usage})
 
         @app.route('/assistant', methods=['POST'])
         def ask_assistant():
             if advisor is None:
                 return ADVISOR_OFF, 404
             try:
-                question, history, redact = parse_assistant_body(request.get_json(silent=True))
+                question, history, redact, stream = parse_assistant_body(request.get_json(silent=True))
             except ValueError as ex:
                 return str(ex), 400
             try:
-                payload, mapping = cluster_summary(request.args.get('context'), redact)
+                previous = next((t['content'] for t in reversed(history) if t['role'] == 'user'), '')
+                payload, mapping = cluster_summary(request.args.get('context'), redact, f'{question}\n{previous}')
                 messages, sources = build_chat_messages(question, history, payload, mapping)
-                answer = unredact(chat(advisor, messages), mapping)
+                if not stream:
+                    answer, usage = chat(advisor, messages)
+                    return jsonify({'model': advisor.model, 'answer': unredact(answer, mapping), 'sources': sources,
+                                    'usage': usage})
+                deltas = chat_stream(advisor, messages)  # sends the request: a provider error still gets its status
             except AdvisorError as ex:
                 return str(ex), ex.status
             except Exception as ex:
                 return str(ex), 500
-            return jsonify({'model': advisor.model, 'answer': answer, 'sources': sources})
+
+            def lines() -> Iterator[str]:
+                usage: List[Optional[dict]] = [None]
+
+                def texts() -> Iterator[str]:
+                    for item in deltas:
+                        if isinstance(item, str):
+                            yield item
+                        else:
+                            usage[0] = item
+                parts = []
+                try:
+                    for text in unredact_stream(texts(), mapping):
+                        parts.append(text)
+                        yield json.dumps({'delta': text}) + '\n'
+                    answer = ''.join(parts).strip()
+                    if not answer:
+                        raise AdvisorError('The model returned an empty answer', 502)
+                    yield json.dumps({'done': True, 'model': advisor.model, 'answer': answer, 'sources': sources,
+                                      'usage': usage[0]}) + '\n'
+                except Exception as ex:  # the status line is gone; the error travels as the last line
+                    yield json.dumps({'error': str(ex)}) + '\n'
+
+            return Response(lines(), mimetype='application/x-ndjson',
+                            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
