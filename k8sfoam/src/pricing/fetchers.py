@@ -171,7 +171,7 @@ def gcp_skus() -> Iterator[dict]:
     from google.auth.transport.requests import AuthorizedSession  # type: ignore
     credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-billing.readonly'])
     session = AuthorizedSession(credentials)
-    params = {'pageSize': 5000, 'currencyCode': 'USD'}
+    params = {'pageSize': '5000', 'currencyCode': 'USD'}
     while True:
         response = session.get(GCP_URL, params=params, timeout=TIMEOUT)
         response.raise_for_status()
