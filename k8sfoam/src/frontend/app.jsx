@@ -300,21 +300,23 @@ function App() {
   }, []);
 
   // Lives in App, not the modal: a local model answers in minutes and the modal may be closed meanwhile.
-  // An answer for a context the user has since left is dropped.
+  // An answer for a context or scope the user has since left is dropped.
+  const scopeKey = scope => (scope ? scope.pods.join(",") : null);
   const askAdvisor = () => {
     const ctx = ctxName;
     const scope = advisorScope;
     setAdvisorConsent(true);
-    setAdvice({ ctx, busy: true });
-    const settle = next => setAdvice(a => (a && a.ctx === ctx ? next : a));
+    setAdvice({ ctx, busy: true, scope });
+    const settle = next => setAdvice(a => (a && a.ctx === ctx && scopeKey(a.scope) === scopeKey(scope) ? next : a));
     api.advisor(ctx, advisorRedact, scope && scope.pods)
       .then(result => settle({ ctx, result, scope }))
-      .catch(err => settle({ ctx, error: err.message || String(err) }));
+      .catch(err => settle({ ctx, error: err.message || String(err), scope }));
   };
   const ctxAdvice = advice && advice.ctx === ctxName ? advice : null;
   const openAdvisor = () => {
     setAdvisorOpen(true);
-    if (advisorConsent && !ctxAdvice) askAdvisor();
+    // Ask again when the query or the pin changed since the last answer, not only on a first open.
+    if (advisorConsent && (!ctxAdvice || scopeKey(ctxAdvice.scope) !== scopeKey(advisorScope))) askAdvisor();
   };
   // Like askAdvisor: the request outlives the modal, and an answer for a context since left is dropped.
   const ctxChat = chat && chat.ctx === ctxName ? chat : null;
