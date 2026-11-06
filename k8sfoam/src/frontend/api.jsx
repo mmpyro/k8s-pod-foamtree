@@ -62,12 +62,36 @@ const serverApi = {
   fitPresets: () => Promise.resolve([]),
   // {enabled, model}; the API key never leaves the server.
   advisorStatus: () => apiFetch("/advisor/status").then(readJson),
-  advisorPreview: (ctx, redact) => apiFetch(
-    `/advisor/preview${contextParam(ctx)}${ctx ? "&" : "?"}redact=${redact}`,
-  ).then(readJson),
-  advisor: (ctx, redact) => postJson(`/advisor${contextParam(ctx)}`, { redact }),
-  // body: { question, history: [{ role, content }], redact } -> { model, answer, sources }
-  assistant: (ctx, body) => postJson(`/assistant${contextParam(ctx)}`, body),
+  // scope: the "namespace/pod" names the advice is narrowed to, null for the whole cluster.
+  advisorPreview: (ctx, redact, scope) => postJson(`/advisor/preview${contextParam(ctx)}`, { redact, scope }),
+  advisor: (ctx, redact, scope) => postJson(`/advisor${contextParam(ctx)}`, { redact, scope }),
+  // body: { question, history: [{ role, content }], redact }; onDelta(text) per streamed piece of the answer.
+  // Resolves to { model, answer, sources, usage }, the answer in full.
+  assistant: async (ctx, body, onDelta) => {
+    const res = await apiFetch(`/assistant${contextParam(ctx)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, stream: true }),
+    });
+    if (!res.ok) await readJson(res); // throws the server's reason
+    // One JSON object per line: { delta }, then { done, ... } or { error }.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines.filter(Boolean)) {
+        const msg = JSON.parse(line);
+        if (msg.error) throw new Error(msg.error);
+        if (msg.done) return msg;
+        onDelta(msg.delta);
+      }
+      if (done) throw new Error("The answer ended early");
+    }
+  },
 };
 
 // Shown when a fit is asked for a pod no file holds an answer for.

@@ -25,7 +25,11 @@ and the cluster summary below; if they do not answer the question, say so and na
 k8sfoams never changes the cluster: to change something, give the YAML or kubectl command for the user to apply.
 Use the exact names from the summary. Be concise; markdown and fenced code blocks are fine.
 The cluster summary is the live data of the cluster the user is looking at; its lists are sorted biggest first
-(namespaces by requested CPU). Examples in the documentation describe demo clusters, not this one."""
+(namespaces by requested CPU). `pending` and `consolidation` are scheduler simulation results: where the waiting pods
+would fit and why the rest cannot, and which nodes could be emptied together. `mentioned` holds the details of the
+nodes, namespaces and workloads named in the question. Examples in the documentation describe demo clusters, not this one.
+To show something on the map, give a query from the token reference in single backticks, such as `qos:BestEffort`;
+the user can apply it with one click."""
 # Summary before docs, and the sentence above: with the docs first, qwen2.5:32b took a namespace named in a
 # docs example for the biggest one.
 

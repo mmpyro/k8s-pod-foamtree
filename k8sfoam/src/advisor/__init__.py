@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 from importlib.util import find_spec
-from typing import List, Mapping, NamedTuple, Optional
+from typing import Any, Dict, Iterator, List, Mapping, NamedTuple, Optional, Tuple
 
 DEFAULT_MODEL = 'gpt-4o-mini'
 
@@ -34,7 +34,10 @@ CATEGORIES = ('requests/limits', 'resilience', 'scheduling', 'node health', 'cos
 SYSTEM_PROMPT = """You are a Kubernetes capacity and reliability reviewer.
 You get a JSON summary of one cluster's resource *requests* (not live usage): allocation per node pool and zone,
 node warnings, audit findings with the workloads they hit, the QoS mix, device fragmentation and the biggest namespaces.
-The findings and warnings were computed deterministically and are facts; do not contradict or invent them.
+It may also hold scheduler simulations: `pending` (whether waiting pods would fit now, and why the rest cannot) and
+`consolidation` (which nodes could be emptied together, and what that frees).
+The findings, warnings and simulations were computed deterministically and are facts; do not contradict or invent them.
+With `scope`, the summary covers only the pods the user selected on the map and the nodes they run on.
 Explain why they matter and what to change, ordered by impact. Stay within resource configuration:
 requests and limits, resilience (replicas, spreading, PDBs), scheduling constraints, node health, node pools and cost.
 Every recommendation names the objects it is about in `affected` (kind is Namespace, Node, NodePool or a workload
@@ -91,28 +94,62 @@ def cache_key(config: AdvisorConfig, messages: List[dict]) -> str:
     return hashlib.sha256(json.dumps([config.model, messages], sort_keys=True).encode()).hexdigest()
 
 
-def ask(config: AdvisorConfig, messages: List[dict]) -> List[dict]:
-    """The model's recommendations, most severe first. Raises AdvisorError; never retries."""
-    return parse_recommendations(_complete(config, messages, response_format={
-        'type': 'json_schema', 'json_schema': {'name': 'recommendations', 'strict': True, 'schema': RESPONSE_SCHEMA}}))
+def ask(config: AdvisorConfig, messages: List[dict]) -> Tuple[List[dict], Optional[Dict[str, int]]]:
+    """(recommendations most severe first, token usage). Raises AdvisorError; never retries."""
+    text, usage = _complete(config, messages, response_format={
+        'type': 'json_schema', 'json_schema': {'name': 'recommendations', 'strict': True, 'schema': RESPONSE_SCHEMA}})
+    return parse_recommendations(text), usage
 
 
-def chat(config: AdvisorConfig, messages: List[dict]) -> str:
-    """The model's free-text answer to the assistant's messages. Raises AdvisorError; never retries."""
-    answer = (_complete(config, messages) or '').strip()
+def chat(config: AdvisorConfig, messages: List[dict]) -> Tuple[str, Optional[Dict[str, int]]]:
+    """(free-text answer to the assistant's messages, token usage). Raises AdvisorError; never retries."""
+    text, usage = _complete(config, messages)
+    answer = (text or '').strip()
     if not answer:
         raise AdvisorError('The model returned an empty answer', 502)
-    return answer
+    return answer, usage
 
 
-def _complete(config: AdvisorConfig, messages: List[dict], **kwargs) -> Optional[str]:
-    """The text of one chat completion, provider errors mapped to AdvisorError."""
+def chat_stream(config: AdvisorConfig, messages: List[dict]) -> Iterator[Any]:
+    """Text deltas of the assistant's answer, then one usage dict (None when the provider reports none).
+
+    The request is sent before this returns, so a rejected key or an unreachable provider raises
+    AdvisorError here, while the HTTP status can still say so. A failure mid-stream raises from the iterator.
+    """
+    import openai  # the optional `advisor` extra
+
+    stream = _create(config, messages, stream=True, stream_options={'include_usage': True})
+
+    def deltas() -> Iterator[Any]:
+        usage = None
+        try:
+            for chunk in stream:
+                usage = _usage(chunk) or usage
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except openai.APIError as ex:
+            raise AdvisorError(f'The model stopped answering: {ex}', 502)
+        yield usage
+    return deltas()
+
+
+def _usage(response: Any) -> Optional[Dict[str, int]]:
+    """Token counts of a response or the last stream chunk; None when the provider sends none."""
+    usage = getattr(response, 'usage', None)
+    counts = {k: getattr(usage, f'{k}_tokens', None) for k in ('prompt', 'completion', 'total')}
+    if not all(isinstance(v, int) for v in counts.values()):
+        return None
+    return {k: int(v) for k, v in counts.items()}  # type: ignore[arg-type]
+
+
+def _create(config: AdvisorConfig, messages: List[dict], **kwargs) -> Any:
+    """One chat completion request (a stream with stream=True), provider errors mapped to AdvisorError."""
     import openai  # the optional `advisor` extra: load_config() returned None without it
 
     client = openai.OpenAI(api_key=config.api_key, base_url=config.base_url, max_retries=0, timeout=TIMEOUT)
     try:
         # Plain dicts, not the SDK's TypedDicts: the schema and messages are also served to the consent dialog.
-        response = client.chat.completions.create(
+        return client.chat.completions.create(
             model=config.model, messages=messages, temperature=0, **kwargs)  # type: ignore[arg-type]
     except openai.AuthenticationError:
         raise AdvisorError('The LLM provider rejected the API key (OPENAI_API_KEY)', 401)
@@ -124,9 +161,14 @@ def _complete(config: AdvisorConfig, messages: List[dict], **kwargs) -> Optional
         raise AdvisorError(f'Cannot reach the LLM provider at {client.base_url}', 502)
     except openai.APIStatusError as ex:
         raise AdvisorError(f'The LLM provider answered {ex.status_code}: {ex.message}', 502)
+
+
+def _complete(config: AdvisorConfig, messages: List[dict], **kwargs) -> Tuple[Optional[str], Optional[Dict[str, int]]]:
+    """(text, usage) of one chat completion."""
+    response = _create(config, messages, **kwargs)
     if not response.choices:
         raise AdvisorError('The model returned no answer', 502)
-    return response.choices[0].message.content
+    return response.choices[0].message.content, _usage(response)
 
 
 def _strings(item: dict, keys: tuple, where: str) -> None:

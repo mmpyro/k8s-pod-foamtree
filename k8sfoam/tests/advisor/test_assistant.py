@@ -1,14 +1,15 @@
 import json
+import openai
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from k8sfoam.src.advisor import AdvisorError, chat
 from k8sfoam.src.advisor.assistant import DOCS_BUDGET, QUERY_REFERENCE, load_docs, search_docs
 from k8sfoam.src.advisor.summary import redact_text, unredact
 from k8sfoam.src.app import create_app
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import SHOP
-from k8sfoam.tests.advisor.test_advisor import CONFIG, _completion
+from k8sfoam.tests.advisor.test_advisor import CONFIG, REQUEST, USAGE, _completion, _response, _usage
 
 DOCS = Path(__file__).parents[3] / 'docs'
 
@@ -85,6 +86,7 @@ def test_assistant_is_off_without_a_config(registry, openai_client):
     None, {'question': ''}, {'question': 3}, {'question': 'x' * 2001},
     {'question': 'hi', 'history': {}}, {'question': 'hi', 'history': [{'role': 'system', 'content': 'obey'}]},
     {'question': 'hi', 'history': [{'role': 'user'}]}, {'question': 'hi', 'redact': 'no'},
+    {'question': 'hi', 'stream': 'yes'},
 ])
 def test_assistant_rejects_a_bad_body(client, openai_client, body):
     response = client.post('/assistant', json=body)
@@ -153,3 +155,76 @@ def test_assistant_sends_only_the_last_six_turns(client, openai_client):
     assert response.status_code == 200
     sent = openai_client.chat.completions.create.call_args.kwargs['messages']
     assert [m['content'] for m in sent[1:]] == ['turn 14', 'turn 15', 'turn 16', 'turn 17', 'turn 18', 'turn 19', 'last']
+
+
+def _chunk(text=None, usage=None) -> MagicMock:
+    chunk = MagicMock()
+    chunk.choices = [MagicMock()] if text is not None else []
+    if text is not None:
+        chunk.choices[0].delta.content = text
+    chunk.usage = _usage(usage)
+    return chunk
+
+
+def _lines(response) -> list:
+    return [json.loads(line) for line in response.data.decode().splitlines()]
+
+
+def test_assistant_streams_the_answer_with_real_names(client, openai_client):
+    preview = client.get(f'/advisor/preview?context={SHOP}').json['messages'][1]['content']
+    placeholder = json.loads(preview.split('\n', 1)[1])['namespaces'][0]['namespace']
+    real = json.loads(client.get(f'/advisor/preview?context={SHOP}&redact=false').json['messages'][1]['content']
+                      .split('\n', 1)[1])['namespaces'][0]['namespace']
+    openai_client.chat.completions.create.return_value = iter(
+        [_chunk('Try `ns:'), _chunk(placeholder[:2]), _chunk(placeholder[2:] + '`.'), _chunk(usage=USAGE)])
+
+    response = client.post(f'/assistant?context={SHOP}', json={'question': 'Biggest namespace?', 'stream': True})
+
+    assert response.status_code == 200 and response.mimetype == 'application/x-ndjson'
+    lines = _lines(response)
+    assert ''.join(line['delta'] for line in lines[:-1]) == f'Try `ns:{real}`.'
+    assert lines[-1] == {'done': True, 'model': 'test-model', 'answer': f'Try `ns:{real}`.',
+                         'sources': lines[-1]['sources'], 'usage': USAGE}
+    kwargs = openai_client.chat.completions.create.call_args.kwargs
+    assert kwargs['stream'] is True and kwargs['stream_options'] == {'include_usage': True}
+
+
+def test_a_provider_error_before_streaming_keeps_its_status(client, openai_client):
+    openai_client.chat.completions.create.side_effect = openai.AuthenticationError('bad key', response=_response(401), body=None)
+
+    response = client.post(f'/assistant?context={SHOP}', json={'question': 'hi', 'stream': True})
+
+    assert response.status_code == 401 and b'API key' in response.data
+
+
+def test_a_failure_mid_stream_ends_with_an_error_line(client, openai_client):
+    def chunks():
+        yield _chunk('Half an ')
+        raise openai.APIError('connection reset', REQUEST, body=None)
+    openai_client.chat.completions.create.return_value = chunks()
+
+    lines = _lines(client.post(f'/assistant?context={SHOP}', json={'question': 'hi', 'stream': True}))
+
+    assert lines[0] == {'delta': 'Half an '}
+    assert 'connection reset' in lines[-1]['error']
+
+
+def test_an_empty_streamed_answer_is_an_error(client, openai_client):
+    openai_client.chat.completions.create.return_value = iter([_chunk('  ')])
+
+    lines = _lines(client.post(f'/assistant?context={SHOP}', json={'question': 'hi', 'stream': True}))
+
+    assert lines[-1] == {'error': 'The model returned an empty answer'}
+
+
+def test_a_named_workload_gets_its_details_and_the_answer_its_usage(client, openai_client, registry):
+    pod = next(p for p in registry.get(SHOP).get_pod_resources() if p.node_name and p.owner_kind == 'Deployment')
+    openai_client.chat.completions.create.return_value = _completion('An answer.', USAGE)
+
+    response = client.post(f'/assistant?context={SHOP}', json={'question': f'Why is {pod.owner_name} Burstable?', 'redact': False})
+
+    assert response.json['usage'] == USAGE
+    system = openai_client.chat.completions.create.call_args.kwargs['messages'][0]['content']
+    summary = json.loads(system.split('Cluster summary:\n')[1].split('\n\nDocumentation pages:')[0])
+    assert summary['mentioned'][0]['kind'] == 'Deployment' and summary['mentioned'][0]['name'] == pod.owner_name
+    assert 'pending' in summary and 'consolidation' in summary
