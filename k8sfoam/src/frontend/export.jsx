@@ -8,7 +8,7 @@ const {
 } = window.k8sTreemap;
 const { groupMode } = window.k8sTopology;
 const { workloadKey } = window.k8sWorkload;
-const { qosHue } = window.k8sQos;
+const { podHue } = window.k8sQos;
 const { detectResources, isBytes } = window.k8sResources;
 
 const FONT_MONO = `'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace`;
@@ -133,8 +133,7 @@ function cardSvg(node, slot, idx, opts) {
     const wl = pinned ? workloadKey(pod) : null;
     const peer = !!pinned && !dim && wl === pinned;
     const opacity = dim ? 0.16 : pinned && wl !== pinned ? 0.22 : 1;
-    const podHue = colorBy === "qos" ? qosHue(pod.qos) : hue;
-    out.push(podSvg(pod, it, podHue, nodeStyle, metric, showLabels, { match: matched, peer, opacity, accent }));
+    out.push(podSvg(pod, it, podHue(pod, colorBy, hue), nodeStyle, metric, showLabels, { match: matched, peer, opacity, accent }));
   }
   out.push("</g>");
   out.push(rect(0.5, 0.5, w - 1, h - 1, `rx="10" fill="none" stroke="${colors.border}" stroke-width="${colors.borderWidth}"`));

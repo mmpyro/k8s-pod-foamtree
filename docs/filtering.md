@@ -35,6 +35,7 @@ offending tokens are listed under the bar with the reason. Half-typing `ns:` can
 | `health:<warning>` | nodes carrying a [health warning](node-health.md), and every pod on them | `cordoned`, `not-ready`, `memory-pressure`, `disk-pressure`, `pid-pressure`, `tainted`, `stranded-devices` |
 | `zone:<glob>` `region:<glob>` `pool:<glob>` `type:<glob>` | nodes with that [topology](topology.md) label, and every pod on them | globs like `node:` (`zone:us-east-1*`); a node without the label never matches |
 | `capacity:<type>` | spot or on-demand nodes, and every pod on them | `spot`, `on-demand`; case-insensitive |
+| `diff:<change>` | pods that changed since a [compared snapshot](export.md#comparing-snapshots) | `added`, `removed`, `resized`, `moved`; matches nothing when no comparison is open |
 | `key=value` | pod label equals value | key and value are **case-sensitive** (Kubernetes labels are) |
 | `key!=value` | pod label differs from value | a **missing** label counts as unequal, so it matches too |
 | `text` | pod name contains `text` | case-insensitive substring |

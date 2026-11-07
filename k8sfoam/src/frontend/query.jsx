@@ -10,6 +10,7 @@
 //   health:<warning>       node carries a health warning (see HEALTH_FIELDS)
 //   zone:/region:/pool:/type:<glob>  node topology label (see TOPOLOGY_FIELDS)
 //   capacity:<type>        spot | on-demand
+//   diff:<change>          added | removed | resized | moved, while comparing snapshots
 //   key=value              label equality
 //   key!=value             label inequality (a missing label counts as unequal)
 //   <text>                 case-insensitive substring of the pod name
@@ -31,7 +32,9 @@ const HEALTH_FIELDS = window.k8sNodeStatus.WARNING_ORDER;
 const TOPOLOGY_FIELDS = { zone: "zone", region: "region", pool: "nodePool", type: "instanceType" };
 // Mirrors the values the backend normalises capacity types to.
 const CAPACITY_TYPES = ["spot", "on-demand"];
-const FILTER_PREFIXES = ["ns", "node", "qos", "has", "audit", "health", ...Object.keys(TOPOLOGY_FIELDS), "capacity"];
+// Change kinds, owned by snapdiff.js, which marks each pod of a comparison.
+const DIFF_FIELDS = window.k8sSnapDiff.DIFF_KINDS;
+const FILTER_PREFIXES = ["ns", "node", "qos", "has", "audit", "health", ...Object.keys(TOPOLOGY_FIELDS), "capacity", "diff"];
 
 // Shown by the query bar's hint popover — kept next to the grammar it documents.
 const TOKEN_HINTS = [
@@ -43,6 +46,7 @@ const TOKEN_HINTS = [
   { form: "health:not-ready", desc: "nodes with a health warning" },
   { form: "zone:us-east-1a", desc: "nodes in a zone (also region:, pool:, type:)" },
   { form: "capacity:spot", desc: "spot or on-demand nodes" },
+  { form: "diff:added", desc: "changed pods when comparing (removed, resized, moved)" },
   { form: "app=frontend", desc: "label equals" },
   { form: "env!=prod", desc: "label differs" },
   { form: "nginx", desc: "pod name contains" },
@@ -111,6 +115,13 @@ function parseFilter(prefix, value, raw) {
       return { error: { token: raw, message: `unknown audit: rule — use ${AUDIT_FIELDS.join(", ")}` } };
     }
     return { term: { kind: "audit", value: finding } };
+  }
+  if (prefix === "diff") {
+    const change = value.toLowerCase();
+    if (DIFF_FIELDS.indexOf(change) === -1) {
+      return { error: { token: raw, message: `unknown diff: change — use ${DIFF_FIELDS.join(", ")}` } };
+    }
+    return { term: { kind: "diff", value: change } };
   }
   if (prefix === "health") {
     const warning = value.toLowerCase();
@@ -208,6 +219,8 @@ function termMatchesPod(term, pod, node) {
   if (term.kind === "qos") return String(pod.qos || "").toLowerCase() === term.value;
   if (term.kind === "has") return !!pod.hasInit;
   if (term.kind === "audit") return (pod.findings || []).indexOf(term.value) !== -1;
+  // Pods carry `diff` only while two snapshots are compared; otherwise nothing matches.
+  if (term.kind === "diff") return (pod.diff || []).indexOf(term.value) !== -1;
   if (term.kind === "label") {
     const value = labelValue(pod, term.key);
     return term.negate ? value !== term.value : value === term.value;

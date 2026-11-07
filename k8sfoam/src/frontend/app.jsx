@@ -33,6 +33,9 @@ const COLOR_MODES = [
   { id: "node", label: "Node" },
   { id: "qos", label: "QoS" },
 ];
+// Offered only while comparing snapshots, so a link never carries it.
+const DIFF_COLOR = { id: "diff", label: "Diff" };
+const { DIFF_KINDS, DIFF_HUES, diffNodes } = window.k8sSnapDiff;
 
 // Per-node hue assignment — deterministic from index, evenly spaced around wheel.
 function nodeHue(idx, scheme) {
@@ -256,7 +259,21 @@ function App() {
   const [fileError, setFileError] = useState(null);
   const [dragging, setDragging] = useState(false);
   const fileRef = useRef(null);
-  const nodes = snapshot ? snapshot.nodes : liveNodes;
+  // What the file picker was opened for: "open" or "compare".
+  const fileModeRef = useRef("open");
+  // A report the view is compared with (same shape as `snapshot`), or null.
+  const [baseline, setBaseline] = useState(null);
+  const shownNodes = snapshot ? snapshot.nodes : liveNodes;
+  // Recomputed on every live refresh, so a snapshot compares with live as it changes.
+  const diff = useMemo(
+    () => (baseline && shownNodes.length > 0 ? diffNodes(baseline.nodes, shownNodes, workloadKey) : null),
+    [baseline, shownNodes]
+  );
+  const nodes = diff ? diff.after : shownNodes;
+  // Nodes only the baseline has, drawn as ghosts with their pods marked removed.
+  const diffGhosts = useMemo(() => (diff ? diff.removedNodes.map(n => ({
+    ...n, id: `gone-${n.name}`, hypothetical: true, ghostLabel: "removed", ghostTitle: "In the compared snapshot only",
+  })) : []), [diff]);
   const pricing = snapshot ? snapshot.pricing : livePricing;
   const gridWrapRef = useRef(null);
   const captureRef = useRef(null);
@@ -424,8 +441,8 @@ function App() {
     const pods = new Set();
     const dimNodes = new Set();
     let total = 0;
-    for (const n of nodes) {
-      total += n.pods.length;
+    for (const n of [...nodes, ...diffGhosts]) {
+      if (!n.hypothetical) total += n.pods.length;
       if (!active) continue;
       if (!window.k8sQuery.nodeMatches(n, parsedQuery)) dimNodes.add(n.name);
       for (const p of n.pods) {
@@ -433,7 +450,7 @@ function App() {
       }
     }
     return { active, pods, dimNodes, count: active ? pods.size : total, total, errors: parsedQuery.errors };
-  }, [nodes, parsedQuery]);
+  }, [nodes, diffGhosts, parsedQuery]);
 
   const highlight = selectedWorkload || hoveredWorkload;
   const highlightActive = !!selectedWorkload;
@@ -533,10 +550,10 @@ function App() {
 
   // What the 2D map and the 3D view draw: the cluster, plus the shown simulation's
   // hypothetical nodes. Everything else — totals, query, sidebar, exports — reads `nodes`.
-  const viewNodes = useMemo(
-    () => (sim && sim.hypothetical && sim.hypothetical.length ? [...nodes, ...toGhostNodes(sim, nodes.length)] : nodes),
-    [nodes, sim]
-  );
+  const viewNodes = useMemo(() => {
+    const ghosts = [...diffGhosts, ...toGhostNodes(sim, nodes.length + diffGhosts.length)];
+    return ghosts.length ? [...nodes, ...ghosts] : nodes;
+  }, [nodes, sim, diffGhosts]);
   // A ghost has no pods to list and nothing to drain.
   const focusNode = node => { if (!node.hypothetical) setFocused(node); };
 
@@ -670,7 +687,12 @@ function App() {
   );
 
   // In QoS mode node chrome goes neutral, so only the pods carry colour.
-  const hueOf = idx => (colorBy === "qos" ? NEUTRAL_HUE : nodeHue(idx, tw.colorScheme));
+  const hueOf = idx => (colorBy !== "node" ? NEUTRAL_HUE : nodeHue(idx, tw.colorScheme));
+
+  // Diff colours mean nothing once the comparison ends.
+  useEffect(() => {
+    if (!baseline && colorBy === "diff") setColorBy("node");
+  }, [baseline, colorBy]);
 
   // A pin, simulation or open node card belongs to the data it was made on.
   const resetSelection = () => {
@@ -679,15 +701,35 @@ function App() {
     setSim(null);
     setFocused(null);
   };
+  const readReport = async (file) => {
+    const snap = window.k8sSnapshot.parseReport(await file.text(), isBytes);
+    return {
+      context: snap.context, generatedAt: snap.generatedAt, version: snap.version,
+      nodes: toNodes(snap.payload), pendingPods: snap.payload.pendingPods, pricing: snap.payload.pricing,
+    };
+  };
   const openSnapshot = async (file) => {
     try {
       setFileError(null);
-      const snap = window.k8sSnapshot.parseReport(await file.text(), isBytes);
-      setSnapshot({
-        context: snap.context, generatedAt: snap.generatedAt, version: snap.version,
-        nodes: toNodes(snap.payload), pendingPods: snap.payload.pendingPods, pricing: snap.payload.pricing,
-      });
+      setSnapshot(await readReport(file));
       resetSelection();
+    } catch (err) {
+      setFileError(`${file.name}: ${err.message || String(err)}`);
+    }
+  };
+  // The file is the "before" side and the view the "after" one; with a snapshot
+  // open, the older of the two is "before" whichever was picked first.
+  const compareWith = async (file) => {
+    try {
+      setFileError(null);
+      const other = await readReport(file);
+      if (snapshot && other.generatedAt && snapshot.generatedAt && other.generatedAt > snapshot.generatedAt) {
+        setBaseline(snapshot);
+        setSnapshot(other);
+      } else {
+        setBaseline(other);
+      }
+      setColorBy("diff");
     } catch (err) {
       setFileError(`${file.name}: ${err.message || String(err)}`);
     }
@@ -719,7 +761,8 @@ function App() {
     const ctx = snapshot ? snapshot.context : contexts[contextIdx] ? contexts[contextIdx].context : "";
     try {
       setExportError(null);
-      if (kind === "open") {
+      if (kind === "open" || kind === "compare") {
+        fileModeRef.current = kind;
         fileRef.current.click();
         return;
       }
@@ -762,7 +805,7 @@ function App() {
           title: `${resourceMeta(metric).label} Resources · ${ctx ? shortContext(ctx) : "cluster"}`,
           subtitle: `${totals.nodes} nodes · ${totals.pods} pods` +
             `${match.active ? ` · query: ${query.trim()} (${match.count} matched)` : ""}` +
-            `${colorBy === "qos" ? " · color = QoS class" : ""}` +
+            `${colorBy === "qos" ? " · color = QoS class" : colorBy === "diff" ? " · color = change" : ""}` +
             `${groupBy !== "none" ? ` · grouped by ${groupMode(groupBy).label.toLowerCase()}` : ""}`,
           stats: `CPU ${(totals.cpuUsed / 1000).toFixed(1)} / ${(totals.cpuCap / 1000).toFixed(0)} cores (${cpuPct}%)` +
             ` · Memory ${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)} ${memUnit} (${memPct}%)` +
@@ -793,7 +836,11 @@ function App() {
     <div className={`app ${sidebarOpen ? "sidebar-open" : "sidebar-collapsed"}`}
       onDragOver={onDragOver} onDragLeave={e => { if (!e.relatedTarget) setDragging(false); }} onDrop={onDrop}>
       <input type="file" accept=".json,application/json" hidden ref={fileRef}
-        onChange={e => { const f = e.target.files[0]; e.target.value = ""; if (f) openSnapshot(f); }} />
+        onChange={e => {
+          const f = e.target.files[0];
+          e.target.value = "";
+          if (f) (fileModeRef.current === "compare" ? compareWith : openSnapshot)(f);
+        }} />
       {dragging && <div className="drop-overlay">Drop a k8sfoams JSON report to open it as a snapshot</div>}
       <Sidebar
         open={sidebarOpen}
@@ -808,6 +855,7 @@ function App() {
         contextIdx={contextIdx} setContextIdx={setContextIdx}
         doRefresh={loadData} refreshing={refreshing}
         lastRefresh={lastRefresh} snapshot={snapshot}
+        diff={diff} baseline={baseline} onEndCompare={() => setBaseline(null)}
         nodeCount={nodes.length}
         health={health}
         audit={audit}
@@ -1030,7 +1078,7 @@ function Sidebar({
   refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
   audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery, cost, pricing,
-  advisor, advice, onAdvisor, onAssistant, error, snapshot
+  advisor, advice, onAdvisor, onAssistant, error, snapshot, diff, baseline, onEndCompare
 }) {
   const is3d = view === "3d";
   return (
@@ -1107,8 +1155,8 @@ function Sidebar({
 
       <div className="sidebar-section">
         <div className="section-label">Color by</div>
-        <div className="seg seg-2">
-          {COLOR_MODES.map(c => (
+        <div className={`seg ${diff ? "seg-3" : "seg-2"}`}>
+          {(diff ? [...COLOR_MODES, DIFF_COLOR] : COLOR_MODES).map(c => (
             <button key={c.id} className={colorBy === c.id ? "seg-on" : ""}
               onClick={() => setColorBy(c.id)}>
               {c.label}
@@ -1217,6 +1265,11 @@ function Sidebar({
             })}
           </div>
         </div>
+      )}
+
+      {diff && (
+        <ComparePanel diff={diff} baseline={baseline} snapshot={snapshot} query={query} setQuery={setQuery}
+          memUnit={memUnit} onEnd={onEndCompare} />
       )}
 
       {/* Monthly on-demand cost. Hidden where no cloud prices the nodes (kind,
@@ -1355,6 +1408,80 @@ function Sidebar({
         </div>
       </div>
     </aside>
+  );
+}
+
+// Snapshot comparison: change counts (a row toggles its diff: query, and the
+// swatches are the Diff colour legend), then where requests grew or shrank.
+function ComparePanel({ diff, baseline, snapshot, query, setQuery, memUnit, onEnd }) {
+  const { summary } = diff;
+  const label = s => `${s.context ? shortContext(s.context) : "snapshot"} · ${s.generatedAt ? new Date(s.generatedAt).toLocaleString() : "unknown time"}`;
+  const cores = v => `${v > 0 ? "+" : v < 0 ? "−" : ""}${(Math.abs(v) / 1000).toFixed(2)}`;
+  const mem = v => `${v > 0 ? "+" : v < 0 ? "−" : ""}${fmtMem(Math.abs(v), memUnit)}`;
+  const TOP = 10;
+  const table = (title, rows) => rows.length > 0 && (
+    <>
+      <div className="compare-sub">{title}</div>
+      <div className="health-rows">
+        {rows.slice(0, TOP).map(r => (
+          <div key={r.name} className="health-row" title={r.name}>
+            <span className="health-name">{r.name}</span>
+            <span className="topo-util">{cores(r.cpu)}</span>
+            <span className="topo-util">{mem(r.mem)}</span>
+          </div>
+        ))}
+      </div>
+      {rows.length > TOP && <div className="seg-note">{rows.length - TOP} more not shown</div>}
+    </>
+  );
+  return (
+    <div className="sidebar-section">
+      <div className="section-label">
+        <span>Comparison</span>
+        <button className="wl-chip-clear" onClick={onEnd} title="End the comparison">×</button>
+      </div>
+      <div className="seg-note">
+        {label(baseline)} → {snapshot ? label(snapshot) : "live"}
+      </div>
+      <div className="health-rows">
+        {DIFF_KINDS.map(k => {
+          const token = `diff:${k}`;
+          const on = query.trim() === token;
+          return (
+            <button key={k} className={`health-row audit-row ${on ? "audit-on" : ""}`}
+              onClick={() => setQuery(on ? "" : token)}>
+              <span className="audit-swatch" style={{ background: `hsl(${DIFF_HUES[k]} 70% 55%)` }} />
+              <span className="health-name">{k}</span>
+              <span className="health-count">{summary.counts[k]}</span>
+            </button>
+          );
+        })}
+      </div>
+      {summary.changed === 0 ? <div className="audit-clean">No changes</div> : (
+        <div className="seg-note">
+          Requests {cores(summary.total.cpu)} cores · {mem(summary.total.mem)} {memUnit}
+          {summary.addedNodes.length > 0 && ` · ${summary.addedNodes.length} node${summary.addedNodes.length === 1 ? "" : "s"} added`}
+          {summary.removedNodes.length > 0 && ` · ${summary.removedNodes.length} node${summary.removedNodes.length === 1 ? "" : "s"} removed`}
+        </div>
+      )}
+      {table("Namespaces · cores · " + memUnit, summary.byNamespace)}
+      {table("Pools", summary.byPool)}
+      {table("Nodes", summary.byNode)}
+      {diff.removedPods.length > 0 && (
+        <>
+          <div className="compare-sub">Removed from surviving nodes</div>
+          <div className="health-rows">
+            {diff.removedPods.slice(0, TOP).map(p => (
+              <div key={`${p.namespace}/${p.name}`} className="health-row" title={`${p.namespace}/${p.name} on ${p.node}`}>
+                <span className="health-swatch" style={{ background: `hsl(${DIFF_HUES.removed} 70% 55%)` }} />
+                <span className="health-name">{p.namespace}/{p.name}</span>
+              </div>
+            ))}
+          </div>
+          {diff.removedPods.length > TOP && <div className="seg-note">{diff.removedPods.length - TOP} more not shown</div>}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1572,6 +1699,7 @@ const EXPORTS = [
   { id: "link", label: "Copy link", hint: "current view", divider: true },
   // Reads a file rather than writing one, so it works with nothing loaded.
   { id: "open", label: "Open snapshot…", hint: "JSON report", divider: true, file: true },
+  { id: "compare", label: "Compare with snapshot…", hint: "what changed since" },
 ];
 
 // Download menu next to Refresh. Images capture the current view; reports

@@ -1543,3 +1543,12 @@ button.advisor-chip:hover { color: var(--text); border-color: var(--accent); }
   opacity: 0.45;
   cursor: not-allowed;
 }
+/* Comparison panel: a small heading over each delta table. */
+.compare-sub {
+  margin: 10px 0 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}

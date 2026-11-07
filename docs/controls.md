@@ -16,7 +16,8 @@ header opens it.
   cluster can allocate one.
 - **Memory unit**: MiB, GiB (default), or TiB.
 - **Color by**: *Node* (default) gives each node its own hue; *QoS* colors each pod by its QoS class. See
-  [QoS & eviction risk](qos.md).
+  [QoS & eviction risk](qos.md). While [comparing snapshots](export.md#comparing-snapshots), *Diff* colors each
+  pod by what changed.
 - **Group by**: *None* (default), *Zone*, *Region*, *Pool*, *Type* (instance type) or *Capacity* (spot / on-demand).
   See [Topology](topology.md).
 - **Context**: the sidebar lists every context from your kubeconfig, active one first, tagged by provider.

@@ -18,7 +18,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 const { workloadKey } = window.k8sWorkload;
 const { findingInfo } = window.k8sPodAudit;
 const { worstSeverity } = window.k8sNodeStatus;
-const { qosHue, NEUTRAL_HUE } = window.k8sQos;
+const { podHue, NEUTRAL_HUE } = window.k8sQos;
 const { groupMode, groupNodes } = window.k8sTopology;
 const { resourceMeta, metricValue, nodeCap, nodeUsed, fmtValue, unitOf } = window.k8sResources;
 
@@ -798,7 +798,7 @@ function Scene3D({
       const faces = new Map();
       const faceMeshes = [w.meshes.top, w.meshes.x, w.meshes.z];
       w.cubes.forEach((cube, i) => {
-        const h = colorBy === "qos" ? qosHue(cube.pod.qos) : hueOf(cube.nodeIdx);
+        const h = podHue(cube.pod, colorBy, hueOf(cube.nodeIdx));
         const f = podFilter(cube, look), key = `${h}|${f}`;
         if (!faces.has(key)) {
           // Every layer of a face goes through the same filter, then fades
@@ -918,7 +918,7 @@ function SceneLegend({ colorBy, ext, groupBy }) {
         <div>Height → Memory request</div>
         {ext && <div>Lit cubes → request {resourceMeta(ext).label}</div>}
         <div className="legend-foot">
-          One cube per pod · color = {colorBy === "qos" ? "QoS class" : "node"}
+          One cube per pod · color = {colorBy === "qos" ? "QoS class" : colorBy === "diff" ? "change" : "node"}
           {groupBy && groupBy !== "none" && ` · floors = ${groupMode(groupBy).label.toLowerCase()}`} · drag to orbit
         </div>
       </div>

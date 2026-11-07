@@ -20,6 +20,7 @@ embedded demos on this site export too.
 | **CSV report** | ✓ | ✓ | One row per pod: `context,node,zone,region,node_pool,instance_type,capacity_type,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. One more column per [extended resource](extended-resources.md) on the cluster follows `memory_mib`, e.g. `nvidia.com/gpu` or `ephemeral_storage_mib`. |
 | **Copy link** | ✓ | ✓ | Puts a [shareable link](shareable-links.md) to the current view on the clipboard; the item reads *copied* to confirm. |
 | **Open snapshot…** | ✓ | ✓ | Opens a JSON report as a [snapshot](#snapshots). |
+| **Compare with snapshot…** | ✓ | ✓ | Shows what changed between a JSON report and the current view: [comparing snapshots](#comparing-snapshots). |
 
 Images keep the current metric, colours, grouping, tweaks, query dimming and pinned workload, and carry a title band
 with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which
@@ -43,3 +44,32 @@ While a snapshot is open:
 
 Reports from older releases open as well. A report written by a newer k8sfoams with a format this version does not know
 (`schemaVersion`) is refused with a message saying which version to upgrade to.
+
+## Comparing snapshots
+
+*Compare with snapshot…* in the download menu compares a JSON report with what is on screen: before and after a
+release, or the state during an incident against now.
+
+- **Snapshot vs live**: with the live cluster on screen, the comparison follows the cluster as it changes.
+- **Two snapshots**: open one, then compare it with the other. The older report is always the "before" side, whichever
+  you pick first.
+
+Pods are matched by namespace and name first. A rollout renames every pod, so the pods left over are paired within the
+same workload; a replaced replica is not counted as one pod added and one removed. Each pod then gets one of these
+changes:
+
+| Change | Colour | Meaning |
+| --- | --- | --- |
+| **added** | green | in the current view only |
+| **removed** | red | in the compared snapshot only |
+| **resized** | amber | requests (CPU, memory or an extended resource) changed |
+| **moved** | blue | runs on another node |
+
+*Color by → Diff* (switched on when a comparison starts) paints each pod with its change; unchanged pods keep the usual
+violet. A node that no longer exists is drawn as a dashed ghost labelled *removed*, holding its removed pods. A pod
+removed from a node that still exists has nowhere to be drawn, so it is listed in the panel instead.
+
+The *Comparison* panel in the sidebar counts each change; a row selects its [`diff:` query](filtering.md#token-reference)
+(`diff:added`, `diff:removed`, `diff:resized`, `diff:moved`), which highlights those pods like any other query. Below,
+it lists the change in requested CPU and memory per namespace, node pool and node, biggest first. The × ends the
+comparison.
