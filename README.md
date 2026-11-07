@@ -26,6 +26,7 @@ It visualizes **resource requests** — what the scheduler reserves — not live
 - **[Extended resources](https://mmpyro.github.io/k8s-pod-foamtree/extended-resources/)**: GPUs, ephemeral storage and HugePages, with fragmentation and stranded devices.
 - **[Export](https://mmpyro.github.io/k8s-pod-foamtree/export/)** to PNG, SVG, JSON or CSV, and **[shareable links](https://mmpyro.github.io/k8s-pod-foamtree/shareable-links/)** to any view.
 - **Live updates** from a watch cache, so scaling a Deployment shows up within seconds.
+- **[AI advisor](https://mmpyro.github.io/k8s-pod-foamtree/advisor/)** (optional): with an OpenAI-compatible key (or a local Ollama model), prioritised recommendations with YAML / `kubectl` fixes, and a chat that answers questions about k8sfoams and the cluster on screen. Off by default; shows what it sends first and can redact names.
 
 ## Installation
 
@@ -45,6 +46,14 @@ k8sfoams --synthetic  # no cluster needed: generated demo clusters that keep cha
 ```
 
 Switching context in the dashboard never modifies your kubeconfig. See the [command-line reference](https://mmpyro.github.io/k8s-pod-foamtree/cli/) for every option and [Synthetic mode](https://mmpyro.github.io/k8s-pod-foamtree/synthetic-mode/) for what the demo clusters contain.
+
+## Security
+
+- Listens on `127.0.0.1` by default. Requests with an unknown `Host` header (DNS rebinding) or a cross-site `Origin` get `403`.
+- With `--host 0.0.0.0` (or any non-loopback address) it warns at startup and requires a token, printed in the startup URL (`http://host:8080/#token=…`). Use `--token` to choose it, `--no-auth` to opt out, and `--allowed-host NAME` for the names you reach it by.
+- It only reads the cluster, with your kubeconfig credentials, and never changes it.
+
+See [Network access](https://mmpyro.github.io/k8s-pod-foamtree/cli/#network-access).
 
 ## Development
 

@@ -1,6 +1,8 @@
 import bitmath  # type: ignore
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.dtos import NodeResources, PodResources, ContainerResources
+from k8sfoam.src.utils.extractors import ResourcesExtractor
+from k8sfoam.tests.common.mocks import create_container, create_pod
 from pydash import py_ as _  # type: ignore
 
 
@@ -503,3 +505,52 @@ def test_workload_rules_skip_pending_naked_and_static_pods():
     assert 'single-replica' in out['web-1']
     assert 'single-replica' not in out['debug']
     assert 'single-replica' not in out['etcd-a']
+
+
+def test_deployment_mid_rollout_is_one_workload():
+    # Given — one pod from the old ReplicaSet and one from the new, both on node a
+    def rollout_pod(name, template_hash):
+        return create_pod(name, 'a', containers=[create_container('app', '100m', '100Mi', memory_limit='100Mi')],
+                          labels={'pod-template-hash': template_hash},
+                          owner_kind='ReplicaSet', owner_name=f'web-{template_hash}')
+
+    extractor = ResourcesExtractor()
+    pods = [extractor.extract_pod_requested_resources(p)
+            for p in (rollout_pod('web-old', '5d8f7c9b6'), rollout_pod('web-new', '7c4b9d8f5'))]
+    nodes = [NodeResources('a', 4000, 16_000_000)]
+
+    # When
+    out = {p['name']: p['findings'] for p in _.head(FoamTreeMapper(nodes, pods).combined()['nodes'])['pods']}
+
+    # Then — two replicas of Deployment web, not two single-replica ReplicaSets
+    assert out == {'web-old': ['spof-node'], 'web-new': ['spof-node']}
+
+
+def test_nodes_carry_price_and_unpriced_cloud_nodes_are_reported():
+    # Given — two priced m5s, one aws type the book lacks, one kind node that no cloud prices
+    from unittest.mock import MagicMock
+    labels = {'topology.kubernetes.io/region': 'eu-west-1', 'node.kubernetes.io/instance-type': 'm5.xlarge'}
+    unknown = {**labels, 'node.kubernetes.io/instance-type': 'x9.huge'}
+    nodes = [NodeResources('a', 2000, 1, labels=labels, provider_id='aws:///eu-west-1a/i-a'),
+             NodeResources('b', 2000, 1, labels=labels, provider_id='aws:///eu-west-1a/i-b'),
+             NodeResources('c', 2000, 1, labels=unknown, provider_id='aws:///eu-west-1a/i-c'),
+             NodeResources('kind', 2000, 1, provider_id='kind://docker/kind/kind')]
+    prices = MagicMock()
+    prices.price.side_effect = lambda provider, region, t: \
+        {'hourly': 0.214, 'source': 'snapshot'} if t == 'm5.xlarge' else None
+    prices.status.return_value = {'generated': '2026-11-01', 'liveErrors': {}}
+
+    # When
+    result = FoamTreeMapper(nodes, [], prices).combined()
+
+    # Then
+    assert [n['price'] for n in result['nodes']] == [{'hourly': 0.214, 'source': 'snapshot'}] * 2 + [None, None]
+    assert result['pricing'] == {'generated': '2026-11-01', 'liveErrors': {}, 'missing': [
+        {'provider': 'aws', 'region': 'eu-west-1', 'instanceType': 'x9.huge', 'count': 1}]}
+
+
+def test_mapper_without_price_book_emits_no_pricing():
+    result = FoamTreeMapper([NodeResources('minikube', 2000, 1)], []).combined()
+
+    assert result['nodes'][0]['price'] is None
+    assert result['pricing'] is None

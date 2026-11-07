@@ -1,24 +1,69 @@
 import argparse
+import hmac
+import json
+import ipaddress
+import logging
+import re
+import secrets
+import sys
 import time
 from importlib.metadata import PackageNotFoundError, version
 from flask import Flask, Response, jsonify, request
-from typing import Any, Iterator, Optional, Protocol
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Protocol, Tuple
+from k8sfoam.src.advisor import AdvisorConfig, AdvisorError, ask, build_messages, cache_key, chat, chat_stream, load_config
+from k8sfoam.src.advisor.assistant import build_chat_messages
+from k8sfoam.src.advisor.summary import build_summary, unredact, unredact_stream
 from k8sfoam.src.k8s.k8s_client import K8sClient, DEFAULT_PAGE_SIZE
 from k8sfoam.src.k8s.cache import CacheRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import NodeResources, PodResources
+from k8sfoam.src.pricing import PriceBook
 from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_EXTRA_NODES, MAX_REPLICAS, UnknownTemplate,
                                           simulate_consolidation, simulate_drain, simulate_fit, simulate_pending,
                                           simulate_replicas)
 from k8sfoam.src.synthetic.client import DEFAULT_CHURN_INTERVAL, SyntheticRegistry
 from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED
+from urllib.parse import urlparse
 
 # Minimum seconds between two `changed` events; a burst in between becomes one.
 DEBOUNCE = 1.0
 # A quiet stream still sends a comment this often, so a closed tab is noticed
 # (the write fails) and proxies do not drop the connection as idle.
 HEARTBEAT = 15.0
+
+TOKEN_IN_URL = re.compile(r'([?&]token=)[^&\s"]*')
+
+
+class RedactToken(logging.Filter):
+    """The dev server logs every request line, and /events carries the token in its query."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg, record.args = TOKEN_IN_URL.sub(r'\1<redacted>', record.getMessage()), ()
+        return True
+
+
+REDACT_TOKEN = RedactToken()
+
+
+# Host names that only reach this machine; always allowed as a Host header.
+LOOPBACK_HOSTS = ('localhost', '127.0.0.1', '::1')
+
+
+def is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() == 'localhost'
+
+
+def host_name(host: str) -> str:
+    """A Host header or --host value without its port or IPv6 brackets: `[::1]:8080` -> `::1`."""
+    host = host.lower()
+    if host.startswith('['):
+        return host[1:].partition(']')[0]
+    # A bare IPv6 address (`::1`) has several colons and no port.
+    return host.rpartition(':')[0] if host.count(':') == 1 else host
 
 
 def get_version() -> str:
@@ -44,7 +89,8 @@ def parse_requirement(r) -> dict:
         raise ValueError(f'{operator} needs at least one value: {r!r}')
     if operator in ('Exists', 'DoesNotExist') and values:
         raise ValueError(f'{operator} takes no values: {r!r}')
-    if operator in ('Gt', 'Lt') and (len(values) != 1 or not values[0].lstrip('-').isdigit()):
+    # ASCII digits with an optional sign, like the API server's int64 parse; int() would also take '5_0' or '٣'.
+    if operator in ('Gt', 'Lt') and (len(values) != 1 or not re.fullmatch(r'[+-]?[0-9]+', values[0])):
         raise ValueError(f'{operator} needs exactly one integer value: {r!r}')
     return {'key': r['key'], 'operator': operator, 'values': list(values)}
 
@@ -77,6 +123,10 @@ def parse_quantities(body: dict) -> tuple:
         extended = {name: convert_extended(name, str(q)) for name, q in extended_spec.items()}
     except Exception:
         raise ValueError(f"Invalid quantity: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}, "
+                         f"extended={extended_spec!r}")
+    # A negative request would fit every node, a negative shape would take capacity away.
+    if cpu < 0 or memory < 0 or any(v < 0 for v in extended.values()):
+        raise ValueError(f"Quantities must not be negative: cpu={body.get('cpu')!r}, memory={body.get('memory')!r}, "
                          f"extended={extended_spec!r}")
     return cpu, memory, {k: v for k, v in extended.items() if v}
 
@@ -186,6 +236,61 @@ def parse_replica_count(value: Optional[str]) -> int:
     return count
 
 
+ADVISOR_OFF = 'The advisor is not configured: set OPENAI_API_KEY and install k8sfoams[advisor]'
+
+
+def parse_advisor_body(body) -> bool:
+    """`redact` of an advisor request; names are redacted unless the body says otherwise. Raises ValueError."""
+    if body is None:
+        return True
+    if not isinstance(body, dict):
+        raise ValueError('Request body must be a JSON object')
+    redact = body.get('redact', True)
+    if not isinstance(redact, bool):
+        raise ValueError(f'redact must be true or false, got {redact!r}')
+    return redact
+
+
+MAX_SCOPE = 20000
+
+
+def parse_scope(body) -> Optional[List[str]]:
+    """The "namespace/pod" names an advisor request is narrowed to, None for the whole cluster. Raises ValueError."""
+    scope = body.get('scope') if isinstance(body, dict) else None
+    if scope is None:
+        return None
+    if not isinstance(scope, list) or len(scope) > MAX_SCOPE or not all(isinstance(p, str) for p in scope):
+        raise ValueError(f'scope must be a list of at most {MAX_SCOPE} "namespace/pod" names')
+    return scope
+
+
+MAX_QUESTION = 2000
+MAX_HISTORY = 20
+MAX_TURN = 8000
+
+
+def parse_assistant_body(body) -> Tuple[str, List[Dict[str, str]], bool, bool]:
+    """(question, history, redact, stream) of an assistant request. Raises ValueError."""
+    redact = parse_advisor_body(body)
+    question = body.get('question') if isinstance(body, dict) else None
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError('question must be a non-empty string')
+    if len(question) > MAX_QUESTION:
+        raise ValueError(f'question is longer than {MAX_QUESTION} characters')
+    history = body.get('history', [])
+    if not isinstance(history, list) or len(history) > MAX_HISTORY:
+        raise ValueError(f'history must be a list of at most {MAX_HISTORY} turns')
+    for turn in history:
+        if not isinstance(turn, dict) or turn.get('role') not in ('user', 'assistant') or not isinstance(turn.get('content'), str):
+            raise ValueError('each history turn must be {"role": "user" or "assistant", "content": "..."}')
+        if len(turn['content']) > MAX_TURN:
+            raise ValueError(f'a history turn is longer than {MAX_TURN} characters')
+    stream = body.get('stream', False)
+    if not isinstance(stream, bool):
+        raise ValueError(f'stream must be true or false, got {stream!r}')
+    return question.strip(), [{'role': t['role'], 'content': t['content']} for t in history], redact, stream
+
+
 class Registry(Protocol):
     """Where the clusters of each context come from: the watch caches, or the synthetic clusters."""
 
@@ -231,16 +336,54 @@ def non_negative_float(value: str) -> float:
     return number
 
 
+def non_empty(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError('must not be empty')
+    return value
+
+
 def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
-               synthetic: Optional[SyntheticRegistry] = None) -> Optional[Flask]:
-    """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read."""
+               synthetic: Optional[SyntheticRegistry] = None, prices: Optional[PriceBook] = None,
+               advisor: Optional[AdvisorConfig] = None, token: Optional[str] = None,
+               allowed_hosts: Iterable[str] = LOOPBACK_HOSTS) -> Optional[Flask]:
+    """The dashboard server. With `synthetic`, every context is a generated cluster and no kubeconfig is read.
+
+    Without `advisor` the advisor endpoints say it is off and nothing is sent anywhere.
+    With `token`, every API call needs `Authorization: Bearer <token>`. Requests whose Host is not in
+    `allowed_hosts` are refused, which defeats DNS rebinding.
+    """
+    allowed = {host_name(h) for h in allowed_hosts}
     try:
         app = Flask(__name__, static_url_path='', static_folder='frontend')
+        # Synthetic clusters never touch the network: snapshot prices only.
+        price_book = prices or PriceBook(live=synthetic is None)
         registry: Optional[Registry] = synthetic or (CacheRegistry(page_size) if watch else None)
 
         def cluster(context: Optional[str]) -> Any:
             """Nodes and pods of a context: from its watch cache, or listed right now with --no-watch."""
             return registry.get(context) if registry is not None else K8sClient(context, page_size)
+
+        @app.before_request
+        def guard():
+            # Probes reach the server by pod IP and carry no token.
+            if request.endpoint == 'healthcheck':
+                return None
+            if host_name(request.host) not in allowed:
+                return (f'Host {request.host} is not allowed; '
+                        f'start k8sfoams with --allowed-host {host_name(request.host)} to reach it by this name'), 403
+            origin = request.headers.get('Origin')
+            if request.method == 'POST' and origin is not None and urlparse(origin).netloc.lower() != request.host.lower():
+                return f'Cross-origin request from {origin} refused', 403
+            # The page itself must load, to read the token from its URL fragment.
+            if token is None or request.endpoint in ('web', 'static'):
+                return None
+            scheme, _, given = request.headers.get('Authorization', '').partition(' ')
+            if scheme.lower() != 'bearer':
+                # EventSource cannot set headers, so the live stream alone takes the token as a query parameter.
+                given = request.args.get('token', '') if request.endpoint == 'get_change_events' else ''
+            if not hmac.compare_digest(given.encode(), token.encode()):
+                return 'Missing or wrong token: open the URL k8sfoams printed at startup', 401
+            return None
 
         @app.route('/healthcheck', methods=['GET'])
         def healthcheck():
@@ -250,7 +393,7 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def get_all_k8s_resources():
             try:
                 k8s_client = cluster(request.args.get('context'))
-                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
+                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book)
                 return jsonify(mapper.combined())
             except Exception as ex:
                 return str(ex), 500
@@ -260,7 +403,7 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
         def get_k8s_resources(resource_type: str):
             try:
                 k8s_client = cluster(request.args.get('context'))
-                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()])
+                mapper = FoamTreeMapper(k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()], price_book)
                 # cpu/memory keep their case-insensitive match; extended names are case-sensitive in Kubernetes.
                 resource = resource_type.lower() if resource_type.lower() in ('cpu', 'memory') else resource_type
                 supported = mapper.available_resources()
@@ -367,6 +510,132 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
             return Response(stream(), mimetype='text/event-stream',
                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
+        @app.route('/advisor/status', methods=['GET'])
+        def get_advisor_status():
+            return jsonify({'enabled': advisor is not None, 'model': advisor.model if advisor else None})
+
+        # Last (key, recommendations, usage) per context, keyed by a hash of model + messages: a refresh spends no tokens.
+        advice: Dict[Optional[str], Tuple[str, list, Optional[dict]]] = {}
+
+        def cluster_summary(context: Optional[str], redact: bool, mentioned: str = '',
+                            scope: Optional[List[str]] = None) -> Tuple[dict, dict]:
+            """build_summary() of a context, with the pending and consolidation simulations of the same snapshot.
+
+            shortcut: the simulations rerun on every ask (0.4 s at 100 nodes and 1.5k pods, growing with nodes x pods);
+            memoize per (context, version) if big clusters make asking slow.
+            """
+            k8s_client = cluster(context)
+            nodes, pods = k8s_client.get_node_resources(), [*k8s_client.get_pod_resources()]
+            combined = FoamTreeMapper(nodes, pods, price_book).combined()
+            pending = consolidation = None
+            if scope is None:  # cluster-wide facts; a scoped summary leaves them out anyway
+                pending = simulate_pending(nodes, pods)
+                consolidation = simulate_consolidation(nodes, pods, k8s_client.get_disruption_budgets())
+            return build_summary(combined, redact, pending, consolidation, mentioned, scope)
+
+        def advisor_messages(context: Optional[str], redact: bool, scope: Optional[List[str]]) -> Tuple[list, dict]:
+            payload, mapping = cluster_summary(context, redact, scope=scope)
+            if scope is not None and not payload['scope']['pods']:  # empty, or its pods are gone: nothing to advise on
+                raise AdvisorError('scope matches no pods: change the query or the pin, or clear them to ask about the whole cluster', 400)
+            return build_messages(payload), mapping
+
+        @app.route('/advisor/preview', methods=['GET', 'POST'])
+        def get_advisor_preview():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            if request.method == 'POST':  # JSON only, like POST /advisor: a scope does not fit in a URL
+                if not request.is_json:
+                    return 'Request body must be JSON (Content-Type: application/json)', 415
+                try:
+                    body = request.get_json(silent=True)
+                    redact, scope = parse_advisor_body(body), parse_scope(body)
+                except ValueError as ex:
+                    return str(ex), 400
+            else:
+                redact, scope = request.args.get('redact') != 'false', None
+            try:
+                messages, _ = advisor_messages(request.args.get('context'), redact, scope)
+                return jsonify({'model': advisor.model, 'messages': messages})
+            except AdvisorError as ex:
+                return str(ex), ex.status
+            except Exception as ex:
+                return str(ex), 500
+
+        @app.route('/advisor', methods=['POST'])
+        def ask_advisor():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            # A JSON body needs a CORS preflight, so another website cannot send the summary without consent.
+            if not request.is_json:
+                return 'Request body must be JSON (Content-Type: application/json)', 415
+            try:
+                body = request.get_json(silent=True)
+                redact, scope = parse_advisor_body(body), parse_scope(body)
+            except ValueError as ex:
+                return str(ex), 400
+            context = request.args.get('context')
+            try:
+                messages, mapping = advisor_messages(context, redact, scope)
+                key = cache_key(advisor, messages)
+                cached = advice.get(context)
+                if cached and cached[0] == key:
+                    return jsonify({'model': advisor.model, 'cached': True, 'recommendations': cached[1], 'usage': cached[2]})
+                recommendations, usage = ask(advisor, messages)
+                recommendations = unredact(recommendations, mapping)
+            except AdvisorError as ex:
+                return str(ex), ex.status
+            except Exception as ex:
+                return str(ex), 500
+            advice[context] = (key, recommendations, usage)
+            return jsonify({'model': advisor.model, 'cached': False, 'recommendations': recommendations, 'usage': usage})
+
+        @app.route('/assistant', methods=['POST'])
+        def ask_assistant():
+            if advisor is None:
+                return ADVISOR_OFF, 404
+            try:
+                question, history, redact, stream = parse_assistant_body(request.get_json(silent=True))
+            except ValueError as ex:
+                return str(ex), 400
+            try:
+                previous = next((t['content'] for t in reversed(history) if t['role'] == 'user'), '')
+                payload, mapping = cluster_summary(request.args.get('context'), redact, f'{question}\n{previous}')
+                messages, sources = build_chat_messages(question, history, payload, mapping)
+                if not stream:
+                    answer, usage = chat(advisor, messages)
+                    return jsonify({'model': advisor.model, 'answer': unredact(answer, mapping), 'sources': sources,
+                                    'usage': usage})
+                deltas = chat_stream(advisor, messages)  # sends the request: a provider error still gets its status
+            except AdvisorError as ex:
+                return str(ex), ex.status
+            except Exception as ex:
+                return str(ex), 500
+
+            def lines() -> Iterator[str]:
+                usage: List[Optional[dict]] = [None]
+
+                def texts() -> Iterator[str]:
+                    for item in deltas:
+                        if isinstance(item, str):
+                            yield item
+                        else:
+                            usage[0] = item
+                parts = []
+                try:
+                    for text in unredact_stream(texts(), mapping):
+                        parts.append(text)
+                        yield json.dumps({'delta': text}) + '\n'
+                    answer = ''.join(parts).strip()
+                    if not answer:
+                        raise AdvisorError('The model returned an empty answer', 502)
+                    yield json.dumps({'done': True, 'model': advisor.model, 'answer': answer, 'sources': sources,
+                                      'usage': usage[0]}) + '\n'
+                except Exception as ex:  # the status line is gone; the error travels as the last line
+                    yield json.dumps({'error': str(ex)}) + '\n'
+
+            return Response(lines(), mimetype='application/x-ndjson',
+                            headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
         @app.route('/contexts', methods=['GET'])
         def get_k8s_contexts():
             if synthetic is not None:
@@ -402,12 +671,33 @@ def main():
                         help='Seed of the --synthetic clusters; the same seed builds the same clusters')
     parser.add_argument('--churn-interval', type=non_negative_float, default=DEFAULT_CHURN_INTERVAL,
                         help='Seconds between random changes to the --synthetic clusters; 0 keeps them still')
+    auth = parser.add_mutually_exclusive_group()
+    auth.add_argument('--token', type=non_empty,
+                      help='Token every API call must carry; generated when --host is not a loopback address')
+    auth.add_argument('--no-auth', action='store_true', help='Serve a non-loopback --host without a token')
+    parser.add_argument('--allowed-host', action='append', default=[], metavar='NAME',
+                        help='Extra Host header the server answers to (repeatable), e.g. the name you reach it by')
     parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
     args = parser.parse_args()
 
-    options = {'page_size': args.page_size, 'watch': not args.no_watch}
+    exposed = not is_loopback(args.host)
+    if args.d and exposed:
+        parser.error('-d serves the Werkzeug debugger, which skips the token and Host checks; '
+                     'use it only on a loopback --host')
+    token = None if args.no_auth else (args.token or (secrets.token_urlsafe(32) if exposed else None))
+    if exposed:
+        print(f'WARNING: listening on {args.host}: anyone who can reach port {args.port} can read this dashboard, '
+              'which uses your kubeconfig credentials. Pass --allowed-host NAME for every name or IP '
+              'you open it by.', file=sys.stderr)
+    if token:
+        url_host = f'[{args.host}]' if ':' in args.host else args.host
+        print(f'Open http://{url_host}:{args.port}/#token={token}', file=sys.stderr)
+
+    options = {'page_size': args.page_size, 'watch': not args.no_watch, 'advisor': load_config(), 'token': token,
+               'allowed_hosts': [*LOOPBACK_HOSTS, args.host, *args.allowed_host]}
     if args.synthetic:
         options['synthetic'] = SyntheticRegistry(args.seed, args.churn_interval)
     app = create_app(**options)
+    logging.getLogger('werkzeug').addFilter(REDACT_TOKEN)
     if app:
         app.run(host=args.host, port=args.port, debug=args.d)

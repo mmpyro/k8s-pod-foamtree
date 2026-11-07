@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import pytest
 from k8sfoam.src.common.scheduler import free_capacity, simulate_pending
 from k8sfoam.src.synthetic.scenarios import ML, PLATFORM, SHOP, build_all, ml, platform, shop
@@ -155,3 +158,20 @@ def test_platform_builds_from_any_seed():
 
     # Then
     assert len(m.nodes) == 102
+
+
+def test_every_emitted_finding_is_known_to_the_ui_and_the_docs(clusters):
+    # Given — the slugs the UI renders and `audit:` accepts, and the ones docs/filtering.md lists
+    root = Path(__file__).parents[3]
+    jsx = (root / 'k8sfoam/src/frontend/podaudit.jsx').read_text()
+    ui = set(re.findall(r'^\s*"([a-z-]+)":\s*\{\s*label:', jsx, re.MULTILINE))
+    audit_row = next(line for line in (root / 'docs/filtering.md').read_text().splitlines()
+                     if line.startswith('| `audit:<rule>`'))
+    documented = set(re.findall(r'`([a-z-]+)`', audit_row))
+
+    # When
+    emitted = {f for _, _, payload in clusters.values() for n in payload['nodes'] for p in n['pods'] for f in p['findings']}
+
+    # Then
+    assert emitted <= ui
+    assert emitted <= documented

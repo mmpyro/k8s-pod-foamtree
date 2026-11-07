@@ -1,6 +1,7 @@
+import logging
 import pytest
 import bitmath  # type: ignore
-from k8sfoam.src.app import create_app, main, change_events, DEBOUNCE
+from k8sfoam.src.app import LOOPBACK_HOSTS, create_app, main, change_events, host_name, is_loopback, DEBOUNCE
 from k8sfoam.src.k8s.k8s_client import DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock
 from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources, ContainerResources
@@ -251,7 +252,7 @@ def test_simulate_drain_honours_disruption_budgets(k8s_client, test_client):
     assert drain.status_code == 200
     assert drain.json['pdbsChecked'] is True
     assert drain.json['blocked'] == [{'pod': 'db-0', 'namespace': 'default', 'pdb': 'db-pdb',
-                                      'disruptionsAllowed': 0}]
+                                      'disruptionsAllowed': 0, 'multiplePdbs': False}]
     verdicts = {v['node']: v for v in consolidation.json['nodes']}
     assert verdicts['a']['blockers'] == [{'slug': 'pdb', 'pods': 1}]
 
@@ -537,6 +538,90 @@ def test_simulate_replicas_returns_internal_server_error(k8s_client, test_client
     assert response.status_code == 500
 
 
+# --- PR #130 follow-up: input boundaries of the simulators ---
+
+@pytest.mark.parametrize('body', [{'cpu': '-1'}, {'cpu': '1', 'memory': '-1Gi'},
+                                  {'cpu': '1', 'extended': {'nvidia.com/gpu': '-1'}},
+                                  {'cpu': '1', 'extraNodes': [{'shape': {'cpu': '-4', 'memory': '8Gi'}, 'count': 1}]},
+                                  {'cpu': '1', 'extraNodes': [{'shape': {'cpu': '4', 'memory': '-8Gi'}, 'count': 1}]}])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_rejects_negative_quantities(k8s_client, body, test_client):
+    # When — a negative request would fit every node, a negative shape would remove capacity
+    response = test_client.post('/simulate/fit', json=body)
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@pytest.mark.parametrize('value', ['--5', '\u00b2'])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_rejects_gt_values_that_are_not_integers(k8s_client, value, test_client):
+    # When — both pass isdigit() after lstrip('-') but are not integers
+    response = test_client.post('/simulate/fit', json=affinity_body({'key': 'cores', 'operator': 'Gt', 'values': [value]}))
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@pytest.mark.parametrize('counts, status', [((25, 26), 400), ((25, 25), 200)])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_fit_limits_hypothetical_nodes_over_all_entries(k8s_client, counts, status, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+    extra = [{'template': 'a', 'count': counts[0]}, {'template': 'b', 'count': counts[1]}]
+
+    # When
+    response = test_client.post('/simulate/fit', json={'cpu': '1', 'extraNodes': extra})
+
+    # Then
+    assert response.status_code == status
+    if status == 200:
+        assert response.json['total'] == 52
+
+
+@pytest.mark.parametrize('query', ['?count=1.5', '?count=-1'])
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_rejects_counts_that_are_not_positive_integers(k8s_client, query, test_client):
+    # When
+    response = test_client.get(f'/simulate/replicas/default/Deployment/web{query}')
+
+    # Then
+    assert response.status_code == 400
+    k8s_client.assert_not_called()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_replicas_accepts_the_largest_count(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = replica_cluster()
+
+    # When — 100 is what the static demo precomputes
+    response = test_client.get('/simulate/replicas/default/Deployment/web?count=100')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['requested'] == 100
+    assert response.json['placed'] <= 100
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_simulate_drain_post_without_a_json_body_drains_onto_the_cluster_as_it_is(k8s_client, test_client):
+    # Given
+    k8s_client.return_value = simulation_cluster()
+
+    # When
+    get = test_client.get('/simulate/drain/a')
+    text = test_client.post('/simulate/drain/a', data='extraNodes', content_type='text/plain')
+    empty = test_client.post('/simulate/drain/a')
+
+    # Then
+    assert text.status_code == empty.status_code == 200
+    assert text.json == empty.json == get.json
+    assert text.json['hypotheticalNodes'] == []
+
+
 @patch('k8sfoam.src.app.K8sClient')
 def test_should_serve_a_vendor_prefixed_extended_resource(k8s_client, test_client):
     # Given
@@ -603,6 +688,31 @@ def test_get_all_k8s_resources_lists_the_cluster_once(k8s_client, test_client):
     k8s_client.assert_called_once_with('prod', DEFAULT_PAGE_SIZE)
     k8s_client_instance.get_node_resources.assert_called_once_with()
     k8s_client_instance.get_pod_resources.assert_called_once_with()
+
+
+@patch('k8sfoam.src.app.K8sClient')
+def test_resources_answer_when_every_price_source_fails(k8s_client, tmp_path):
+    # Given — no snapshot on disk and a live fetcher that always raises
+    from k8sfoam.src.pricing import PriceBook
+
+    def broken(region, types):
+        raise RuntimeError('token expired')
+
+    prices = PriceBook(snapshot_path=tmp_path / 'missing.json.gz', fetchers={'aws': broken})
+    labels = {'topology.kubernetes.io/region': 'eu-west-1', 'node.kubernetes.io/instance-type': 'm5.xlarge'}
+    k8s_client.return_value.get_node_resources.return_value = [
+        NodeResources('worker', 2000, float(bitmath.GiB(1).kB), labels=labels, provider_id='aws:///eu-west-1a/i-1')]
+    k8s_client.return_value.get_pod_resources.return_value = []
+    test_client = create_app(watch=False, prices=prices).test_client()
+
+    # When
+    response = test_client.get('/resources')
+
+    # Then
+    assert response.status_code == 200
+    assert response.json['nodes'][0]['price'] is None
+    assert response.json['pricing']['missing'] == [
+        {'provider': 'aws', 'region': 'eu-west-1', 'instanceType': 'm5.xlarge', 'count': 1}]
 
 
 @patch('k8sfoam.src.app.K8sClient')
@@ -797,15 +907,17 @@ def test_change_events_follow_a_replaced_cache_after_a_heartbeat():
     ([], {'page_size': 500, 'watch': True}),
     (['--page-size', '100', '--no-watch'], {'page_size': 100, 'watch': False}),
 ])
+@patch('k8sfoam.src.app.load_config')
 @patch('k8sfoam.src.app.create_app')
-def test_main_passes_cache_options(create_app, argv, expected):
+def test_main_passes_cache_options(create_app, load_config, argv, expected):
     # Given
     with patch('sys.argv', ['k8sfoams', *argv]):
         # When
         main()
 
     # Then
-    create_app.assert_called_once_with(**expected)
+    create_app.assert_called_once_with(**expected, advisor=load_config.return_value, token=None,
+                                       allowed_hosts=[*LOOPBACK_HOSTS, '127.0.0.1'])
 
 
 @pytest.mark.parametrize('page_size', ['0', '-5', 'many'])
@@ -817,9 +929,10 @@ def test_main_rejects_a_page_size_below_one(page_size):
             main()
 
 
+@patch('k8sfoam.src.app.load_config')
 @patch('k8sfoam.src.app.SyntheticRegistry')
 @patch('k8sfoam.src.app.create_app')
-def test_main_serves_synthetic_clusters(create_app, registry):
+def test_main_serves_synthetic_clusters(create_app, registry, load_config):
     # Given
     with patch('sys.argv', ['k8sfoams', '--synthetic', '--seed', '7', '--churn-interval', '2.5']):
         # When
@@ -827,7 +940,9 @@ def test_main_serves_synthetic_clusters(create_app, registry):
 
     # Then
     registry.assert_called_once_with(7, 2.5)
-    create_app.assert_called_once_with(page_size=500, watch=True, synthetic=registry.return_value)
+    create_app.assert_called_once_with(page_size=500, watch=True, synthetic=registry.return_value,
+                                       advisor=load_config.return_value, token=None,
+                                       allowed_hosts=[*LOOPBACK_HOSTS, '127.0.0.1'])
 
 
 def test_main_rejects_a_negative_churn_interval():
@@ -901,3 +1016,192 @@ def test_synthetic_clusters_stream_changes():
     # Then
     assert first == 'event: ready\ndata: 0\n\n'
     assert changed == 'event: changed\ndata: 1\n\n'
+
+
+def test_synthetic_mode_prices_from_the_snapshot_without_network():
+    # Given — every live price source would fail loudly if touched
+    import threading
+    fetcher = MagicMock(side_effect=AssertionError('network'))
+    registry = SyntheticRegistry(churn_interval=0)
+    try:
+        with patch.dict('k8sfoam.src.pricing.fetchers.FETCHERS', {'aws': fetcher, 'azure': fetcher, 'gcp': fetcher}), \
+                patch('k8sfoam.src.pricing.fetchers.requests.get', side_effect=AssertionError('network')) as get:
+            client = create_app(synthetic=registry).test_client()
+
+            # When
+            responses = [client.get(f'/resources?context={c}') for c in (SHOP, ML, PLATFORM)]
+            for t in threading.enumerate():
+                if t.name == 'price-fetch':
+                    t.join(5)
+
+        # Then
+        assert [r.status_code for r in responses] == [200, 200, 200]
+        fetcher.assert_not_called()
+        get.assert_not_called()
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize('context', [SHOP, ML, PLATFORM])
+def test_bundled_snapshot_prices_every_synthetic_node(synthetic_client, context):
+    response = synthetic_client.get(f'/resources?context={context}')
+
+    assert response.status_code == 200
+    assert response.json['pricing']['missing'] == []
+    assert all(n['price'] and n['price']['hourly'] > 0 for n in response.json['nodes'])
+
+
+@pytest.mark.parametrize('host, expected', [
+    ('127.0.0.1', True), ('127.0.0.2', True), ('::1', True), ('localhost', True), ('LOCALHOST', True),
+    ('0.0.0.0', False), ('::', False), ('10.0.0.5', False), ('example.com', False),  # nosec B104
+])
+def test_is_loopback(host, expected):
+    assert is_loopback(host) is expected
+
+
+@pytest.mark.parametrize('host, expected', [
+    ('localhost:8080', 'localhost'), ('Example.COM', 'example.com'), ('[::1]:8080', '::1'), ('[::1]', '::1'),
+    ('::1', '::1'), ('10.0.0.5:80', '10.0.0.5'),
+])
+def test_host_name_drops_port_and_brackets(host, expected):
+    assert host_name(host) == expected
+
+
+def run_main(*argv):
+    with patch('sys.argv', ['k8sfoams', *argv]), patch('k8sfoam.src.app.load_config'), \
+            patch('k8sfoam.src.app.create_app') as create_app:
+        main()
+    return create_app.call_args.kwargs
+
+
+def test_main_on_loopback_warns_nothing_and_needs_no_token(capsys):
+    # Given / When
+    options = run_main()
+
+    # Then
+    assert options['token'] is None
+    assert capsys.readouterr().err == ''
+
+
+def test_main_on_a_network_host_warns_and_generates_a_token(capsys):
+    # Given / When
+    options = run_main('--host', '0.0.0.0', '--allowed-host', 'dash.example')  # nosec B104
+
+    # Then
+    err = capsys.readouterr().err
+    assert 'WARNING' in err and 'kubeconfig credentials' in err
+    assert len(options['token']) >= 32
+    assert f'http://0.0.0.0:8080/#token={options["token"]}' in err
+    assert options['allowed_hosts'] == [*LOOPBACK_HOSTS, '0.0.0.0', 'dash.example']  # nosec B104
+
+
+@pytest.mark.parametrize('argv, token', [
+    (['--host', '10.0.0.5', '--token', 's3cret'], 's3cret'),
+    (['--host', '10.0.0.5', '--no-auth'], None),
+    (['--token', 's3cret'], 's3cret'),
+])
+def test_main_token_options(argv, token):
+    assert run_main(*argv)['token'] == token
+
+
+def test_main_rejects_token_with_no_auth():
+    with patch('sys.argv', ['k8sfoams', '--token', 'x', '--no-auth']), pytest.raises(SystemExit):
+        main()
+
+
+@pytest.mark.parametrize('token', ['', '  '])
+def test_main_rejects_an_empty_token(token):
+    with pytest.raises(SystemExit):
+        run_main('--token', token)
+
+
+@pytest.mark.parametrize('argv', [['--host', '10.0.0.5', '-d'], ['--host', '10.0.0.5', '--no-auth', '-d']])
+def test_main_refuses_debug_on_a_network_host(argv):
+    with pytest.raises(SystemExit):
+        run_main(*argv)
+
+
+def test_main_allows_debug_on_loopback():
+    assert run_main('-d')['token'] is None
+
+
+def test_server_log_redacts_the_token(caplog):
+    # Given
+    run_main()
+
+    # When: a request line as the Werkzeug dev server logs it.
+    with caplog.at_level(logging.INFO, logger='werkzeug'):
+        logging.getLogger('werkzeug').info('"%s" %s %s', 'GET /events?context=a&token=s3cret HTTP/1.1', '200', '-')
+
+    # Then
+    assert 's3cret' not in caplog.text
+    assert '"GET /events?context=a&token=<redacted> HTTP/1.1" 200 -' in caplog.text
+
+
+@pytest.fixture
+def token_client():
+    with patch('k8sfoam.src.app.K8sClient'):
+        yield create_app(watch=False, token='s3cret').test_client()  # nosec B106
+
+
+@pytest.mark.parametrize('headers, status', [
+    ({}, 401),
+    ({'Authorization': 'Bearer wrong'}, 401),
+    ({'Authorization': 's3cret'}, 401),
+    ({'Authorization': 'Bearer s3cret'}, 200),
+])
+def test_token_is_required_on_api_routes(token_client, headers, status):
+    # Given / When
+    response = token_client.get('/advisor/status', headers=headers)
+
+    # Then
+    assert response.status_code == status
+
+
+@pytest.mark.parametrize('path', ['/healthcheck', '/'])
+def test_token_is_not_required_for_healthcheck_and_page(token_client, path):
+    assert token_client.get(path).status_code != 401
+
+
+def test_token_query_parameter_only_counts_on_the_event_stream(token_client):
+    # Given / When / Then: without the watch cache /events answers 404, past the token check.
+    assert token_client.get('/events?token=s3cret').status_code == 404
+    assert token_client.get('/events?token=wrong').status_code == 401
+    assert token_client.get('/advisor/status?token=s3cret').status_code == 401
+
+
+@pytest.mark.parametrize('host, status', [
+    ('localhost:8080', 200), ('127.0.0.1:8080', 200), ('[::1]:8080', 200), ('dash.example:8080', 200),
+    ('evil.example', 403), ('evil.example:8080', 403),
+])
+def test_host_header_must_be_allowed(host, status):
+    # Given
+    client = create_app(watch=False, allowed_hosts=[*LOOPBACK_HOSTS, 'Dash.Example']).test_client()
+
+    # When
+    response = client.get('/advisor/status', headers={'Host': host})
+
+    # Then
+    assert response.status_code == status
+
+
+def test_healthcheck_answers_any_host():
+    client = create_app(watch=False).test_client()
+    assert client.get('/healthcheck', headers={'Host': '10.1.2.3:8080'}).status_code == 200
+
+
+@pytest.mark.parametrize('origin, refused', [
+    ('http://evil.example', True),
+    ('null', True),
+    ('http://localhost:8080', False),
+    (None, False),
+])
+def test_cross_origin_posts_are_refused(test_client, origin, refused):
+    # Given
+    headers = {'Host': 'localhost:8080', **({'Origin': origin} if origin else {})}
+
+    # When: an empty body fails validation (400) once past the origin check.
+    response = test_client.post('/simulate/fit', json={}, headers=headers)
+
+    # Then
+    assert (response.status_code == 403) is refused

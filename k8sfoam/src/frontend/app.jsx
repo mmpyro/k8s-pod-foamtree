@@ -8,6 +8,7 @@ const { warnInfo, statusOf, WARNING_ORDER } = window.k8sNodeStatus;
 const { findingInfo, FINDING_ORDER, PodAuditBadge } = window.k8sPodAudit;
 const { QOS_INFO, QOS_ORDER, NEUTRAL_HUE } = window.k8sQos;
 const { GROUP_MODES, groupMode, groupNodes } = window.k8sTopology;
+const { nodeCost, fmtUsd } = window.k8sCost;
 const {
   isBytes, isDevice, resourceMeta, nodeCap, nodeUsed, detectResources, fmtMem, fmtValue, unitOf, fragmentation,
 } = window.k8sResources;
@@ -15,6 +16,7 @@ const {
   FitModal, DrainButton, DrainReport, ConsolidationModal, ReplicasModal, PendingModal, drainSimulation,
   scalableWorkload,
 } = window.k8sSimulate;
+const { AdvisorModal, AssistantModal } = window.k8sAdvisor;
 
 const SIM_KINDS = {
   fit: "Fit simulation", drain: "Drain simulation", consolidation: "Consolidation", replicas: "Replica simulation",
@@ -184,7 +186,9 @@ function toNode(n, idx) {
     taints: n.taints || [],
     conditions: n.conditions || {},
     unschedulable: !!n.unschedulable,
-    status: statusOf(n.warnings || [])
+    status: statusOf(n.warnings || []),
+    // On-demand list price {hourly, source}; null when unknown.
+    price: n.price || null,
   };
 }
 
@@ -223,10 +227,23 @@ function App() {
   const [consolidationOpen, setConsolidationOpen] = useState(false);
   const [replicasOpen, setReplicasOpen] = useState(false);
   const [pendingOpen, setPendingOpen] = useState(false);
+  // AI advisor: {enabled, model} from the server, null until known or when it fails.
+  const [advisor, setAdvisor] = useState(null);
+  const [advisorOpen, setAdvisorOpen] = useState(false);
+  // Consent is per page load: until Send in the consent step, nothing goes to the model.
+  const [advisorConsent, setAdvisorConsent] = useState(false);
+  const [advisorRedact, setAdvisorRedact] = useState(true);
+  // Last ask: { ctx, busy } while waiting, then { ctx, result } or { ctx, error }.
+  const [advice, setAdvice] = useState(null);
+  // Assistant chat: { ctx, turns, busy, error }; a new context starts a new chat.
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [chat, setChat] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
   const [nodes, setNodes] = useState([]);
   // Unbound pods the scheduler is trying to place; offers the pending pods simulation.
   const [pendingPods, setPendingPods] = useState(0);
+  // Snapshot date, live price errors and the cloud nodes left unpriced; null without pricing.
+  const [pricing, setPricing] = useState(null);
   // Context name the loaded nodes came from; null until the first load.
   const [loadedCtx, setLoadedCtx] = useState(null);
   const [error, setError] = useState(null);
@@ -269,6 +286,7 @@ function App() {
       })
       .catch(err => {
         console.warn("Failed to fetch contexts:", err);
+        setError(err.message || String(err));
         setContexts([]);
         setContextIdx(0);
       });
@@ -276,6 +294,57 @@ function App() {
 
   const currentCtx = contexts[contextIdx];
   const ctxName = currentCtx ? currentCtx.context : null;
+
+  useEffect(() => {
+    api.advisorStatus().then(setAdvisor).catch(() => setAdvisor(null));
+  }, []);
+
+  // Lives in App, not the modal: a local model answers in minutes and the modal may be closed meanwhile.
+  // An answer for a context or scope the user has since left is dropped.
+  const scopeKey = scope => (scope ? scope.pods.join(",") : null);
+  const askAdvisor = () => {
+    const ctx = ctxName;
+    const scope = advisorScope;
+    setAdvisorConsent(true);
+    setAdvice({ ctx, busy: true, scope });
+    const settle = next => setAdvice(a => (a && a.ctx === ctx && scopeKey(a.scope) === scopeKey(scope) ? next : a));
+    api.advisor(ctx, advisorRedact, scope && scope.pods)
+      .then(result => settle({ ctx, result, scope }))
+      .catch(err => settle({ ctx, error: err.message || String(err), scope }));
+  };
+  const ctxAdvice = advice && advice.ctx === ctxName ? advice : null;
+  const openAdvisor = () => {
+    setAdvisorOpen(true);
+    // Ask again when the query or the pin changed since the last answer, not only on a first open.
+    if (advisorConsent && (!ctxAdvice || scopeKey(ctxAdvice.scope) !== scopeKey(advisorScope))) askAdvisor();
+  };
+  // Like askAdvisor: the request outlives the modal, and an answer for a context since left is dropped.
+  const ctxChat = chat && chat.ctx === ctxName ? chat : null;
+  const askAssistant = question => {
+    const ctx = ctxName;
+    const history = (ctxChat ? ctxChat.turns : []).map(({ role, content }) => ({ role, content }));
+    const turns = [...history, { role: "user", content: question }];
+    setChat({ ctx, turns, busy: true });
+    const settle = next => setChat(c => (c && c.ctx === ctx ? next : c));
+    let partial = "";
+    const onDelta = delta => {
+      partial += delta;
+      const content = partial;
+      settle({ ctx, turns: [...turns, { role: "assistant", content }], busy: true });
+    };
+    api.assistant(ctx, { question, history, redact: advisorRedact }, onDelta)
+      .then(r => settle({ ctx, turns: [...turns, { role: "assistant", content: r.answer, sources: r.sources, usage: r.usage }] }))
+      .catch(err => settle({ ctx, turns, error: err.message || String(err) }));
+  };
+  const applyQuery = q => {
+    setQuery(q);
+    setAssistantOpen(false);
+  };
+  const highlightAdvice = target => {
+    if (target.workload) setSelectedWorkload(target.workload);
+    if (target.query) setQuery(target.query);
+    setAdvisorOpen(false);
+  };
 
   // One load at a time: a request made meanwhile (a change event, a context
   // switch) runs once the current one ends, with the latest context.
@@ -294,6 +363,7 @@ function App() {
       const payload = await api.resources(ctxName);
       setNodes(toNodes(payload));
       setPendingPods(payload.pendingPods || 0);
+      setPricing(payload.pricing || null);
       setLoadedCtx(ctxName);
       setError(null);
       setLastRefresh(Date.now());
@@ -359,6 +429,21 @@ function App() {
 
   const highlight = selectedWorkload || hoveredWorkload;
   const highlightActive = !!selectedWorkload;
+
+  // What the advisor looks at: the pinned workload's pods, else the query's matches, else the whole cluster (null).
+  const advisorScope = useMemo(() => {
+    let pods, label;
+    if (selectedWorkload) {
+      pods = nodes.flatMap(n => n.pods.filter(p => workloadKey(p) === selectedWorkload));
+      label = `the pinned workload ${workloadLabel(selectedWorkload)}`;
+    } else if (match.active) {
+      pods = [...match.pods];
+      label = "the query";
+    } else {
+      return null;
+    }
+    return { label, pods: pods.map(p => `${p.namespace}/${p.name}`) };
+  }, [nodes, selectedWorkload, match]);
 
   const toggleWorkload = (wl) => setSelectedWorkload(prev => (prev === wl ? null : wl));
 
@@ -462,6 +547,20 @@ function App() {
     return t;
   }, [nodes]);
 
+  // Monthly cost of the priced nodes; spot ones are counted at on-demand price.
+  const cost = useMemo(() => {
+    const c = { monthly: 0, idle: 0, priced: 0, spot: 0 };
+    for (const n of nodes) {
+      const nc = nodeCost(n);
+      if (!nc) continue;
+      c.monthly += nc.monthly;
+      c.idle += nc.idle;
+      c.priced += 1;
+      if (n.topology.capacityType === "spot") c.spot += 1;
+    }
+    return c;
+  }, [nodes]);
+
   // Live updates. The browser reconnects a dropped stream by itself; it gives
   // up (CLOSED) only when the server refuses it, e.g. a 404 under --no-watch.
   useEffect(() => {
@@ -514,6 +613,8 @@ function App() {
       setConsolidationOpen(false);
       setReplicasOpen(false);
       setPendingOpen(false);
+      setAdvisorOpen(false);
+      setAssistantOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -654,6 +755,9 @@ function App() {
         groupBy={groupBy} setGroupBy={setGroupBy}
         topology={topology}
         query={query} setQuery={setQuery}
+        cost={cost} pricing={pricing}
+        advisor={advisor} advice={ctxAdvice} onAdvisor={openAdvisor} onAssistant={() => setAssistantOpen(true)}
+        error={error}
       />
 
       <main className="main">
@@ -795,6 +899,17 @@ function App() {
           onSimulation={setSim} onClose={() => setReplicasOpen(false)} />
       )}
 
+      {advisorOpen && advisor && advisor.enabled && (
+        <AdvisorModal ctx={ctxName} model={advisor.model} consented={advisorConsent} scope={advisorScope}
+          redact={advisorRedact} setRedact={setAdvisorRedact} advice={ctxAdvice} onAsk={askAdvisor}
+          onCopy={copyText} onHighlight={highlightAdvice} onClose={() => setAdvisorOpen(false)} />
+      )}
+
+      {assistantOpen && advisor && advisor.enabled && (
+        <AssistantModal model={advisor.model} redact={advisorRedact} setRedact={setAdvisorRedact} chat={ctxChat}
+          onSend={askAssistant} onQuery={applyQuery} onClear={() => setChat(null)} onClose={() => setAssistantOpen(false)} />
+      )}
+
       <TweaksPanel>
         <TweakSection label="Color">
           <TweakRadio label="Color scheme" value={tw.colorScheme}
@@ -835,7 +950,8 @@ function Sidebar({
   open, onToggle, view, setView, zoom, setZoom, metric, setMetric, metrics, totals, memUnit, setMemUnit,
   refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
-  audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery
+  audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery, cost, pricing,
+  advisor, advice, onAdvisor, onAssistant, error
 }) {
   const is3d = view === "3d";
   return (
@@ -1021,6 +1137,39 @@ function Sidebar({
         </div>
       )}
 
+      {/* Monthly on-demand cost. Hidden where no cloud prices the nodes (kind,
+          bare metal); a cloud node the price book does not know gets a warning
+          row and is left out of the total. */}
+      {(cost.priced > 0 || (pricing && pricing.missing.length > 0)) && (
+        <div className="sidebar-section">
+          <div className="section-label">
+            <span>Cost</span>
+            <span className="section-value">{fmtUsd(cost.monthly)}/mo</span>
+          </div>
+          <div className="health-rows">
+            <div className="health-row" title="The unrequested share of each node's busier resource (CPU or memory), priced">
+              <span className="health-name">Idle (unrequested)</span>
+              <span className="health-count">{fmtUsd(cost.idle)}/mo · {pct(cost.idle / (cost.monthly || 1))}</span>
+            </div>
+            {pricing && pricing.missing.map(m => (
+              <div key={`${m.provider}/${m.region}/${m.instanceType}`} className="health-row"
+                title={`No ${m.provider} on-demand price for ${m.instanceType || "an unlabelled type"} in ${m.region || "an unlabelled region"}; not in the total`}>
+                <span className="health-swatch sev-warn" />
+                <span className="health-name">No price · {m.instanceType || "no type"} · {m.region || "no region"}</span>
+                <span className="health-count">{m.count}</span>
+              </div>
+            ))}
+          </div>
+          <div className="seg-note"
+            title={Object.entries((pricing && pricing.liveErrors) || {}).map(([p, e]) => `${p}: ${e}`).join("\n")}>
+            On-demand list prices{pricing && pricing.generated ? ` (snapshot ${pricing.generated})` : ""}.
+            {cost.spot > 0 && ` ${cost.spot} spot node${cost.spot === 1 ? "" : "s"} counted at on-demand price.`}
+            {pricing && Object.keys(pricing.liveErrors || {}).length > 0 &&
+              ` Live prices unavailable for ${Object.keys(pricing.liveErrors).join(", ")}.`}
+          </div>
+        </div>
+      )}
+
       {/* Capacity per zone / pool, so an imbalance reads without hovering. A
           row toggles its zone:/pool:/… query; the unlabelled group has no
           token to toggle. */}
@@ -1036,17 +1185,19 @@ function Sidebar({
               return (
                 <button key={g.label} className={`health-row topo-row ${g.token ? "audit-row" : "topo-none"} ${on ? "audit-on" : ""}`}
                   disabled={!g.token}
-                  title={`${g.items.length} node${g.items.length === 1 ? "" : "s"} · CPU ${pct(g.cpuUtil)} · Memory ${pct(g.memUtil)}`}
+                  title={`${g.items.length} node${g.items.length === 1 ? "" : "s"} · CPU ${pct(g.cpuUtil)} · Memory ${pct(g.memUtil)}`
+                    + (g.priced ? ` · ${fmtUsd(g.cost)}/mo, ${fmtUsd(g.idleCost)} idle` : "")}
                   onClick={() => g.token && setQuery(on ? "" : g.token)}>
                   <span className="health-name">{g.label}</span>
                   <span className="topo-util" style={{ color: utilColor(g.cpuUtil) }}>{pct(g.cpuUtil)}</span>
                   <span className="topo-util" style={{ color: utilColor(g.memUtil) }}>{pct(g.memUtil)}</span>
+                  {cost.priced > 0 && <span className="topo-cost">{g.priced ? fmtUsd(g.cost) : "—"}</span>}
                   <span className="health-count">{g.items.length}</span>
                 </button>
               );
             })}
           </div>
-          <div className="seg-note">CPU % · Memory % · nodes</div>
+          <div className="seg-note">CPU % · Memory % · {cost.priced > 0 ? "$/mo · " : ""}nodes</div>
         </div>
       )}
 
@@ -1095,11 +1246,26 @@ function Sidebar({
         </div>
       )}
 
+      {/* Only when the server has an LLM configured; the static demo never does. */}
+      {nodeCount > 0 && advisor && advisor.enabled && (
+        <div className="sidebar-section advisor-side">
+          <div className="section-label">AI Advisor<span className="section-value">{advisor.model}</span></div>
+          <button className={`btn-primary ${advice && advice.busy ? "spinning" : ""}`} onClick={onAdvisor}>
+            {advice && advice.busy ? <><span className="advisor-spinner" aria-hidden="true" />Asking…</> : "Ask advisor"}
+          </button>
+          {advice && advice.error && <span className="sim-error">{advice.error}</span>}
+          {advice && advice.result && (
+            <span className="sim-note">{advice.result.recommendations.length} recommendations · AI-generated</span>
+          )}
+          <button className="sim-preset" onClick={onAssistant}>Ask a question</button>
+        </div>
+      )}
+
       <div className="sidebar-footer">
         <div className="footer-row">
-          <span className="dot dot-ok" />
-          <span>{api.isStatic ? "Synthetic demo data" : "Cluster connected"}</span>
-          <span className="footer-tail">{api.isStatic ? "Snapshot" : "Ready"}</span>
+          <span className={`dot ${error ? "dot-warn" : "dot-ok"}`} />
+          <span>{api.isStatic ? "Synthetic demo data" : error ? "Not connected" : "Cluster connected"}</span>
+          <span className="footer-tail">{api.isStatic ? "Snapshot" : error ? "Error" : "Ready"}</span>
         </div>
         <div className="footer-row dim">
           <span>{nodeCount} nodes</span>
@@ -1530,6 +1696,7 @@ function TreemapGrid({
 function FocusOverlay({ node, nodes, onClose, metric, memUnit, ctx, onSimulation }) {
   // Drain report for this node; replaces the workload list while shown.
   const [drain, setDrain] = useState(null);
+  const cost = nodeCost(node);
   const onDrainReport = (report) => {
     setDrain(report);
     if (report.result) onSimulation(drainSimulation(report.result));
@@ -1577,6 +1744,14 @@ function FocusOverlay({ node, nodes, onClose, metric, memUnit, ctx, onSimulation
             <div className="ov-val">{node.pods.length} <span>scheduled</span></div>
             <div className="ov-bar"><div style={{ width: `${(node.pods.length / 110) * 100}%`, background: "#22d3ee" }} /></div>
           </div>
+          {cost && (
+            <div className="ov-stat" title={`${fmtUsd(cost.hourly, 3)}/h on-demand list price (${cost.source})`
+              + (node.topology.capacityType === "spot" ? "; spot is billed lower" : "")}>
+              <div className="ov-label">Cost{node.topology.capacityType === "spot" ? " (on-demand)" : ""}</div>
+              <div className="ov-val">{fmtUsd(cost.monthly)} <span>/mo · {fmtUsd(cost.idle)} idle</span></div>
+              <div className="ov-bar"><div style={{ width: `${(1 - cost.idle / (cost.monthly || 1)) * 100}%`, background: "#34d399" }} /></div>
+            </div>
+          )}
         </div>
         {(node.warnings.length > 0 || node.taints.length > 0) && (
           <div className="overlay-sched">

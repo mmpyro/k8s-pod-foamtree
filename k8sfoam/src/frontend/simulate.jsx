@@ -675,8 +675,10 @@ function DrainReport({ report, ctx, nodes, onReport, memUnit, fmtMem }) {
               <div key={`${b.namespace}/${b.pod}`} className="taint-row">
                 <code>{b.namespace}/{b.pod}</code>
                 <span className="taint-effect">
-                  {b.pdb} allows {plural(b.disruptionsAllowed, "disruption")}
-                  {b.disruptionsAllowed > 0 ? ", used up by this drain" : ""}
+                  {b.multiplePdbs
+                    ? `${b.pdb}: eviction refuses a pod selected by more than one PodDisruptionBudget`
+                    : <>{b.pdb} allows {plural(b.disruptionsAllowed, "disruption")}
+                      {b.disruptionsAllowed > 0 ? ", used up by this drain" : ""}</>}
                 </span>
               </div>
             ))}
@@ -1171,5 +1173,5 @@ function PendingModal({ ctx, nodes, memUnit, fmtMem, onSimulation, onClose }) {
 window.k8sSimulate = {
   REASONS, reasonLabel, parseSelector, parseTolerations, parseTaints, toExtraNodes, fitSimulation, drainSimulation,
   consolidationSimulation, replicasSimulation, pendingSimulation, scalableWorkload, FitModal, DrainButton, DrainReport,
-  ConsolidationModal, ReplicasModal, PendingModal,
+  ConsolidationModal, ReplicasModal, PendingModal, CloseIcon,
 };

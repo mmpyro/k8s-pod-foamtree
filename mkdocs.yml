@@ -24,6 +24,7 @@ nav:
       - Controls: controls.md
       - Node health: node-health.md
       - Topology: topology.md
+      - Cost: cost.md
       - Audit & hygiene: audit.md
       - QoS & eviction risk: qos.md
       - Scheduling simulators: simulators.md
@@ -31,6 +32,7 @@ nav:
       - Extended resources: extended-resources.md
       - Export: export.md
       - Shareable links: shareable-links.md
+      - AI advisor: advisor.md
   - Reference:
       - Command line: cli.md
       - HTTP API: http-api.md

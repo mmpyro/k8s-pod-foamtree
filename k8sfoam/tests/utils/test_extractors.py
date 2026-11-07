@@ -3,7 +3,7 @@ import pytest
 from k8sfoam.src.utils.extractors import ResourcesExtractor
 from pydash import py_ as _  # type: ignore
 from k8sfoam.tests.common.mocks import (create_container, create_pod, create_node, create_taint, create_condition,
-                                        create_toleration)
+                                        create_toleration, create_owner)
 from unittest.mock import MagicMock
 from kubernetes.client import (V1Affinity, V1LabelSelector, V1LabelSelectorRequirement,  # type: ignore
                                V1NodeAffinity, V1NodeSelector, V1NodeSelectorRequirement, V1NodeSelectorTerm,
@@ -494,6 +494,13 @@ def test_node_without_pod_limit_or_labels_emits_neutral_values():
     # Then
     assert result.labels == {}
     assert result.allocatable_pods is None
+    assert result.provider_id is None
+
+
+def test_should_extract_node_provider_id():
+    node = create_node('worker', '4', '16Gi', provider_id='aws:///eu-west-1a/i-0abc')
+
+    assert ResourcesExtractor().extract_node_resources(node).provider_id == 'aws:///eu-west-1a/i-0abc'
 
 
 def test_should_extract_pod_scheduling_constraints():
@@ -674,6 +681,32 @@ def test_should_extract_pod_workload_identity(owner_kind, owner_name, labels, an
     assert (result.owner_kind, result.owner_name) == expected
 
 
+def test_the_controlling_owner_wins_over_the_first_one():
+    # Given — a garbage-collection-only owner listed before the controller
+    pod = create_pod('p', 'node', containers=[create_container('app', '100m', '100Mi')])
+    pod.metadata.owner_references = [create_owner('ConfigMap', 'settings', controller=False),
+                                     create_owner('StatefulSet', 'db')]
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert (result.owner_kind, result.owner_name) == ('StatefulSet', 'db')
+
+
+@pytest.mark.parametrize('controller', [False, None])
+def test_pod_whose_owners_are_not_controllers_is_naked(controller):
+    # Given — the owner only garbage-collects the pod; nothing recreates it after an eviction
+    pod = create_pod('p', 'node', containers=[create_container('app', '100m', '100Mi')])
+    pod.metadata.owner_references = [create_owner('ConfigMap', 'settings', controller=controller)]
+
+    # When
+    result = ResourcesExtractor().extract_pod_requested_resources(pod)
+
+    # Then
+    assert (result.owner_kind, result.owner_name) == (None, None)
+
+
 def test_gpu_set_as_limit_only_counts_as_request():
     # Given — the API allows extended resources in limits alone
     extractor = ResourcesExtractor()
@@ -749,3 +782,17 @@ def test_node_reads_allocatable_and_skips_non_requestable_keys():
     # Then
     assert node_resources.cpu == 8000
     assert node_resources.extended == {'nvidia.com/gpu': 4, 'ephemeral-storage': bitmath.GB(100).kB, 'hugepages-2Mi': 0}
+
+
+def test_should_extract_a_budget_without_status_as_allowing_no_disruptions():
+    # Given — the disruption controller has not processed the budget yet
+    from kubernetes.client import V1ObjectMeta, V1PodDisruptionBudget, V1PodDisruptionBudgetSpec  # type: ignore
+    pdb = V1PodDisruptionBudget(metadata=V1ObjectMeta(name='fresh', namespace='shop'),
+                                spec=V1PodDisruptionBudgetSpec(selector=V1LabelSelector()), status=None)
+
+    # When
+    budget = ResourcesExtractor().extract_disruption_budget(pdb)
+
+    # Then — an empty selector selects every pod of the namespace (policy/v1), and nothing may be evicted
+    assert budget.disruptions_allowed == 0
+    assert budget.selector == {'matchLabels': {}, 'matchExpressions': []}

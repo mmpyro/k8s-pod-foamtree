@@ -91,8 +91,8 @@ class ResourcesExtractor():
         nothing brings back."""
         if MIRROR_POD_ANNOTATION in (pod.metadata.annotations or {}):
             return 'Node', None
-        refs = pod.metadata.owner_references or []
-        controller = next((r for r in refs if r.controller), refs[0] if refs else None)
+        # A non-controller owner only garbage-collects the pod; nothing recreates it.
+        controller = next((r for r in pod.metadata.owner_references or [] if r.controller), None)
         if controller is None:
             return None, None
         kind, name = controller.kind, controller.name
@@ -203,6 +203,7 @@ class ResourcesExtractor():
         labels = dict(node.metadata.labels or {})
         # The pod slot count backs the simulator's pod-limit check; None when unreported.
         alloc_pods = int(parse_quantity(allocatable['pods'])) if 'pods' in allocatable else None
+        provider_id = node.spec.provider_id if node.spec is not None else None
         return NodeResources(node.metadata.name, cpu, memory, unschedulable,
                              self.__extract_node_taints(node), self.__extract_node_conditions(node),
-                             extract_extended(allocatable), labels, alloc_pods)
+                             extract_extended(allocatable), labels, alloc_pods, provider_id)

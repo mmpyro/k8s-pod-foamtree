@@ -1070,12 +1070,13 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
   font: inherit; font-size: 11px; text-align: left;
   cursor: default; font-style: italic;
 }
-.topo-util {
+.topo-util, .topo-cost {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 10.5px;
   width: 32px; text-align: right;
 }
+.topo-cost { width: 56px; color: var(--text-soft); }
 
 /* Audit findings on a focus-overlay workload row. */
 .pod-row-findings { display: flex; gap: 4px; margin-top: 5px; flex-wrap: wrap; }
@@ -1454,3 +1455,61 @@ input { font: inherit; color: inherit; background: none; border: none; outline: 
 @media (max-width: 760px) {
   .sim-form { grid-template-columns: 1fr; }
 }
+
+/* ─────────── AI advisor ─────────── */
+.advisor-modal { width: min(820px, 94vw); }
+.advisor-intro { padding: 14px 22px 0; font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+.advisor-pre { margin: 12px 22px; max-height: 42vh; overflow: auto; background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.advisor-pre pre, .advisor-change pre {
+  margin: 0 0 10px; font-family: var(--font-mono); font-size: 11px; color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.advisor-role { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--text-soft); margin-bottom: 4px; }
+.advisor-actions { padding: 0 22px 14px; }
+.advisor-redact { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-dim); cursor: pointer; }
+.advisor-banner {
+  margin: 14px 22px 12px; padding: 8px 12px; font-size: 11.5px; color: var(--warn);
+  background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.35); border-radius: 8px;
+}
+.advisor-cards { display: flex; flex-direction: column; gap: 10px; padding: 0 22px 22px; }
+.advisor-card { padding: 12px 14px; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r-md); }
+.advisor-card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.advisor-sev { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.advisor-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.advisor-cat { margin-left: auto; font-size: 10.5px; color: var(--text-soft); white-space: nowrap; }
+.advisor-why { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+.advisor-affected { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.advisor-chip {
+  font: inherit; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim);
+  padding: 3px 8px; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--r-pill);
+}
+button.advisor-chip { cursor: pointer; }
+button.advisor-chip:hover { color: var(--text); border-color: var(--accent); }
+.advisor-change { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; padding: 8px 10px; background: var(--bg-2); border-radius: 8px; }
+.advisor-change pre { flex: 1; margin: 0; }
+.advisor-side { display: flex; flex-direction: column; gap: 8px; }
+/* currentColor, so the ring is white on the primary button and dim in the modal's note. */
+.advisor-spinner {
+  display: inline-block; flex-shrink: 0; width: 12px; height: 12px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+.advisor-busy { display: inline-flex; align-items: center; gap: 8px; }
+.advisor-busy .advisor-spinner { width: 14px; height: 14px; color: var(--accent); }
+@media (prefers-reduced-motion: reduce) { .advisor-spinner { animation-duration: 2.5s; } }
+.advisor-side .sim-error, .advisor-side .sim-note { margin: 0; }
+.assistant-log { display: flex; flex-direction: column; gap: 10px; margin: 14px 22px 0; max-height: 52vh; min-height: 120px; overflow: auto; }
+.assistant-turn { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); font-size: 12.5px; line-height: 1.55; }
+.assistant-user { align-self: flex-end; max-width: 80%; background: var(--bg-2); }
+.assistant-assistant { background: var(--panel-2); }
+.assistant-text { white-space: pre-wrap; color: var(--text); }
+.assistant-text + .assistant-text, .assistant-code + .assistant-text { margin-top: 8px; }
+.assistant-code { margin: 8px 0; padding: 8px 10px; background: var(--bg-2); border-radius: 8px; overflow: auto; font-size: 11.5px; }
+.assistant-sources { margin-top: 8px; font-size: 10.5px; color: var(--text-soft); }
+.assistant-text code { font-family: var(--font-mono); font-size: 11.5px; padding: 1px 4px; background: var(--bg-2); border-radius: 4px; }
+.assistant-text .advisor-chip { margin: 0 2px; }
+.assistant-input { padding: 10px 22px 8px; }
+.assistant-input textarea {
+  width: 100%; box-sizing: border-box; resize: vertical; padding: 8px 10px; font: inherit; font-size: 12.5px;
+  color: var(--text); background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.assistant-input textarea:focus { outline: none; border-color: var(--accent); }
