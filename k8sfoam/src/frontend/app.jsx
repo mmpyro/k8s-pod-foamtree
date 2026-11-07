@@ -239,17 +239,25 @@ function App() {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [chat, setChat] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(!EMBED);
-  const [nodes, setNodes] = useState([]);
+  const [liveNodes, setNodes] = useState([]);
   // Unbound pods the scheduler is trying to place; offers the pending pods simulation.
   const [pendingPods, setPendingPods] = useState(0);
   // Snapshot date, live price errors and the cloud nodes left unpriced; null without pricing.
-  const [pricing, setPricing] = useState(null);
+  const [livePricing, setPricing] = useState(null);
   // Context name the loaded nodes came from; null until the first load.
   const [loadedCtx, setLoadedCtx] = useState(null);
   const [error, setError] = useState(null);
   const [exportError, setExportError] = useState(null);
   // Why the view differs from the link that opened it, e.g. an unknown context.
   const [urlNotice, setUrlNotice] = useState(null);
+  // A JSON report opened from a file: { context, generatedAt, version, nodes, pendingPods, pricing }.
+  // While set it replaces the live data, and everything that asks the server is off.
+  const [snapshot, setSnapshot] = useState(null);
+  const [fileError, setFileError] = useState(null);
+  const [dragging, setDragging] = useState(false);
+  const fileRef = useRef(null);
+  const nodes = snapshot ? snapshot.nodes : liveNodes;
+  const pricing = snapshot ? snapshot.pricing : livePricing;
   const gridWrapRef = useRef(null);
   const captureRef = useRef(null);
   // Set by a link that switches context, so the switch keeps the link's pin.
@@ -471,8 +479,8 @@ function App() {
   // drawing an empty grid. Skipped while nothing is loaded yet, and while the
   // data on screen still belongs to the previous context.
   useEffect(() => {
-    if (nodes.length > 0 && loadedCtx === ctxName && !metrics.some(m => m.id === metric)) setMetric("cpu");
-  }, [metrics, nodes.length, metric, loadedCtx, ctxName]);
+    if (nodes.length > 0 && (snapshot || loadedCtx === ctxName) && !metrics.some(m => m.id === metric)) setMetric("cpu");
+  }, [metrics, nodes.length, metric, loadedCtx, ctxName, snapshot]);
 
   // A link can pin a workload the cluster no longer runs, which would dim every
   // pod; once its context has loaded, drop such a pin.
@@ -564,7 +572,7 @@ function App() {
   // Live updates. The browser reconnects a dropped stream by itself; it gives
   // up (CLOSED) only when the server refuses it, e.g. a 404 under --no-watch.
   useEffect(() => {
-    if (!liveMode || contexts.length === 0) {
+    if (!liveMode || contexts.length === 0 || snapshot) {
       setLiveStatus("off");
       return;
     }
@@ -584,17 +592,17 @@ function App() {
     source.addEventListener("changed", () => loadDataRef.current());
     source.onerror = () => setLiveStatus(source.readyState === EventSource.CLOSED ? "off" : "reconnecting");
     return () => source.close();
-  }, [liveMode, contextIdx, contexts.length]);
+  }, [liveMode, contextIdx, contexts.length, !!snapshot]);
 
   // Auto-refresh tick — re-fetch live cluster data every refreshInterval
   // seconds, unless the live stream is delivering changes.
   useEffect(() => {
-    if (liveStatus === "live" || api.isStatic) return;
+    if (liveStatus === "live" || api.isStatic || snapshot) return;
     const id = setInterval(() => {
       if (contexts.length > 0) loadDataRef.current();
     }, refreshInterval * 1000);
     return () => clearInterval(id);
-  }, [refreshInterval, contexts.length, liveStatus]);
+  }, [refreshInterval, contexts.length, liveStatus, !!snapshot]);
 
   // React fires no mouseleave when the hovered pod unmounts — a refresh
   // dropping the pod or a view switch both do that — so a stale preview would
@@ -664,19 +672,66 @@ function App() {
   // In QoS mode node chrome goes neutral, so only the pods carry colour.
   const hueOf = idx => (colorBy === "qos" ? NEUTRAL_HUE : nodeHue(idx, tw.colorScheme));
 
+  // A pin, simulation or open node card belongs to the data it was made on.
+  const resetSelection = () => {
+    setSelectedWorkload(null);
+    setHoveredWorkload(null);
+    setSim(null);
+    setFocused(null);
+  };
+  const openSnapshot = async (file) => {
+    try {
+      setFileError(null);
+      const snap = window.k8sSnapshot.parseReport(await file.text(), isBytes);
+      setSnapshot({
+        context: snap.context, generatedAt: snap.generatedAt, version: snap.version,
+        nodes: toNodes(snap.payload), pendingPods: snap.payload.pendingPods, pricing: snap.payload.pricing,
+      });
+      resetSelection();
+    } catch (err) {
+      setFileError(`${file.name}: ${err.message || String(err)}`);
+    }
+  };
+  const backToLive = () => {
+    setSnapshot(null);
+    resetSelection();
+    if (contexts.length > 0) loadData();
+  };
+  // Only a file drag shows the drop target; dragging text or a pod does not.
+  const isFileDrag = e => Array.from(e.dataTransfer.types || []).includes("Files");
+  const onDragOver = e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    setDragging(true);
+  };
+  const onDrop = e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) openSnapshot(file);
+  };
+
   // Image and report downloads. Images show what is on screen — current view,
   // metric, colours, query and pinned workload; reports carry every pod.
   const onExport = async (kind) => {
     const k = window.k8sExport;
-    const ctx = contexts[contextIdx] ? contexts[contextIdx].context : "";
+    const ctx = snapshot ? snapshot.context : contexts[contextIdx] ? contexts[contextIdx].context : "";
     try {
       setExportError(null);
+      if (kind === "open") {
+        fileRef.current.click();
+        return;
+      }
       if (kind === "link") {
         await copyText(window.location.href);
         return true;
       }
       if (kind === "json") {
-        const body = k.reportJson({ nodes, totals, context: ctx, metric, query, match, pendingPods, pricing });
+        const body = k.reportJson({
+          nodes, totals, context: ctx, metric, query, match, pricing,
+          pendingPods: snapshot ? snapshot.pendingPods : pendingPods,
+        });
         k.download(new Blob([body], { type: "application/json" }), k.fileName(ctx, "report", "json"));
         return;
       }
@@ -713,7 +768,9 @@ function App() {
             ` · Memory ${fmtMem(totals.memUsed, memUnit)} / ${fmtMem(totals.memCap, memUnit, true)} ${memUnit} (${memPct}%)` +
             (ext ? ` · ${ext.meta.label} ${fmtValue(ext.used, metric, memUnit)} / ${fmtValue(ext.cap, metric, memUnit, true)}` +
               ` ${unitOf(metric, memUnit)} (${Math.round((ext.used / (ext.cap || 1)) * 100)}%)` : ""),
-          stamp: `k8sfoams · ${new Date(lastRefresh).toLocaleString()}`,
+          stamp: snapshot
+            ? `k8sfoams snapshot · ${new Date(snapshot.generatedAt).toLocaleString()}`
+            : `k8sfoams · ${new Date(lastRefresh).toLocaleString()}`,
         },
       });
       if (kind === "svg") {
@@ -733,7 +790,11 @@ function App() {
   }, [tw.accent]);
 
   return (
-    <div className={`app ${sidebarOpen ? "sidebar-open" : "sidebar-collapsed"}`}>
+    <div className={`app ${sidebarOpen ? "sidebar-open" : "sidebar-collapsed"}`}
+      onDragOver={onDragOver} onDragLeave={e => { if (!e.relatedTarget) setDragging(false); }} onDrop={onDrop}>
+      <input type="file" accept=".json,application/json" hidden ref={fileRef}
+        onChange={e => { const f = e.target.files[0]; e.target.value = ""; if (f) openSnapshot(f); }} />
+      {dragging && <div className="drop-overlay">Drop a k8sfoams JSON report to open it as a snapshot</div>}
       <Sidebar
         open={sidebarOpen}
         onToggle={() => setSidebarOpen(s => !s)}
@@ -746,7 +807,7 @@ function App() {
         contexts={contexts}
         contextIdx={contextIdx} setContextIdx={setContextIdx}
         doRefresh={loadData} refreshing={refreshing}
-        lastRefresh={lastRefresh}
+        lastRefresh={lastRefresh} snapshot={snapshot}
         nodeCount={nodes.length}
         health={health}
         audit={audit}
@@ -761,9 +822,26 @@ function App() {
       />
 
       <main className="main">
-        {error && (
+        {snapshot && (
+          <div className="error-banner notice-banner snapshot-banner">
+            <span>
+              Snapshot of {snapshot.context ? shortContext(snapshot.context) : "a cluster"}
+              {snapshot.generatedAt && ` taken ${new Date(snapshot.generatedAt).toLocaleString()}`}
+              {snapshot.version && ` · k8sfoams ${snapshot.version}`}
+              {" "}· auto-refresh, simulators and context switching are off
+            </span>
+            <button className="snapshot-live" onClick={backToLive}>Back to live</button>
+          </div>
+        )}
+        {error && !snapshot && (
           <div className="error-banner">
             <span>Failed to connect to cluster: {error}</span>
+          </div>
+        )}
+        {fileError && (
+          <div className="error-banner">
+            <span>Could not open {fileError}</span>
+            <button onClick={() => setFileError(null)} title="Dismiss">×</button>
           </div>
         )}
         {exportError && (
@@ -788,6 +866,7 @@ function App() {
           memUnit={memUnit}
           contexts={contexts}
           contextIdx={contextIdx}
+          snapshot={snapshot}
           onMenu={() => setSidebarOpen(s => !s)}
           onRefresh={loadData}
           refreshing={refreshing}
@@ -799,7 +878,7 @@ function App() {
           onFit={() => setFitOpen(true)}
           onConsolidation={() => setConsolidationOpen(true)}
           onReplicas={() => setReplicasOpen(true)}
-          pendingPods={pendingPods}
+          pendingPods={snapshot ? 0 : pendingPods}
           onPending={() => setPendingOpen(true)}
         />
 
@@ -875,7 +954,7 @@ function App() {
 
       {focused && (
         <FocusOverlay key={focused.name} node={focused} nodes={nodes} onClose={() => setFocused(null)} metric={metric}
-          memUnit={memUnit} ctx={ctxName} onSimulation={setSim} />
+          memUnit={memUnit} ctx={ctxName} onSimulation={setSim} live={!snapshot} />
       )}
 
       {fitOpen && (
@@ -951,7 +1030,7 @@ function Sidebar({
   refreshInterval, setRefreshInterval, liveMode, setLiveMode, liveStatus,
   contexts, contextIdx, setContextIdx, doRefresh, refreshing, lastRefresh, nodeCount, health,
   audit, qosBreakdown, colorBy, setColorBy, groupBy, setGroupBy, topology, query, setQuery, cost, pricing,
-  advisor, advice, onAdvisor, onAssistant, error
+  advisor, advice, onAdvisor, onAssistant, error, snapshot
 }) {
   const is3d = view === "3d";
   return (
@@ -1059,6 +1138,7 @@ function Sidebar({
             .map(o => (
               <button key={o.i}
                 className={`ctx-item ${o.i === contextIdx ? "ctx-on" : ""}`}
+                disabled={!!snapshot} title={snapshot ? "Live only: go back to live to switch context" : undefined}
                 onClick={() => setContextIdx(o.i)}>
                 <span className="ctx-dot" style={{
                   background: o.i === contextIdx ? "var(--accent)" : "var(--line)"
@@ -1074,10 +1154,10 @@ function Sidebar({
         <div className="section-label">
           <span>Refresh</span>
           <span className="section-value">
-            {api.isStatic ? "snapshot" : liveStatus === "live" ? "on change" : `${refreshInterval}s`}
+            {api.isStatic || snapshot ? "snapshot" : liveStatus === "live" ? "on change" : `${refreshInterval}s`}
           </span>
         </div>
-        {!api.isStatic && (
+        {!api.isStatic && !snapshot && (
           <>
             <div className="seg seg-2">
               <button className={liveMode ? "seg-on" : ""} onClick={() => setLiveMode(true)}>Live</button>
@@ -1089,14 +1169,16 @@ function Sidebar({
               onChange={e => setRefreshInterval(+e.target.value)} className="slider" />
           </>
         )}
-        {api.isStatic ? (
+        {snapshot ? (
+          <div className="seg-note">A snapshot file does not change; go back to live to refresh.</div>
+        ) : api.isStatic ? (
           <div className="seg-note">
             Demo data: a fixed snapshot of a synthetic cluster. Run <code>k8sfoams --synthetic</code> for one that keeps changing.
           </div>
         ) : liveMode && liveStatus === "off" && (
           <div className="seg-note">Live updates are unavailable, so the view polls instead.</div>
         )}
-        <button className={`btn-primary ${refreshing ? "spinning" : ""}`} onClick={doRefresh}>
+        <button className={`btn-primary ${refreshing ? "spinning" : ""}`} onClick={doRefresh} disabled={!!snapshot}>
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
               stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -1247,7 +1329,7 @@ function Sidebar({
       )}
 
       {/* Only when the server has an LLM configured; the static demo never does. */}
-      {nodeCount > 0 && advisor && advisor.enabled && (
+      {nodeCount > 0 && advisor && advisor.enabled && !snapshot && (
         <div className="sidebar-section advisor-side">
           <div className="section-label">AI Advisor<span className="section-value">{advisor.model}</span></div>
           <button className={`btn-primary ${advice && advice.busy ? "spinning" : ""}`} onClick={onAdvisor}>
@@ -1263,13 +1345,13 @@ function Sidebar({
 
       <div className="sidebar-footer">
         <div className="footer-row">
-          <span className={`dot ${error ? "dot-warn" : "dot-ok"}`} />
-          <span>{api.isStatic ? "Synthetic demo data" : error ? "Not connected" : "Cluster connected"}</span>
-          <span className="footer-tail">{api.isStatic ? "Snapshot" : error ? "Error" : "Ready"}</span>
+          <span className={`dot ${error && !snapshot ? "dot-warn" : "dot-ok"}`} />
+          <span>{snapshot ? "Snapshot file" : api.isStatic ? "Synthetic demo data" : error ? "Not connected" : "Cluster connected"}</span>
+          <span className="footer-tail">{api.isStatic || snapshot ? "Snapshot" : error ? "Error" : "Ready"}</span>
         </div>
         <div className="footer-row dim">
           <span>{nodeCount} nodes</span>
-          <span className="footer-tail">· {timeAgo(lastRefresh)}</span>
+          <span className="footer-tail">· {snapshot ? "file" : timeAgo(lastRefresh)}</span>
         </div>
       </div>
     </aside>
@@ -1334,7 +1416,7 @@ function ResourceMenu({ metrics, metric, setMetric, totals, memUnit }) {
 /* ─────────── Header ─────────── */
 
 function Header({
-  metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx,
+  metric, nodes, view, setView, totals, query, setQuery, match, memUnit, contexts, contextIdx, snapshot,
   onMenu, onRefresh, refreshing, liveStatus, workload, onClearWorkload, onExport, canExport,
   onFit, onConsolidation, onReplicas, pendingPods, onPending,
 }) {
@@ -1343,7 +1425,9 @@ function Header({
   const memPct = totals.memUsed / (totals.memCap || 1);
 
   const currentCtx = contexts[contextIdx];
-  const contextLabel = currentCtx ? shortContext(currentCtx.context) : "No Context";
+  const contextLabel = snapshot ? shortContext(snapshot.context || "snapshot")
+    : currentCtx ? shortContext(currentCtx.context) : "No Context";
+  const liveOnly = "Live only: go back to live to simulate";
 
   const is3d = view === "3d";
   const extMetric = isBase(metric) ? null : metric;
@@ -1365,6 +1449,7 @@ function Header({
         <div className="title-row">
           <span className="title-main">{titleMain} Resources</span>
           <span className="title-chip">{contextLabel}</span>
+          {snapshot && <span className="title-chip demo-chip" title="Opened from a JSON report">snapshot</span>}
           {api.isStatic && (
             <span className="title-chip demo-chip" title="Generated by k8sfoams --synthetic; no real cluster behind it">
               demo data
@@ -1390,7 +1475,7 @@ function Header({
               <span className="wl-chip-meta">
                 {workload.replicas} replica{workload.replicas === 1 ? "" : "s"} · {workload.nodes} node{workload.nodes === 1 ? "" : "s"}
               </span>
-              {workload.scalable && (
+              {workload.scalable && !snapshot && (
                 <button className="wl-chip-sim" onClick={onReplicas} title="Can I scale this workload? Simulate more replicas">
                   +N
                 </button>
@@ -1434,14 +1519,15 @@ function Header({
         </div>
         <QueryBar query={query} setQuery={setQuery} match={match}
           hintOpen={hintOpen} setHintOpen={setHintOpen} />
-        <button className="icon-btn" onClick={onFit} disabled={!canExport} title="Can I fit this pod?">
+        <button className="icon-btn" onClick={onFit} disabled={!canExport || !!snapshot} title={snapshot ? liveOnly : "Can I fit this pod?"}>
           {/* A dashed pod slot with a plus — "place a new pod". */}
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
             <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" strokeDasharray="2.4 1.6" />
             <path d="M8 5.2 V10.8 M5.2 8 H10.8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
           </svg>
         </button>
-        <button className="icon-btn" onClick={onConsolidation} disabled={!canExport} title="Which nodes could be removed?">
+        <button className="icon-btn" onClick={onConsolidation} disabled={!canExport || !!snapshot}
+          title={snapshot ? liveOnly : "Which nodes could be removed?"}>
           {/* A dashed node folding into a solid one — "consolidate". */}
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
             <rect x="1.5" y="3.5" width="6" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
@@ -1449,8 +1535,9 @@ function Header({
             <path d="M11 8 H5.5 M7.2 6.3 L5.5 8 L7.2 9.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
-        <ExportMenu is3d={is3d} disabled={!canExport} onExport={onExport} />
-        <button className={`icon-btn ${refreshing ? "spinning" : ""}`} onClick={onRefresh} title="Refresh">
+        <ExportMenu is3d={is3d} canExport={canExport} snapshot={!!snapshot} onExport={onExport} />
+        <button className={`icon-btn ${refreshing ? "spinning" : ""}`} onClick={onRefresh} disabled={!!snapshot}
+          title={snapshot ? "A snapshot does not refresh" : "Refresh"}>
           <svg viewBox="0 0 16 16" width="14" height="14" className="refresh-icon">
             <path d="M13.5 8 A5.5 5.5 0 1 1 11.5 4 M13.5 2 V5 H10.5"
               stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -1483,11 +1570,13 @@ const EXPORTS = [
   { id: "json", label: "JSON report", hint: "nodes, pods, containers" },
   { id: "csv", label: "CSV report", hint: "one row per pod" },
   { id: "link", label: "Copy link", hint: "current view", divider: true },
+  // Reads a file rather than writing one, so it works with nothing loaded.
+  { id: "open", label: "Open snapshot…", hint: "JSON report", divider: true, file: true },
 ];
 
 // Download menu next to Refresh. Images capture the current view; reports
 // are the same in both views. Copy link keeps the menu open to confirm.
-function ExportMenu({ is3d, disabled, onExport }) {
+function ExportMenu({ is3d, canExport, snapshot, onExport }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const ref = useRef(null);
@@ -1522,7 +1611,7 @@ function ExportMenu({ is3d, disabled, onExport }) {
 
   return (
     <div className="export-menu" ref={ref}>
-      <button className={`icon-btn ${open ? "icon-btn-on" : ""}`} disabled={disabled}
+      <button className={`icon-btn ${open ? "icon-btn-on" : ""}`}
         onClick={() => setOpen(o => !o)} title="Export" aria-haspopup="menu" aria-expanded={open}>
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
           <path d="M8 2.5 V10 M4.5 6.5 L8 10 L11.5 6.5 M3 13.5 H13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -1532,16 +1621,21 @@ function ExportMenu({ is3d, disabled, onExport }) {
         <div className="query-pop export-pop" role="menu">
           <div className="query-hint-title">Export {is3d ? "3D view" : "2D map"}</div>
           {EXPORTS.map(x => {
-            const off = x.only2d && is3d;
+            // Why an item is off, shown as its hint; null when it is on.
+            const offHint = x.only2d && is3d ? "2D only"
+              : !x.file && !canExport ? "no data"
+                : x.id === "link" && snapshot ? "live only" : null;
+            const off = !!offHint;
             const done = x.id === "link" && copied;
             return (
               <React.Fragment key={x.id}>
                 {x.divider && <div className="export-sep" />}
                 <button role="menuitem" className="export-item" disabled={off}
-                  title={off ? "The 3D view is WebGL; switch to 2D for vector SVG" : undefined}
+                  title={offHint === "2D only" ? "The 3D view is WebGL; switch to 2D for vector SVG"
+                    : offHint === "live only" ? "A link cannot carry a snapshot file" : undefined}
                   onClick={() => onItem(x.id)}>
                   <span>{x.label}</span>
-                  <span className={`export-hint ${done ? "export-hint-ok" : ""}`}>{off ? "2D only" : done ? "copied" : x.hint}</span>
+                  <span className={`export-hint ${done ? "export-hint-ok" : ""}`}>{offHint || (done ? "copied" : x.hint)}</span>
                 </button>
               </React.Fragment>
             );
@@ -1693,7 +1787,7 @@ function TreemapGrid({
 
 /* ─────────── Focus overlay ─────────── */
 
-function FocusOverlay({ node, nodes, onClose, metric, memUnit, ctx, onSimulation }) {
+function FocusOverlay({ node, nodes, onClose, metric, memUnit, ctx, onSimulation, live }) {
   // Drain report for this node; replaces the workload list while shown.
   const [drain, setDrain] = useState(null);
   const cost = nodeCost(node);
@@ -1713,7 +1807,7 @@ function FocusOverlay({ node, nodes, onClose, metric, memUnit, ctx, onSimulation
             </div>
           </div>
           <div className="overlay-head-tools">
-            <DrainButton ctx={ctx} nodeName={node.name} onReport={onDrainReport} />
+            {live && <DrainButton ctx={ctx} nodeName={node.name} onReport={onDrainReport} />}
             <button className="icon-btn" onClick={onClose}>
               <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 4 L12 12 M12 4 L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
             </button>

@@ -19,6 +19,7 @@ embedded demos on this site export too.
 | **JSON report** | ✓ | ✓ | Every node (with its topology) and pod with capacity, requests, QoS, labels, findings, warnings and containers. CPU in millicores, memory in MiB. Extended resources sit under `extended`, in MiB when byte-sized and as a count otherwise. `schemaVersion` and `k8sfoamsVersion` say which format and release wrote it, so the file can be [opened again](#snapshots) later. |
 | **CSV report** | ✓ | ✓ | One row per pod: `context,node,zone,region,node_pool,instance_type,capacity_type,namespace,pod,qos,cpu_millicores,memory_mib,containers,init_containers,findings,node_warnings,matched`. One more column per [extended resource](extended-resources.md) on the cluster follows `memory_mib`, e.g. `nvidia.com/gpu` or `ephemeral_storage_mib`. |
 | **Copy link** | ✓ | ✓ | Puts a [shareable link](shareable-links.md) to the current view on the clipboard; the item reads *copied* to confirm. |
+| **Open snapshot…** | ✓ | ✓ | Opens a JSON report as a [snapshot](#snapshots). |
 
 Images keep the current metric, colours, grouping, tweaks, query dimming and pinned workload, and carry a title band
 with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which
@@ -26,3 +27,19 @@ ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HH
 so exported images fall back to system fonts.
 
 The same JSON and CSV reports come without the browser from [`k8sfoams report`](cli.md#report), for CI and cron.
+
+## Snapshots
+
+A JSON report can be opened again later, with no cluster behind it: for an incident review, or to look at a cluster
+you no longer have access to. Pick *Open snapshot…* in the download menu, or drop the `.json` file anywhere on the page.
+This works even when the server cannot read your kubeconfig.
+
+While a snapshot is open:
+
+- A banner names the context and the time the report was taken, with **Back to live** to return.
+- The map, the 3D view, the query bar, grouping, colouring, workload pinning and exports all work as usual.
+- Anything that asks the cluster is off: auto-refresh, live updates, the context switcher, the scheduling simulators
+  and the AI advisor. *Copy link* is off too, since a link cannot carry the file.
+
+Reports from older releases open as well. A report written by a newer k8sfoams with a format this version does not know
+(`schemaVersion`) is refused with a message saying which version to upgrade to.
