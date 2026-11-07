@@ -3,6 +3,7 @@
 import "./globals.js";
 import "./api.jsx";
 import "./resources.jsx";
+import "./snapshot.js";
 import "./nodestatus.jsx";
 import "./podaudit.jsx";
 import "./qos.jsx";

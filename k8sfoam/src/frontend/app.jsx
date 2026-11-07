@@ -676,7 +676,7 @@ function App() {
         return true;
       }
       if (kind === "json") {
-        const body = k.reportJson({ nodes, totals, context: ctx, metric, query, match });
+        const body = k.reportJson({ nodes, totals, context: ctx, metric, query, match, pendingPods, pricing });
         k.download(new Blob([body], { type: "application/json" }), k.fileName(ctx, "report", "json"));
         return;
       }

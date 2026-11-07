@@ -292,11 +292,17 @@ function toCsv(rows, columns = CSV_COLUMNS) {
   return lines.join("\r\n") + "\r\n";
 }
 
+// Set by esbuild from pyproject.toml (Makefile `web`); a watch build has none.
+const APP_VERSION = typeof K8SFOAMS_VERSION === "undefined" ? "dev" : K8SFOAMS_VERSION;
+
 // Memory is MiB and CPU millicores throughout, whatever the UI unit is set to.
 // Extended resources are MiB when byte-sized, a plain count otherwise.
-function reportJson({ nodes, totals, context, metric, query, match }) {
+// snapshot.js reads it back; a change of meaning needs its SCHEMA_VERSION bumped.
+function reportJson({ nodes, totals, context, metric, query, match, pendingPods, pricing }) {
   const active = !!(match && match.active);
   return JSON.stringify({
+    schemaVersion: window.k8sSnapshot.SCHEMA_VERSION,
+    k8sfoamsVersion: APP_VERSION,
     generatedAt: new Date().toISOString(),
     context,
     metric,
@@ -306,6 +312,8 @@ function reportJson({ nodes, totals, context, metric, query, match }) {
       ...Object.fromEntries(detectResources(nodes).map(name => [name, isBytes(name) ? "MiB" : "count"])),
     },
     totals,
+    pendingPods: pendingPods || 0,
+    pricing: pricing || null,
     nodes: nodes.map(n => ({
       name: n.name,
       topology: n.topology,
@@ -313,8 +321,9 @@ function reportJson({ nodes, totals, context, metric, query, match }) {
       memCapacity: n.memCapacity, memUsed: n.memUsed,
       extended: { capacity: n.extCap, used: n.extUsed },
       unschedulable: n.unschedulable, warnings: n.warnings, taints: n.taints, conditions: n.conditions,
+      price: n.price,
       pods: n.pods.map(p => ({
-        name: p.name, namespace: p.namespace, owner: p.owner, qos: p.qos, labels: p.labels,
+        name: p.name, namespace: p.namespace, owner: p.owner, qos: p.qos, labels: p.labels, hasInit: p.hasInit,
         cpu: p.cpu, mem: p.mem, extended: p.ext, findings: p.findings,
         ...(active ? { matched: match.pods.has(p) } : {}),
         containers: p.containers,
@@ -341,4 +350,4 @@ function fileName(context, kind, ext, when = new Date()) {
   return `k8sfoams-${ctx}-${kind}-${stamp}.${ext}`;
 }
 
-window.k8sExport = { treemapSvg, svgToPng, canvasBlob, podRows, csvColumns, toCsv, reportJson, download, fileName };
+window.k8sExport = { treemapSvg, svgToPng, canvasBlob, podRows, csvColumns, toCsv, reportJson, download, fileName, APP_VERSION };
