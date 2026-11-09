@@ -204,7 +204,7 @@ def _cluster(args: argparse.Namespace) -> Tuple[Any, str]:
         contexts = registry.contexts()
         client: Any = registry.get(args.context)
     else:
-        client = K8sClient(args.context)
+        client = K8sClient(args.context, timeout=args.timeout or None)
         contexts = [] if args.context else client.get_contexts()
     return client, args.context or next((c['context'] for c in contexts if c['active']), '')
 
@@ -213,7 +213,9 @@ def run_report(args: argparse.Namespace) -> int:
     """Write the report, then check --fail-on. Exit code: 0 ok, 1 a policy is violated, 2 an error."""
     try:
         client, context = _cluster(args)
-        nodes = to_nodes(FoamTreeMapper(client.get_node_resources(), [*client.get_pod_resources()]).combined())
+        combined = FoamTreeMapper(client.get_node_resources(), [*client.get_pod_resources()]).combined()
+        # /resources goes through Flask's jsonify, which sorts keys, and the browser export keeps that order.
+        nodes = to_nodes(json.loads(json.dumps(combined, sort_keys=True)))
         body = report_json(nodes, context) + '\n' if args.format == 'json' else to_csv(pod_rows(nodes, context),
                                                                                       csv_columns(nodes))
         if args.output:

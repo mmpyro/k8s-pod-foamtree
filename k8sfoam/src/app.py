@@ -691,6 +691,8 @@ def main():
     report.add_argument('--output', metavar='FILE', help='Write the report to FILE instead of stdout')
     report.add_argument('--fail-on', type=parse_fail_on, metavar='POLICIES',
                         help='Comma-separated audit:<rule> / health:<warning> tokens; exit 1 when any pod or node matches')
+    report.add_argument('--timeout', type=non_negative_float, default=30, metavar='SECONDS',
+                        help='Seconds per API request before giving up with exit code 2; 0 waits forever (default: 30)')
     report.add_argument('--synthetic', action='store_true', help='Report on a generated demo cluster; needs no cluster')
     report.add_argument('--seed', type=int, default=DEFAULT_SEED, help='Seed of the --synthetic clusters')
 

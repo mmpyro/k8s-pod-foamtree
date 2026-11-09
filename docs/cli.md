@@ -36,7 +36,7 @@ k8sfoams --synthetic --churn-interval 2
 
 ```
 k8sfoams report [--context NAME] [--format json|csv] [--output FILE] [--fail-on POLICIES]
-                [--synthetic] [--seed N]
+                [--timeout SECONDS] [--synthetic] [--seed N]
 ```
 
 Writes the dashboard's [JSON or CSV report](export.md) for one context and exits, for CI pipelines and cron jobs. The
@@ -49,6 +49,7 @@ resource. With no query, `matched` stays blank in the CSV and is left out of the
 | `--format` | `json` | `json` or `csv` |
 | `--output` | stdout | file to write the report to |
 | `--fail-on` | | comma-separated policies; exit `1` when any pod or node breaks one (see below) |
+| `--timeout` | `30` | seconds per API request; an unreachable cluster exits `2` instead of hanging. Failed connects are retried 3 times, so the worst case is about 4× this. `0` waits forever |
 | `--synthetic` | off | report on a generated [demo cluster](synthetic-mode.md); needs no cluster |
 | `--seed` | `42` | seed of the `--synthetic` clusters |
 

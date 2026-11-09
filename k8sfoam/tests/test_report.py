@@ -1,7 +1,12 @@
 import csv
 import io
 import json
+import os
 import re
+import socket
+import subprocess  # nosec B404
+import sys
+import time
 import pytest
 from pathlib import Path
 from unittest.mock import patch
@@ -78,6 +83,54 @@ def test_report_passes_when_no_pod_or_node_matches(capsys):
     assert code == 0 and err == ''
 
 
+def test_report_json_keeps_the_browser_key_order(capsys):
+    # Given / When — /resources goes through Flask's jsonify, which sorts keys; the browser export keeps that order
+    _, out, _ = run(['report', '--synthetic'], capsys)
+
+    # Then — the shop cluster's system nodes carry a CriticalAddonsOnly taint
+    nodes = json.loads(out)['nodes']
+    taints = [t for n in nodes for t in n['taints']]
+    assert taints and all(list(t) == ['effect', 'key', 'value'] for t in taints)
+    assert all(list(n['conditions']) == sorted(n['conditions']) for n in nodes)
+    assert all(list(p['labels']) == sorted(p['labels']) for n in nodes for p in n['pods'])
+
+
+def test_report_times_out_on_a_silent_api_server(tmp_path):
+    # Given — an API server that accepts connections (kernel backlog) but never answers
+    with socket.socket() as server:
+        server.bind(('127.0.0.1', 0))
+        server.listen(8)
+        kubeconfig = tmp_path / 'config'
+        kubeconfig.write_text(json.dumps({
+            'apiVersion': 'v1', 'kind': 'Config', 'current-context': 'silent',
+            'clusters': [{'name': 'c', 'cluster': {'server': f'http://127.0.0.1:{server.getsockname()[1]}'}}],
+            'users': [{'name': 'u', 'user': {'token': 'dummy'}}],
+            'contexts': [{'name': 'silent', 'context': {'cluster': 'c', 'user': 'u'}}],
+        }))
+
+        # When — a subprocess, because the kubernetes client reads KUBECONFIG at import time
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, '-c', 'from k8sfoam.src.app import main; main()', 'report',  # nosec B603
+                                 '--context', 'silent', '--timeout', '0.5'],
+                                env={**os.environ, 'KUBECONFIG': str(kubeconfig)}, cwd=ROOT,
+                                capture_output=True, text=True, timeout=60)
+
+    # Then
+    assert result.returncode == 2 and result.stdout == ''
+    assert 'timed out' in result.stderr
+    assert time.monotonic() - started < 15
+
+
+@pytest.mark.parametrize('flag', [['--timeout', '-1'], ['--timeout', 'soon']])
+def test_report_rejects_a_bad_timeout(capsys, flag):
+    # Given / When
+    code, out, err = run(['report', '--synthetic', *flag], capsys)
+
+    # Then
+    assert code == 2 and out == ''
+    assert '--timeout' in err
+
+
 @pytest.mark.parametrize('token', ['audit:nope', 'qos:burstable', 'missing-requests', 'health:'])
 def test_report_rejects_an_unknown_policy(capsys, token):
     # Given / When
@@ -97,7 +150,7 @@ def test_report_exits_2_when_the_cluster_is_unreachable(k8s_client, capsys):
     code, out, err = run(['report', '--context', 'prod', '--fail-on', 'audit:naked-pod'], capsys)
 
     # Then
-    k8s_client.assert_called_once_with('prod')
+    k8s_client.assert_called_once_with('prod', timeout=30)
     assert code == 2 and out == ''
     assert 'connection refused' in err
 
@@ -120,7 +173,7 @@ def test_report_uses_the_current_context_name(capsys):
         code, out, _ = run(['report'], capsys)
 
     # Then
-    k8s_client.assert_called_once_with(None)
+    k8s_client.assert_called_once_with(None, timeout=30)
     assert code == 0 and json.loads(out)['context'] == 'prod'
 
 

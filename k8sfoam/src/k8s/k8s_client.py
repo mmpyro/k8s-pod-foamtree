@@ -66,19 +66,23 @@ def list_disruption_budgets(context: Optional[str], page_size: int) -> Optional[
 
 
 class K8sClient():
-    def __init__(self, current_context: Optional[str] = None, page_size: int = DEFAULT_PAGE_SIZE):
+    def __init__(self, current_context: Optional[str] = None, page_size: int = DEFAULT_PAGE_SIZE,
+                 timeout: Optional[float] = None):
         self.__current_context = current_context
         self.__page_size = page_size
+        # Seconds per LIST request; None leaves the client's default (no timeout), as serve has always run.
+        self.__timeout = {'_request_timeout': timeout} if timeout else {}
         self.__extractor = ResourcesExtractor()
 
     def get_node_resources(self) -> Iterator[NodeResources]:
         v1_client = core_v1(self.__current_context)
-        nodes, _ = list_all(v1_client.list_node, self.__page_size)
+        nodes, _ = list_all(v1_client.list_node, self.__page_size, **self.__timeout)
         return map(lambda node: self.__extractor.extract_node_resources(node), nodes)
 
     def get_pod_resources(self) -> Iterator[PodResources]:
         v1_client = core_v1(self.__current_context)
-        pods, _ = list_all(v1_client.list_pod_for_all_namespaces, self.__page_size, field_selector=ACTIVE_POD_SELECTOR)
+        pods, _ = list_all(v1_client.list_pod_for_all_namespaces, self.__page_size, **self.__timeout,
+                           field_selector=ACTIVE_POD_SELECTOR)
         return map(lambda pod: self.__extractor.extract_pod_requested_resources(pod), pods)
 
     def get_disruption_budgets(self) -> Optional[List[DisruptionBudget]]:
