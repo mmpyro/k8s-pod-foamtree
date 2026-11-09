@@ -45,7 +45,14 @@ k8sfoams              # your kubeconfig contexts, at http://127.0.0.1:8080
 k8sfoams --synthetic  # no cluster needed: generated demo clusters that keep changing
 ```
 
-Switching context in the dashboard never modifies your kubeconfig. See the [command-line reference](https://mmpyro.github.io/k8s-pod-foamtree/cli/) for every option and [Synthetic mode](https://mmpyro.github.io/k8s-pod-foamtree/synthetic-mode/) for what the demo clusters contain.
+For CI and cron, `report` writes the same JSON / CSV export without the dashboard and can fail the job on a policy:
+
+```bash
+k8sfoams report --context prod --format csv --output prod.csv
+k8sfoams report --context prod --fail-on audit:missing-requests,health:not-ready  # exit 1 when violated
+```
+
+Switching context in the dashboard never modifies your kubeconfig. See the [command-line reference](https://mmpyro.github.io/k8s-pod-foamtree/cli/) for every option, the [report](https://mmpyro.github.io/k8s-pod-foamtree/cli/#report) exit codes and a GitHub Actions example, and [Synthetic mode](https://mmpyro.github.io/k8s-pod-foamtree/synthetic-mode/) for what the demo clusters contain.
 
 ## Security
 

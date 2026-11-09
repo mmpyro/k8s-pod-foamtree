@@ -1,10 +1,13 @@
 # Command line
 
 ```
-k8sfoams [--host HOST] [--port PORT] [-d] [--page-size N] [--no-watch]
+k8sfoams [serve] [--host HOST] [--port PORT] [-d] [--page-size N] [--no-watch]
          [--synthetic] [--seed N] [--churn-interval SECONDS]
          [--token TOKEN | --no-auth] [--allowed-host NAME] [-v]
 ```
+
+`serve` runs the dashboard and is the default command, so `k8sfoams --port 9000` and `k8sfoams serve --port 9000`
+are the same. [`report`](#report) writes the export without the dashboard.
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
@@ -27,6 +30,60 @@ Examples:
 k8sfoams --host 0.0.0.0 --allowed-host dash.internal --port 8080
 k8sfoams --page-size 200 --no-watch
 k8sfoams --synthetic --churn-interval 2
+```
+
+## Report
+
+```
+k8sfoams report [--context NAME] [--format json|csv] [--output FILE] [--fail-on POLICIES]
+                [--synthetic] [--seed N]
+```
+
+Writes the dashboard's [JSON or CSV report](export.md) for one context and exits, for CI pipelines and cron jobs. The
+schema and units are the browser export's: same columns, CPU in millicores, memory in MiB, one column per extended
+resource. With no query, `matched` stays blank in the CSV and is left out of the JSON; `metric` is `cpu`.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--context` | current context | kubeconfig context to report on |
+| `--format` | `json` | `json` or `csv` |
+| `--output` | stdout | file to write the report to |
+| `--fail-on` | | comma-separated policies; exit `1` when any pod or node breaks one (see below) |
+| `--synthetic` | off | report on a generated [demo cluster](synthetic-mode.md); needs no cluster |
+| `--seed` | `42` | seed of the `--synthetic` clusters |
+
+`--fail-on` takes the [query bar](filtering.md)'s `audit:<rule>` and `health:<warning>` tokens, e.g.
+`audit:missing-requests,audit:naked-pod,health:not-ready`, case-insensitive. An unknown token is an error.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | report written, no policy violated |
+| `1` | report written, a `--fail-on` policy is violated; every offending `namespace/pod` or node is listed on stderr |
+| `2` | error: bad arguments, unknown policy or context, cluster unreachable |
+
+```bash
+k8sfoams report --context prod --format csv --output prod.csv
+k8sfoams report --fail-on audit:missing-requests,health:not-ready > /dev/null
+```
+
+GitHub Actions, failing the job when a pod has no requests and keeping the report as an artifact:
+
+```yaml
+- run: pip install k8sfoams
+- run: k8sfoams report --context prod --format json --output report.json --fail-on audit:missing-requests
+  env:
+    KUBECONFIG: ${{ runner.temp }}/kubeconfig   # written by an earlier step
+- uses: actions/upload-artifact@v4
+  if: always()
+  with:
+    name: k8sfoams-report
+    path: report.json
+```
+
+A nightly CSV with cron:
+
+```
+0 6 * * * k8sfoams report --context prod --format csv --output "$HOME/reports/prod-$(date +\%F).csv"
 ```
 
 ## Network access
