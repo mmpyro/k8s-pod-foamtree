@@ -906,6 +906,9 @@ def test_change_events_follow_a_replaced_cache_after_a_heartbeat():
 @pytest.mark.parametrize('argv, expected', [
     ([], {'page_size': 500, 'watch': True}),
     (['--page-size', '100', '--no-watch'], {'page_size': 100, 'watch': False}),
+    # The explicit subcommand takes the same flags as the bare invocation.
+    (['serve'], {'page_size': 500, 'watch': True}),
+    (['serve', '--page-size', '100', '--no-watch'], {'page_size': 100, 'watch': False}),
 ])
 @patch('k8sfoam.src.app.load_config')
 @patch('k8sfoam.src.app.create_app')

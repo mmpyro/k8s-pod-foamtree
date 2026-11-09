@@ -19,6 +19,7 @@ from k8sfoam.src.utils.mappers import FoamTreeMapper
 from k8sfoam.src.common.resources import convert_cpu, convert_memory, convert_extended, is_extended
 from k8sfoam.src.common.dtos import NodeResources, PodResources
 from k8sfoam.src.pricing import PriceBook
+from k8sfoam.src.report import parse_fail_on, run_report
 from k8sfoam.src.common.scheduler import (DRAIN_SKIPPED_OWNERS, MAX_EXTRA_NODES, MAX_REPLICAS, UnknownTemplate,
                                           simulate_consolidation, simulate_drain, simulate_fit, simulate_pending,
                                           simulate_replicas)
@@ -657,33 +658,54 @@ def create_app(page_size: int = DEFAULT_PAGE_SIZE, watch: bool = True,
 
 def main():
     """Main entry point for the k8sfoams console script."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--host', type=str, default='127.0.0.1', required=False, help='Host IP on which server listen')
-    parser.add_argument('--port', type=int, default=8080, required=False, help='Port on which server listen')
-    parser.add_argument('-d', action='store_true', help='Run server in debug mode')
-    parser.add_argument('--page-size', type=positive_int, default=DEFAULT_PAGE_SIZE,
-                        help='Objects fetched per LIST request')
-    parser.add_argument('--no-watch', action='store_true',
-                        help='List nodes and pods on every request instead of keeping a watch cache per context')
-    parser.add_argument('--synthetic', action='store_true',
-                        help='Show generated demo clusters instead of the kubeconfig contexts; needs no cluster')
-    parser.add_argument('--seed', type=int, default=DEFAULT_SEED,
-                        help='Seed of the --synthetic clusters; the same seed builds the same clusters')
-    parser.add_argument('--churn-interval', type=non_negative_float, default=DEFAULT_CHURN_INTERVAL,
-                        help='Seconds between random changes to the --synthetic clusters; 0 keeps them still')
-    auth = parser.add_mutually_exclusive_group()
+    parser = argparse.ArgumentParser(prog='k8sfoams', epilog='Without a command, k8sfoams runs serve.')
+    parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
+    commands = parser.add_subparsers(dest='command', metavar='{serve,report}')
+
+    serve = commands.add_parser('serve', help='Run the dashboard (the default)')
+    serve.add_argument('--host', type=str, default='127.0.0.1', required=False, help='Host IP on which server listen')
+    serve.add_argument('--port', type=int, default=8080, required=False, help='Port on which server listen')
+    serve.add_argument('-d', action='store_true', help='Run server in debug mode')
+    serve.add_argument('--page-size', type=positive_int, default=DEFAULT_PAGE_SIZE,
+                       help='Objects fetched per LIST request')
+    serve.add_argument('--no-watch', action='store_true',
+                       help='List nodes and pods on every request instead of keeping a watch cache per context')
+    serve.add_argument('--synthetic', action='store_true',
+                       help='Show generated demo clusters instead of the kubeconfig contexts; needs no cluster')
+    serve.add_argument('--seed', type=int, default=DEFAULT_SEED,
+                       help='Seed of the --synthetic clusters; the same seed builds the same clusters')
+    serve.add_argument('--churn-interval', type=non_negative_float, default=DEFAULT_CHURN_INTERVAL,
+                       help='Seconds between random changes to the --synthetic clusters; 0 keeps them still')
+    auth = serve.add_mutually_exclusive_group()
     auth.add_argument('--token', type=non_empty,
                       help='Token every API call must carry; generated when --host is not a loopback address')
     auth.add_argument('--no-auth', action='store_true', help='Serve a non-loopback --host without a token')
-    parser.add_argument('--allowed-host', action='append', default=[], metavar='NAME',
-                        help='Extra Host header the server answers to (repeatable), e.g. the name you reach it by')
-    parser.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
-    args = parser.parse_args()
+    serve.add_argument('--allowed-host', action='append', default=[], metavar='NAME',
+                       help='Extra Host header the server answers to (repeatable), e.g. the name you reach it by')
+    serve.add_argument('-v', '--version', action='version', version=get_version(), help='Show version and exit')
+
+    report = commands.add_parser('report', help='Write the JSON or CSV export and exit, for CI and cron',
+                                 epilog='Exit code: 0 ok, 1 a --fail-on policy is violated, 2 an error.')
+    report.add_argument('--context', help='Kubeconfig context; default: the current one')
+    report.add_argument('--format', choices=('json', 'csv'), default='json', help='Report format (default: json)')
+    report.add_argument('--output', metavar='FILE', help='Write the report to FILE instead of stdout')
+    report.add_argument('--fail-on', type=parse_fail_on, metavar='POLICIES',
+                        help='Comma-separated audit:<rule> / health:<warning> tokens; exit 1 when any pod or node matches')
+    report.add_argument('--synthetic', action='store_true', help='Report on a generated demo cluster; needs no cluster')
+    report.add_argument('--seed', type=int, default=DEFAULT_SEED, help='Seed of the --synthetic clusters')
+
+    argv = sys.argv[1:]
+    # Bare `k8sfoams [--host ...]` predates the subcommands and still serves.
+    if not argv or argv[0] not in ('serve', 'report', '-h', '--help', '-v', '--version'):
+        argv = ['serve', *argv]
+    args = parser.parse_args(argv)
+    if args.command == 'report':
+        sys.exit(run_report(args))
 
     exposed = not is_loopback(args.host)
     if args.d and exposed:
-        parser.error('-d serves the Werkzeug debugger, which skips the token and Host checks; '
-                     'use it only on a loopback --host')
+        serve.error('-d serves the Werkzeug debugger, which skips the token and Host checks; '
+                    'use it only on a loopback --host')
     token = None if args.no_auth else (args.token or (secrets.token_urlsafe(32) if exposed else None))
     if exposed:
         print(f'WARNING: listening on {args.host}: anyone who can reach port {args.port} can read this dashboard, '

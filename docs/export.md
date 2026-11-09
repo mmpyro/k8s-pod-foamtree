@@ -24,3 +24,5 @@ Images keep the current metric, colours, grouping, tweaks, query dimming and pin
 with the context, totals and refresh time. Reports always list every pod; with a query active, `matched` says which
 ones it selected. Files are named `k8sfoams-<context>-<2d|3d|report>-YYYYMMDD-HHmm.<ext>`. Web fonts are not embedded,
 so exported images fall back to system fonts.
+
+The same JSON and CSV reports come without the browser from [`k8sfoams report`](cli.md#report), for CI and cron.
