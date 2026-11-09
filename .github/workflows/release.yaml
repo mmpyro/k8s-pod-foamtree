@@ -85,6 +85,8 @@ jobs:
         run: make restore_ci
 
       - name: Run tests
+        env:
+          PYTEST_ADDOPTS: -n auto  # pytest-xdist: one worker per CPU
         run: make tests_ci
 
       - name: Upload test results
