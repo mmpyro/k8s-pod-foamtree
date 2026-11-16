@@ -146,7 +146,7 @@ def test_report_times_out_on_a_silent_api_server(tmp_path):
         kubeconfig.write_text(json.dumps({
             'apiVersion': 'v1', 'kind': 'Config', 'current-context': 'silent',
             'clusters': [{'name': 'c', 'cluster': {'server': f'http://127.0.0.1:{server.getsockname()[1]}'}}],
-            'users': [{'name': 'u', 'user': {'token': 'dummy'}}],
+            'users': [{'name': 'u', 'user': {'token': 'dummy'}}],  # nosec B105
             'contexts': [{'name': 'silent', 'context': {'cluster': 'c', 'user': 'u'}}],
         }))
 
