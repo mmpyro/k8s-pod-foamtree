@@ -2,8 +2,8 @@
 
 Besides CPU and memory, the *Resource* picker lists every extended resource a node in the current context can
 allocate: GPUs and other device-plugin resources (`nvidia.com/gpu`, `amd.com/gpu`), `ephemeral-storage` and HugePages
-(`hugepages-2Mi`, `hugepages-1Gi`). When there is at least one, the two-button toggle becomes a dropdown. Switching to a
-context without the selected resource falls back to CPU.
+(`hugepages-2Mi`, `hugepages-1Gi`). When there is at least one, the two-button toggle becomes a dropdown. If you switch to
+a context without the selected resource, the picker falls back to CPU.
 
 <figure class="k8sfoam-embed">
   <iframe src="../demo/index.html?embed=1#ctx=gke_demo-ml_us-central1_ml-training&metric=nvidia.com%2Fgpu" loading="lazy" title="k8sfoams demo GPU map"></iframe>
@@ -13,8 +13,8 @@ context without the selected resource falls back to CPU.
   </figcaption>
 </figure>
 
-- **2D map.** Nodes are sized by how much of the resource they can allocate, and pods by what they request. Nodes
-  without the resource are hidden, and the header counts them.
+- **2D map.** A node's size shows how much of the resource it can allocate, and a pod's size shows what it requests.
+  The map hides nodes without the resource, and the header counts them.
 - **Fragmentation.** For devices the header also shows the free units cluster-wide and the largest free block on one
   node. For example, 6 free GPUs spread 2 + 2 + 2 cannot run a 4-GPU job.
 - **3D cubes.** Cubes keep plotting CPU × Memory. Pods requesting the selected resource stay lit and the rest dim.
@@ -28,6 +28,6 @@ The other resources of the GKE demo cluster:
 [HugePages](demo/index.html#ctx=gke_demo-ml_us-central1_ml-training&metric=hugepages-2Mi){ .k8s-try target=_blank }
 · [ephemeral storage](demo/index.html#ctx=gke_demo-ml_us-central1_ml-training&metric=ephemeral-storage){ .k8s-try target=_blank }
 
-Requests follow the scheduler's rules, including init containers and native sidecars. An extended resource set only as
+Requests follow the scheduler's rules, also for init containers and native sidecars. An extended resource set only as
 a limit counts as a request of the same size. Node sizes come from `status.allocatable`, for CPU and memory too, so
-kube- and system-reserved capacity is not drawn as free space.
+the map does not draw kube- and system-reserved capacity as free space.

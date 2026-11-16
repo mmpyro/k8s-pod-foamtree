@@ -36,7 +36,7 @@ k8sfoams
 
 Then open <http://127.0.0.1:8080>. k8sfoams reads `~/.kube/config` (or `$KUBECONFIG`) and lists every context in
 the sidebar, the active one first. It only ever reads from the cluster, and switching context in the dashboard never
-modifies your kubeconfig.
+changes your kubeconfig.
 
 From a source checkout, `make run` builds the UI and starts the server, and `uv run k8sfoams` runs it from the
 project's environment.
@@ -61,6 +61,6 @@ k8sfoams --page-size 200 --no-watch                     # smaller LIST pages, no
 k8sfoams --synthetic --seed 7                           # a different set of demo clusters
 ```
 
-Anything but `127.0.0.1` exposes your cluster to the network; see [Network access](cli.md#network-access).
+Any `--host` other than `127.0.0.1` exposes your cluster to the network. See [Network access](cli.md#network-access).
 
 The full list is in the [command-line reference](cli.md).
