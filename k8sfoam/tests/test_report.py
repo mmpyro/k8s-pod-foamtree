@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess  # nosec B404
 import sys
@@ -10,11 +11,12 @@ import time
 import pytest
 from pathlib import Path
 from unittest.mock import patch
-from k8sfoam.src.app import get_version, main
+from k8sfoam.src.app import create_app, get_version, main
 from k8sfoam.src.common.node_status import WARNINGS
 from k8sfoam.src.common.pod_audit import FINDINGS
 from k8sfoam.src.report import CSV_COLUMNS, csv_columns, js_round, kb_to_mib, to_csv, to_nodes, violations
-from k8sfoam.src.synthetic.scenarios import ML, PLATFORM
+from k8sfoam.src.synthetic.client import SyntheticRegistry
+from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED, ML, PLATFORM, SHOP
 
 ROOT = Path(__file__).parents[2]
 
@@ -79,6 +81,30 @@ def test_report_json_opens_as_a_snapshot(capsys):
     pods = [p for n in report['nodes'] for p in n['pods']]
     assert [*pods[0]][:7] == ['name', 'namespace', 'owner', 'qos', 'labels', 'hasInit', 'cpu']
     assert {p['hasInit'] for p in pods} == {True, False}
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='needs Node, like make js_tests')
+@pytest.mark.parametrize('context', [SHOP, ML, PLATFORM])
+def test_report_matches_the_browser_export(capsys, tmp_path, context):
+    # Given — the payload the browser gets from /resources
+    resources = create_app(synthetic=SyntheticRegistry(DEFAULT_SEED, 0)).test_client().get('/resources', query_string={'context': context})
+    payload, cli_json = tmp_path / 'payload.json', tmp_path / 'cli.json'
+    payload.write_bytes(resources.data)
+
+    # When — the CLI, and the export code cut out of the .jsx sources (export_parity.mjs)
+    run(['report', '--synthetic', '--context', context, '--output', str(cli_json)], capsys)
+    _, cli_csv, _ = run(['report', '--synthetic', '--context', context, '--format', 'csv'], capsys)
+    node = subprocess.run(['node', str(ROOT / 'k8sfoam/tests/frontend/export_parity.mjs'),  # nosec B603 B607
+                           str(payload), context, get_version(), str(cli_json)], capture_output=True, text=True)
+    assert node.returncode == 0, node.stderr
+    browser = json.loads(node.stdout)
+
+    # Then — the same files bar generatedAt, and the CLI report opens as a snapshot that exports the same file again
+    stamp = re.compile(r'"generatedAt": "[^"]*"')
+    assert resources.status_code == 200
+    assert stamp.sub('', browser['json']) == stamp.sub('', cli_json.read_text())
+    assert browser['csv'] == cli_csv
+    assert stamp.sub('', browser['reloaded']) == stamp.sub('', browser['json'])
 
 
 def test_report_fails_on_a_violated_policy(capsys):
