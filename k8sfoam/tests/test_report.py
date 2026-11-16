@@ -1,0 +1,307 @@
+import csv
+import io
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess  # nosec B404
+import sys
+import time
+import pytest
+from pathlib import Path
+from unittest.mock import patch
+from k8sfoam.src.app import create_app, get_version, main
+from k8sfoam.src.common.node_status import WARNINGS
+from k8sfoam.src.common.pod_audit import FINDINGS
+from k8sfoam.src.report import CSV_COLUMNS, csv_columns, js_round, kb_to_mib, to_csv, to_nodes, violations
+from k8sfoam.src.synthetic.client import SyntheticRegistry
+from k8sfoam.src.synthetic.scenarios import DEFAULT_SEED, ML, PLATFORM, SHOP
+
+ROOT = Path(__file__).parents[2]
+
+
+def run(argv, capsys):
+    """`k8sfoams *argv` -> (exit code, stdout, stderr)."""
+    with patch('sys.argv', ['k8sfoams', *argv]):
+        with pytest.raises(SystemExit) as exit_:
+            main()
+    out, err = capsys.readouterr()
+    return exit_.value.code, out, err
+
+
+def node(name='n1', warnings=(), pods=(), extended=None):
+    return {'name': name, 'cpu': 4000, 'memory': 8_388_608, 'extended': extended or {}, 'warnings': list(warnings),
+            'topology': {'zone': 'a'}, 'pods': list(pods)}
+
+
+def pod(name='p1', findings=(), memory=1_048_576, extended=None):
+    return {'name': name, 'namespace': 'ns', 'cpu': 250, 'memory': memory, 'extended': extended or {},
+            'findings': list(findings), 'containers': [{'name': 'app', 'init': False, 'cpu': 250, 'memory': memory}]}
+
+
+def test_report_csv_on_stdout(capsys):
+    # Given / When
+    code, out, err = run(['report', '--synthetic', '--format', 'csv'], capsys)
+
+    # Then
+    rows = list(csv.DictReader(io.StringIO(out)))
+    assert code == 0 and err == ''
+    assert len(rows) == 169
+    assert {r['matched'] for r in rows} == {''}
+
+
+def test_report_json_to_a_file(capsys, tmp_path):
+    # Given
+    target = tmp_path / 'report.json'
+
+    # When
+    code, out, _ = run(['report', '--synthetic', '--context', PLATFORM, '--output', str(target)], capsys)
+
+    # Then
+    report = json.loads(target.read_text())
+    assert code == 0 and out == ''
+    assert [*report] == ['schemaVersion', 'k8sfoamsVersion', 'generatedAt', 'context', 'metric', 'query', 'units',
+                         'totals', 'pendingPods', 'pricing', 'nodes']
+    assert report['context'] == PLATFORM
+    assert report['units']['nvidia.com/gpu'] == 'count'
+    assert report['totals']['pods'] == sum(len(n['pods']) for n in report['nodes'])
+
+
+def test_report_json_opens_as_a_snapshot(capsys):
+    # Given / When — the fields snapshot.js reads back besides the node model
+    _, out, _ = run(['report', '--synthetic'], capsys)
+
+    # Then
+    report = json.loads(out)
+    assert report['schemaVersion'] == 1 and report['k8sfoamsVersion'] == get_version()
+    assert isinstance(report['pendingPods'], int) and 'missing' in report['pricing']
+    assert any(n['price'] for n in report['nodes'])
+    assert [*report['nodes'][0]][-2:] == ['price', 'pods']
+    pods = [p for n in report['nodes'] for p in n['pods']]
+    assert [*pods[0]][:7] == ['name', 'namespace', 'owner', 'qos', 'labels', 'hasInit', 'cpu']
+    assert {p['hasInit'] for p in pods} == {True, False}
+
+
+@pytest.mark.skipif(not shutil.which('node'), reason='needs Node, like make js_tests')
+@pytest.mark.parametrize('context', [SHOP, ML, PLATFORM])
+def test_report_matches_the_browser_export(capsys, tmp_path, context):
+    # Given — the payload the browser gets from /resources
+    resources = create_app(synthetic=SyntheticRegistry(DEFAULT_SEED, 0)).test_client().get('/resources', query_string={'context': context})
+    payload, cli_json = tmp_path / 'payload.json', tmp_path / 'cli.json'
+    payload.write_bytes(resources.data)
+
+    # When — the CLI, and the export code cut out of the .jsx sources (export_parity.mjs)
+    run(['report', '--synthetic', '--context', context, '--output', str(cli_json)], capsys)
+    _, cli_csv, _ = run(['report', '--synthetic', '--context', context, '--format', 'csv'], capsys)
+    node = subprocess.run(['node', str(ROOT / 'k8sfoam/tests/frontend/export_parity.mjs'),  # nosec B603 B607
+                           str(payload), context, get_version(), str(cli_json)], capture_output=True, text=True)
+    assert node.returncode == 0, node.stderr
+    browser = json.loads(node.stdout)
+
+    # Then — the same files bar generatedAt, and the CLI report opens as a snapshot that exports the same file again
+    stamp = re.compile(r'"generatedAt": "[^"]*"')
+    assert resources.status_code == 200
+    assert stamp.sub('', browser['json']) == stamp.sub('', cli_json.read_text())
+    assert browser['csv'] == cli_csv
+    assert stamp.sub('', browser['reloaded']) == stamp.sub('', browser['json'])
+
+
+def test_report_fails_on_a_violated_policy(capsys):
+    # Given / When — the shop cluster has one naked pod and no not-ready node
+    code, _, err = run(['report', '--synthetic', '--fail-on', 'AUDIT:naked-pod, health:not-ready'], capsys)
+
+    # Then
+    assert code == 1
+    assert 'audit:naked-pod  default/debug-shell' in err
+    assert 'health:not-ready' not in err
+
+
+def test_report_passes_when_no_pod_or_node_matches(capsys):
+    # Given / When
+    code, _, err = run(['report', '--synthetic', '--fail-on', 'health:not-ready'], capsys)
+
+    # Then
+    assert code == 0 and err == ''
+
+
+def test_report_json_keeps_the_browser_key_order(capsys):
+    # Given / When — /resources goes through Flask's jsonify, which sorts keys; the browser export keeps that order
+    _, out, _ = run(['report', '--synthetic'], capsys)
+
+    # Then — the shop cluster's system nodes carry a CriticalAddonsOnly taint
+    nodes = json.loads(out)['nodes']
+    taints = [t for n in nodes for t in n['taints']]
+    assert taints and all(list(t) == ['effect', 'key', 'value'] for t in taints)
+    assert all(list(n['conditions']) == sorted(n['conditions']) for n in nodes)
+    assert all(list(p['labels']) == sorted(p['labels']) for n in nodes for p in n['pods'])
+
+
+def test_report_times_out_on_a_silent_api_server(tmp_path):
+    # Given — an API server that accepts connections (kernel backlog) but never answers
+    with socket.socket() as server:
+        server.bind(('127.0.0.1', 0))
+        server.listen(8)
+        kubeconfig = tmp_path / 'config'
+        kubeconfig.write_text(json.dumps({
+            'apiVersion': 'v1', 'kind': 'Config', 'current-context': 'silent',
+            'clusters': [{'name': 'c', 'cluster': {'server': f'http://127.0.0.1:{server.getsockname()[1]}'}}],
+            'users': [{'name': 'u', 'user': {'token': 'dummy'}}],  # nosec B105
+            'contexts': [{'name': 'silent', 'context': {'cluster': 'c', 'user': 'u'}}],
+        }))
+
+        # When — a subprocess, because the kubernetes client reads KUBECONFIG at import time
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, '-c', 'from k8sfoam.src.app import main; main()', 'report',  # nosec B603
+                                 '--context', 'silent', '--timeout', '0.5'],
+                                env={**os.environ, 'KUBECONFIG': str(kubeconfig)}, cwd=ROOT,
+                                capture_output=True, text=True, timeout=60)
+
+    # Then
+    assert result.returncode == 2 and result.stdout == ''
+    assert 'timed out' in result.stderr
+    assert time.monotonic() - started < 15
+
+
+@pytest.mark.parametrize('flag', [['--timeout', '-1'], ['--timeout', 'soon']])
+def test_report_rejects_a_bad_timeout(capsys, flag):
+    # Given / When
+    code, out, err = run(['report', '--synthetic', *flag], capsys)
+
+    # Then
+    assert code == 2 and out == ''
+    assert '--timeout' in err
+
+
+@pytest.mark.parametrize('token', ['audit:nope', 'qos:burstable', 'missing-requests', 'health:'])
+def test_report_rejects_an_unknown_policy(capsys, token):
+    # Given / When
+    code, out, err = run(['report', '--synthetic', '--fail-on', token], capsys)
+
+    # Then
+    assert code == 2 and out == ''
+    assert 'unknown policy' in err
+
+
+@patch('k8sfoam.src.report.K8sClient')
+def test_report_exits_2_when_the_cluster_is_unreachable(k8s_client, capsys):
+    # Given
+    k8s_client.return_value.get_node_resources.side_effect = ConnectionError('connection refused')
+
+    # When
+    code, out, err = run(['report', '--context', 'prod', '--fail-on', 'audit:naked-pod'], capsys)
+
+    # Then
+    k8s_client.assert_called_once_with('prod', timeout=30)
+    assert code == 2 and out == ''
+    assert 'connection refused' in err
+
+
+def test_report_exits_2_on_an_unknown_context(capsys):
+    # Given / When
+    code, _, err = run(['report', '--synthetic', '--context', 'prod'], capsys)
+
+    # Then
+    assert code == 2 and 'prod' in err
+
+
+def test_report_uses_the_current_context_name(capsys):
+    # Given / When
+    with patch('k8sfoam.src.report.K8sClient') as k8s_client:
+        k8s_client.return_value.get_contexts.return_value = [{'context': 'dev', 'active': False},
+                                                             {'context': 'prod', 'active': True}]
+        k8s_client.return_value.get_node_resources.return_value = []
+        k8s_client.return_value.get_pod_resources.return_value = []
+        code, out, _ = run(['report'], capsys)
+
+    # Then
+    k8s_client.assert_called_once_with(None, timeout=30)
+    assert code == 0 and json.loads(out)['context'] == 'prod'
+
+
+def test_js_round_rounds_halves_up_like_math_round():
+    # Given / When / Then
+    assert [js_round(v) for v in (0.5, 1.5, 2.5, -0.5, 2.4)] == [1, 2, 3, 0, 2]
+
+
+def test_csv_quotes_like_the_browser_export():
+    # Given
+    rows = [{'a': 'x,y', 'b': 'say "hi"', 'c': None, 'd': 4096.0, 'e': 0.25}]
+
+    # When
+    text = to_csv(rows, ['a', 'b', 'c', 'd', 'e'])
+
+    # Then
+    assert text == 'a,b,c,d,e\r\n"x,y","say ""hi""",,4096,0.25\r\n'
+
+
+def test_to_nodes_converts_to_mib_and_sums_pod_requests():
+    # Given
+    combined = {'nodes': [node(extended={'hugepages-2Mi': 2048, 'nvidia.com/gpu': 2}, pods=[
+        pod('a', extended={'hugepages-2Mi': 1024, 'nvidia.com/gpu': 1}), pod('b')])]}
+
+    # When
+    [n] = to_nodes(combined)
+
+    # Then
+    assert n['memCapacity'] == kb_to_mib(8_388_608)
+    assert n['cpuUsed'] == 500 and n['memUsed'] == kb_to_mib(2 * 1_048_576)
+    assert n['extUsed'] == {'hugepages-2Mi': kb_to_mib(1024), 'nvidia.com/gpu': 1}
+    assert n['topology'] == {'zone': 'a', 'region': None, 'instanceType': None, 'nodePool': None, 'capacityType': None}
+
+
+def test_csv_columns_add_extended_resources_after_memory():
+    # Given
+    nodes = to_nodes({'nodes': [node(extended={'hugepages-2Mi': 2048, 'nvidia.com/gpu': 2, 'amd.com/gpu': 0})]})
+
+    # When
+    columns = csv_columns(nodes)
+
+    # Then — a resource no node has capacity for gets no column
+    at = columns.index('memory_mib')
+    assert columns[at + 1:at + 3] == ['hugepages_2Mi_mib', 'nvidia.com/gpu']
+    assert 'amd.com/gpu' not in columns
+
+
+def test_ml_cluster_csv_has_a_gpu_column(capsys):
+    # Given / When
+    _, out, _ = run(['report', '--synthetic', '--context', ML, '--format', 'csv'], capsys)
+
+    # Then
+    assert 'nvidia.com/gpu' in out.splitlines()[0].split(',')
+
+
+def test_violations_list_offending_pods_and_nodes():
+    # Given
+    nodes = to_nodes({'nodes': [node('n1', ['not-ready'], [pod('a', ['naked-pod']), pod('b')]),
+                                node('n2', [], [pod('c', ['naked-pod', 'monolith'])])]})
+
+    # When
+    found = violations(nodes, ['audit:naked-pod', 'health:not-ready', 'health:cordoned'])
+
+    # Then
+    assert found == [('audit:naked-pod', 'ns/a'), ('audit:naked-pod', 'ns/c'), ('health:not-ready', 'n1')]
+
+
+def test_csv_columns_match_the_browser_export_and_the_docs():
+    # Given
+    jsx = (ROOT / 'k8sfoam/src/frontend/export.jsx').read_text()
+    js_columns = re.findall(r'"([a-z_]+)"', re.search(r'const CSV_COLUMNS = \[(.*?)\];', jsx, re.DOTALL).group(1))
+    docs_row = next(line for line in (ROOT / 'docs/export.md').read_text().splitlines() if '**CSV report**' in line)
+    documented = re.search(r'`(context,[a-z_,]+)`', docs_row).group(1).split(',')
+
+    # When / Then
+    assert CSV_COLUMNS == js_columns
+    assert CSV_COLUMNS == documented
+
+
+@pytest.mark.parametrize('slugs, jsx', [(FINDINGS, 'podaudit.jsx'), (WARNINGS, 'nodestatus.jsx')])
+def test_fail_on_slugs_match_the_query_bar(slugs, jsx):
+    # Given — the slugs audit: / health: accept in the query bar
+    source = (ROOT / 'k8sfoam/src/frontend' / jsx).read_text()
+
+    # When
+    ui = re.findall(r'^\s*"([a-z-]+)":\s*\{\s*label:', source, re.MULTILINE)
+
+    # Then
+    assert list(slugs) == ui

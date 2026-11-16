@@ -1,8 +1,8 @@
 # Filtering
 
-The query bar in the header is a **highlighter, not a filter of last resort**: matching pods glow, everything else dims.
-No pod, node or box ever leaves the layout, so the shape of the cluster stays comparable while you narrow down. Once the
-query is non-empty and valid, a live counter inside the input reads `N / M pods` (and turns red at `0`).
+The query bar in the header is a **highlighter**: matching pods glow, and everything else dims. No pod, node or box
+leaves the layout, so you can compare the shape of the cluster while you narrow the query. When the query is valid and
+not empty, a live counter in the input shows `N / M pods`. The counter turns red at `0`.
 
 <figure class="k8sfoam-embed">
   <iframe src="../demo/index.html?embed=1#q=ns%3Acheckout" loading="lazy" title="k8sfoams demo filtered to the checkout namespace"></iframe>
@@ -12,7 +12,7 @@ query is non-empty and valid, a live counter inside the input reads `N / M pods`
   </figcaption>
 </figure>
 
-Type whitespace-separated tokens. **All tokens are ANDed** — a pod must satisfy every one of them:
+Type tokens separated by whitespace. **All tokens are ANDed**: a pod must match every token.
 
 ```
 ns:storefront qos:Burstable tier=frontend
@@ -20,25 +20,26 @@ ns:storefront qos:Burstable tier=frontend
 
 [Try it](demo/index.html#q=ns%3Astorefront%20qos%3ABurstable%20tier%3Dfrontend){ .k8s-try target=_blank }
 
-An empty query matches everything. A query that contains a malformed token is **inert**: nothing dims, and the
-offending tokens are listed under the bar with the reason. Half-typing `ns:` can never blank the view.
+An empty query matches everything. A query with a malformed token is **inert**: nothing dims, and the bar lists each
+bad token and the reason under it. A half-typed `ns:` never blanks the view.
 
 ## Token reference
 
 | Token | Matches | Notes |
 | --- | --- | --- |
 | `ns:<name>` | pod namespace, exact | case-insensitive (`ns:Kube-System` works) |
-| `node:<glob>` | node the pod is scheduled on | `*` is the only wildcard; anchored (whole name must match); case-insensitive |
-| `qos:<class>` | [QoS class](qos.md): `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive; anything else is an error |
+| `node:<glob>` | node the pod is scheduled on | `*` is the only wildcard. Anchored: the whole name must match. Case-insensitive |
+| `qos:<class>` | [QoS class](qos.md): `Guaranteed`, `Burstable`, `BestEffort` | case-insensitive. Any other value is an error |
 | `has:init-containers` | pods declaring at least one init container | currently the only `has:` field |
 | `audit:<rule>` | pods breaking an [audit rule](audit.md) | `missing-requests`, `missing-limits`, `limit-overcommit`, `monolith`, `ratio-asymmetry`, `naked-pod`, `single-replica`, `spof-node`, `spof-zone`, `spof-spot` |
 | `health:<warning>` | nodes carrying a [health warning](node-health.md), and every pod on them | `cordoned`, `not-ready`, `memory-pressure`, `disk-pressure`, `pid-pressure`, `tainted`, `stranded-devices` |
-| `zone:<glob>` `region:<glob>` `pool:<glob>` `type:<glob>` | nodes with that [topology](topology.md) label, and every pod on them | globs like `node:` (`zone:us-east-1*`); a node without the label never matches |
-| `capacity:<type>` | spot or on-demand nodes, and every pod on them | `spot`, `on-demand`; case-insensitive |
+| `zone:<glob>` `region:<glob>` `pool:<glob>` `type:<glob>` | nodes with that [topology](topology.md) label, and every pod on them | globs like `node:` (`zone:us-east-1*`). A node without the label never matches |
+| `capacity:<type>` | spot or on-demand nodes, and every pod on them | `spot`, `on-demand`. Case-insensitive |
+| `diff:<change>` | pods that changed since a [compared snapshot](export.md#comparing-snapshots) | `added`, `removed`, `resized`, `moved`. Matches nothing when no comparison is open |
 | `key=value` | pod label equals value | key and value are **case-sensitive** (Kubernetes labels are) |
 | `key!=value` | pod label differs from value | a **missing** label counts as unequal, so it matches too |
 | `text` | pod name contains `text` | case-insensitive substring |
-| `"quoted text"` | pod name contains `quoted text` | quotes force literal text — the grammar is skipped |
+| `"quoted text"` | pod name contains `quoted text` | quotes make the text literal, so the parser skips the grammar |
 
 ## Examples
 
@@ -84,7 +85,7 @@ The node whose free GPUs no pod can reach, and every pod on it
 health:stranded-devices
 ```
 
-One specific node — globs are anchored, so dots are literal, not wildcards:
+One specific node. Globs are anchored, and a dot is a literal dot, never a wildcard:
 
 ```
 node:ip-10-0-1-5.ec2.internal
@@ -96,26 +97,26 @@ Guaranteed pods carrying a label value with a space:
 qos:Guaranteed app="my app"
 ```
 
-Match a pod name that *looks* like a filter token — leading quotes make the whole token literal text:
+Match a pod name that *looks* like a filter token. A leading quote makes the whole token literal text:
 
 ```
 "web:1"
 ```
 
-Without the quotes, `web:1` is read as an unknown filter prefix and reported as an error.
+Without the quotes, the parser reads `web:1` as an unknown filter prefix and reports an error.
 
 ## Sharp edges
 
 - **`!=` wins over `=`.** `env!=prod` is one inequality, never `env!` equals `prod`.
-- **A filter prefix must be a bare word before `:`.** `app=ns:x` is a label selector for key `app`, value `ns:x` — not
+- **A filter prefix must be a bare word before `:`.** `app=ns:x` is a label selector for key `app`, value `ns:x`. It is not
   a namespace filter.
 - **Only `node:`, `health:` and the topology tokens can dim a node.** Node plates and boxes stay in the layout either
-  way; pod-level terms dim pods, never their node.
+  way. Pod-level terms dim pods, never their node.
 - **A missing label matches `!=`.** `env!=prod` highlights pods with `env: staging` *and* pods with no `env` label at
-  all — the Kubernetes selector semantics.
+  all. Kubernetes selectors work the same way.
   [Try it](demo/index.html#q=env!%3Dprod){ .k8s-try target=_blank }
-- **Every problem is reported at once.** The parser never stops on the first bad token, so a three-error query lists
-  three errors. [Try it](demo/index.html#q=ns%3A%20qos%3ACheap%20rack%3Ar1){ .k8s-try target=_blank }
+- **The bar reports every problem at once.** The parser never stops on the first bad token, so a query with three
+  errors lists three errors. [Try it](demo/index.html#q=ns%3A%20qos%3ACheap%20rack%3Ar1){ .k8s-try target=_blank }
 
 ## Errors you can hit
 
@@ -131,5 +132,5 @@ Without the quotes, `web:1` is read as an unknown filter prefix and reported as 
 | `""` | `empty quoted value` |
 | `app="my app` | `unterminated quoted value` |
 
-Focusing the input opens a popover with the same token list; it is replaced by the error list while a token is
-malformed. The `×` on the right clears the query.
+When the input has focus, a popover shows the same token list. While a token is malformed, the popover shows the error
+list instead. The `×` on the right clears the query.

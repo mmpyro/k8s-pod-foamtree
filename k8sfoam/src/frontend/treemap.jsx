@@ -4,7 +4,7 @@
 const { workloadKey } = window.k8sWorkload;
 const { worstSeverity, NodeWarnBadge } = window.k8sNodeStatus;
 const { PodAuditBadge } = window.k8sPodAudit;
-const { qosHue } = window.k8sQos;
+const { podHue } = window.k8sQos;
 const { metricValue, nodeCap } = window.k8sResources;
 const { groupNodes } = window.k8sTopology;
 
@@ -278,7 +278,11 @@ function NodeCard({
         <div className="node-header-dot" style={{ background: colors.dot }}></div>
         <span className="node-name">{node.name}</span>
         <span className="node-meta">
-          {node.hypothetical && <span className="sim-badge sim-badge-hyp" title="Exists only in this simulation">hypothetical</span>}
+          {node.hypothetical && (
+            <span className="sim-badge sim-badge-hyp" title={node.ghostTitle || "Exists only in this simulation"}>
+              {node.ghostLabel || "hypothetical"}
+            </span>
+          )}
           {verdict && <span className={`sim-badge sim-badge-${verdict}`}>{SIM_BADGE[verdict]}</span>}
           <NodeWarnBadge warnings={node.warnings} />
           <span className="node-util" style={{ color: utilColor }}>{Math.round(utilization * 100)}%</span>
@@ -299,7 +303,7 @@ function NodeCard({
         }
         return (
           <PodBox key={`pod-${i}`} pod={it.pod} rect={it}
-                  hue={colorBy === "qos" ? qosHue(it.pod.qos) : hue}
+                  hue={podHue(it.pod, colorBy, hue)}
                   metric={metric} showLabels={showLabels} nodeStyle={nodeStyle}
                   matched={podMatched(it.pod)}
                   dim={queryActive && !nodeDim && !podMatched(it.pod)}

@@ -1,6 +1,6 @@
 # Shareable links
 
-The view is encoded in the URL hash, so a link reproduces exactly what the sender saw and any view can be bookmarked:
+k8sfoams encodes the view in the URL hash. A link reproduces exactly what the sender saw, and you can bookmark any view:
 
 ```
 http://localhost:8080/#ctx=prod&view=3d&groupBy=zone&q=ns%3Apayments
@@ -21,14 +21,14 @@ opens demo-shop in 3D, grouped by zone, colored by QoS, with the checkout namesp
 | `q` | A [query](filtering.md), URL-encoded | empty |
 | `wl` | Pinned workload, e.g. `web-api` | none |
 
-- The URL updates as you change the view. Parameters at their default are left out, and `ctx` is always written.
-- The URL is replaced in place, so typing a query does not fill your browser history.
-- Pasting a link into a tab that is already open applies it. A parameter the link leaves out goes back to its default.
+- The URL updates as you change the view. It leaves out parameters at their default, and it always contains `ctx`.
+- k8sfoams replaces the URL in place, so typing a query does not fill your browser history.
+- If you paste a link into a tab that is already open, the tab applies it. A parameter the link leaves out goes back to its default.
 - A context that is not in your kubeconfig falls back to the active one, and a notice above the map says so. A resource
-  the context cannot allocate falls back to CPU, as when switching contexts. Any other unknown value uses its default.
+  the context cannot allocate falls back to CPU, as it does when you switch contexts. Any other unknown value uses its default.
   [Try it](demo/index.html#ctx=prod){ .k8s-try target=_blank }
-- A pinned workload that matches no pod in the context is dropped, so it cannot dim the whole map.
+- k8sfoams drops a pinned workload that matches no pod in the context, so the workload cannot dim the whole map.
 - *Zoom*, *Refresh* and the tweaks panel are not part of the link.
 
-The demo also understands `?embed=1` before the hash, which starts it with the sidebar collapsed and adds a button that
-opens the same view full-page. See [Synthetic mode](synthetic-mode.md#the-live-demo-on-this-site).
+The demo also understands `?embed=1` before the hash. The demo then starts with the sidebar collapsed and adds a button
+that opens the same view full-page. See [Synthetic mode](synthetic-mode.md#the-live-demo-on-this-site).

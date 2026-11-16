@@ -155,6 +155,24 @@ def test_should_page_through_nodes(client, config):
     assert v1_client.list_node.call_args_list == [call(limit=1, _continue=None), call(limit=1, _continue='t1')]
 
 
+@patch('k8sfoam.src.k8s.k8s_client.config')
+@patch('k8sfoam.src.k8s.k8s_client.client')
+def test_should_bound_list_calls_by_the_timeout(client, config):
+    # Given
+    v1_client = client.CoreV1Api.return_value
+    v1_client.list_node.return_value = create_list([create_node('a', '1', '1Gi')])
+    v1_client.list_pod_for_all_namespaces.return_value = create_list([create_pod('p', 'a')])
+    k8s_client = K8sClient(page_size=10, timeout=5)
+
+    # When
+    [*k8s_client.get_node_resources()], [*k8s_client.get_pod_resources()]
+
+    # Then
+    assert v1_client.list_node.call_args == call(limit=10, _continue=None, _request_timeout=5)
+    assert v1_client.list_pod_for_all_namespaces.call_args == call(limit=10, _continue=None, _request_timeout=5,
+                                                                   field_selector=POD_SELECTOR)
+
+
 def test_list_all_returns_the_snapshot_resource_version():
     # Given — every page of one paginated LIST shares the snapshot's version
     func = MagicMock(side_effect=[create_list(['a'], next_page='t1', resource_version='42'),

@@ -22,6 +22,9 @@ PRESSURE_SLUGS = {
     'PIDPressure': 'pid-pressure',
 }
 
+# Every node warning slug, worst first, including the mapper's stranded-devices; nodestatus.jsx renders the same set.
+WARNINGS = ('cordoned', 'not-ready', 'memory-pressure', 'disk-pressure', 'pid-pressure', 'tainted', 'stranded-devices')
+
 
 def node_warnings(unschedulable: bool, taints: Optional[list], conditions: Optional[dict]) -> list:
     """Reasons a node is a bad scheduling target, worst first.

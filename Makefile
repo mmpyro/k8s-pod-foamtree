@@ -10,8 +10,10 @@ restore_ci:
 node_modules: package.json package-lock.json
 	npm ci
 
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+
 web: node_modules
-	npm run build
+	npm run build -- --define:K8SFOAMS_VERSION='"$(VERSION)"'
 
 run: web
 	uv run k8sfoams
@@ -24,6 +26,9 @@ unit_tests:
 
 unit_tests_ci:
 	pytest -v --junit-xml=test-results.xml
+
+js_tests:
+	node --test 'k8sfoam/tests/frontend/*.test.mjs'
 
 static_code_analysis:
 	uv run flake8 ./k8sfoam
@@ -43,9 +48,9 @@ bandit:
 bandit_ci:
 	bandit --configfile bandit.yaml -r ./k8sfoam
 
-tests: check_types static_code_analysis bandit unit_tests
+tests: check_types static_code_analysis bandit unit_tests js_tests
 
-tests_ci: check_types_ci static_code_analysis_ci bandit_ci unit_tests_ci
+tests_ci: check_types_ci static_code_analysis_ci bandit_ci unit_tests_ci js_tests
 
 build: web
 	uv build

@@ -1,7 +1,7 @@
 import logging
 import pytest
 import bitmath  # type: ignore
-from k8sfoam.src.app import LOOPBACK_HOSTS, create_app, main, change_events, host_name, is_loopback, DEBOUNCE
+from k8sfoam.src.app import LOOPBACK_HOSTS, create_app, get_version, main, change_events, host_name, is_loopback, DEBOUNCE
 from k8sfoam.src.k8s.k8s_client import DEFAULT_PAGE_SIZE
 from unittest.mock import patch, MagicMock
 from k8sfoam.src.common.dtos import DisruptionBudget, NodeResources, PodResources, ContainerResources
@@ -906,6 +906,9 @@ def test_change_events_follow_a_replaced_cache_after_a_heartbeat():
 @pytest.mark.parametrize('argv, expected', [
     ([], {'page_size': 500, 'watch': True}),
     (['--page-size', '100', '--no-watch'], {'page_size': 100, 'watch': False}),
+    # The explicit subcommand takes the same flags as the bare invocation.
+    (['serve'], {'page_size': 500, 'watch': True}),
+    (['serve', '--page-size', '100', '--no-watch'], {'page_size': 100, 'watch': False}),
 ])
 @patch('k8sfoam.src.app.load_config')
 @patch('k8sfoam.src.app.create_app')
@@ -918,6 +921,24 @@ def test_main_passes_cache_options(create_app, load_config, argv, expected):
     # Then
     create_app.assert_called_once_with(**expected, advisor=load_config.return_value, token=None,
                                        allowed_hosts=[*LOOPBACK_HOSTS, '127.0.0.1'])
+
+
+@pytest.mark.parametrize('argv, expected', [
+    (['-v'], None), (['--version'], None), (['serve', '-v'], None),
+    # These skip the bare-invocation rewrite to `serve`, so the top-level parser answers them.
+    (['--help'], '{serve,report}'), (['report', '--help'], '--fail-on'),
+])
+def test_main_prints_version_and_help(capsys, argv, expected):
+    # Given
+    with patch('sys.argv', ['k8sfoams', *argv]):
+        # When
+        with pytest.raises(SystemExit) as exit_:
+            main()
+
+    # Then
+    out = capsys.readouterr().out
+    assert exit_.value.code == 0
+    assert expected in out if expected else out == f'{get_version()}\n'
 
 
 @pytest.mark.parametrize('page_size', ['0', '-5', 'many'])

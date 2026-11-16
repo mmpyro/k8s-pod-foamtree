@@ -30,6 +30,10 @@ SPOF_KINDS = ('Deployment', 'StatefulSet', 'ReplicaSet')
 # is downtime. Counted from the scheduled pods; spec.replicas is never read.
 SINGLE_REPLICA_KINDS = ('Deployment', 'StatefulSet')
 
+# Every slug pod_findings() and workload_findings() emit, in emit order; podaudit.jsx renders the same set.
+FINDINGS = ('missing-requests', 'missing-limits', 'limit-overcommit', 'monolith', 'ratio-asymmetry', 'naked-pod',
+            'single-replica', 'spof-node', 'spof-zone', 'spof-spot')
+
 
 def _share(requested: float, capacity: float) -> float:
     return requested / capacity if capacity else 0.0

@@ -19,11 +19,11 @@ hide:
 
 k8sfoams is a local, read-only dashboard for Kubernetes. It draws every node as a box and every pod as a foam
 sized by its **resource requests**: what the scheduler reserves, not live usage. That makes it a tool for spotting
-over-requesting pods and idle headroom, not a performance monitor. It runs on your laptop, reads `~/.kube/config`
-(or `$KUBECONFIG`) with the standard Kubernetes client, and needs no in-cluster deployment and no metrics-server.
+over-requesting pods and idle headroom, not a performance monitor. It runs on your laptop and reads `~/.kube/config`
+(or `$KUBECONFIG`) with the standard Kubernetes client. It needs no in-cluster deployment and no metrics-server.
 
-The dashboard below is the real thing, running on a synthetic cluster in your browser. Click a node to see its pods
-and simulate a drain, hover a pod, type `audit:spof-zone` into the query bar, or switch to the 3D view.
+The dashboard below is the real thing. It runs on a synthetic cluster in your browser. Click a node to see its pods and
+simulate a drain. Hover a pod, type `audit:spof-zone` into the query bar, or switch to the 3D view.
 
 <figure class="k8sfoam-embed k8sfoam-embed-tall">
   <iframe src="demo/index.html?embed=1" loading="lazy" title="k8sfoams live demo on a synthetic EKS cluster"></iframe>

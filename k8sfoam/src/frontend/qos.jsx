@@ -20,4 +20,12 @@ function qosHue(qos) {
   return cls ? cls.hue : NEUTRAL_HUE;
 }
 
-window.k8sQos = { QOS_INFO, QOS_ORDER, NEUTRAL_HUE, qosHue };
+// A pod's hue under Color by: its node's, its QoS class's, or (comparing two
+// snapshots) its change. snapdiff.js decides the change colours.
+function podHue(pod, colorBy, nodeHue) {
+  if (colorBy === "qos") return qosHue(pod.qos);
+  if (colorBy === "diff") return window.k8sSnapDiff.diffHue(pod);
+  return nodeHue;
+}
+
+window.k8sQos = { QOS_INFO, QOS_ORDER, NEUTRAL_HUE, qosHue, podHue };
