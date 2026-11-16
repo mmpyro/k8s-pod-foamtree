@@ -41,7 +41,9 @@ k8sfoams report [--context NAME] [--format json|csv] [--output FILE] [--fail-on 
 
 Writes the dashboard's [JSON or CSV report](export.md) for one context and exits, for CI pipelines and cron jobs. The
 schema and units are the browser export's: same columns, CPU in millicores, memory in MiB, one column per extended
-resource. With no query, `matched` stays blank in the CSV and is left out of the JSON; `metric` is `cpu`.
+resource. With no query, `matched` stays blank in the CSV and is left out of the JSON; `metric` is `cpu`. Node prices
+come from the bundled [price snapshot](cost.md). The JSON report opens in the dashboard as a
+[snapshot](export.md#snapshots), e.g. to compare last night's report with today's.
 
 | Argument | Default | Meaning |
 | --- | --- | --- |

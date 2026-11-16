@@ -10,7 +10,7 @@ import time
 import pytest
 from pathlib import Path
 from unittest.mock import patch
-from k8sfoam.src.app import main
+from k8sfoam.src.app import get_version, main
 from k8sfoam.src.common.node_status import WARNINGS
 from k8sfoam.src.common.pod_audit import FINDINGS
 from k8sfoam.src.report import CSV_COLUMNS, csv_columns, js_round, kb_to_mib, to_csv, to_nodes, violations
@@ -59,10 +59,26 @@ def test_report_json_to_a_file(capsys, tmp_path):
     # Then
     report = json.loads(target.read_text())
     assert code == 0 and out == ''
-    assert [*report] == ['generatedAt', 'context', 'metric', 'query', 'units', 'totals', 'nodes']
+    assert [*report] == ['schemaVersion', 'k8sfoamsVersion', 'generatedAt', 'context', 'metric', 'query', 'units',
+                         'totals', 'pendingPods', 'pricing', 'nodes']
     assert report['context'] == PLATFORM
     assert report['units']['nvidia.com/gpu'] == 'count'
     assert report['totals']['pods'] == sum(len(n['pods']) for n in report['nodes'])
+
+
+def test_report_json_opens_as_a_snapshot(capsys):
+    # Given / When — the fields snapshot.js reads back besides the node model
+    _, out, _ = run(['report', '--synthetic'], capsys)
+
+    # Then
+    report = json.loads(out)
+    assert report['schemaVersion'] == 1 and report['k8sfoamsVersion'] == get_version()
+    assert isinstance(report['pendingPods'], int) and 'missing' in report['pricing']
+    assert any(n['price'] for n in report['nodes'])
+    assert [*report['nodes'][0]][-2:] == ['price', 'pods']
+    pods = [p for n in report['nodes'] for p in n['pods']]
+    assert [*pods[0]][:7] == ['name', 'namespace', 'owner', 'qos', 'labels', 'hasInit', 'cpu']
+    assert {p['hasInit'] for p in pods} == {True, False}
 
 
 def test_report_fails_on_a_violated_policy(capsys):

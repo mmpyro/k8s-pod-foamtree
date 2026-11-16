@@ -12,6 +12,7 @@ from typing import Any, List, Optional, Tuple
 from k8sfoam.src.common.node_status import WARNINGS
 from k8sfoam.src.common.pod_audit import FINDINGS
 from k8sfoam.src.k8s.k8s_client import K8sClient
+from k8sfoam.src.pricing import PriceBook
 from k8sfoam.src.synthetic.client import SyntheticRegistry
 from k8sfoam.src.utils.mappers import FoamTreeMapper
 
@@ -20,6 +21,9 @@ CSV_COLUMNS = [
     'context', 'node', 'zone', 'region', 'node_pool', 'instance_type', 'capacity_type', 'namespace', 'pod', 'qos',
     'cpu_millicores', 'memory_mib', 'containers', 'init_containers', 'findings', 'node_warnings', 'matched',
 ]
+
+# snapshot.js SCHEMA_VERSION: the browser reads the report back; bump both together.
+SCHEMA_VERSION = 1
 
 # --fail-on tokens, spelled like the query bar's audit: and health: filters.
 FAIL_ON = {'audit': FINDINGS, 'health': WARNINGS}
@@ -69,6 +73,7 @@ def to_nodes(combined: dict) -> list:
                 ext_used[name] = ext_used.get(name, 0) + v
             pods.append({
                 'name': p['name'], 'namespace': p.get('namespace') or '', 'labels': p.get('labels') or {},
+                'hasInit': bool(p.get('hasInitContainers')),
                 'qos': p.get('qos') or '', 'findings': p.get('findings') or [], 'owner': p.get('owner') or None,
                 'cpu': p['cpu'] or 0, 'mem': kb_to_mib(p['memory'] or 0), 'ext': pod_ext,
                 'containers': [{'name': c['name'], 'init': bool(c['init']), 'cpu': c['cpu'] or 0,
@@ -84,6 +89,7 @@ def to_nodes(combined: dict) -> list:
             'extCap': _ext(n.get('extended')), 'extUsed': ext_used, 'pods': pods,
             'warnings': n.get('warnings') or [], 'taints': n.get('taints') or [],
             'conditions': n.get('conditions') or {}, 'unschedulable': bool(n.get('unschedulable')),
+            'price': n.get('price') or None,
         })
     return nodes
 
@@ -150,23 +156,24 @@ def totals(nodes: list) -> dict:
     return t
 
 
-def report_json(nodes: list, context: str) -> str:
+def report_json(nodes: list, context: str, pending_pods: int = 0, pricing: Optional[dict] = None) -> str:
     """export.jsx reportJson() with the UI's defaults: CPU metric, no query, so no `matched`."""
+    from k8sfoam.src.app import get_version  # app imports this module
     now = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     report = {
-        'generatedAt': now, 'context': context, 'metric': 'cpu', 'query': '',
+        'schemaVersion': SCHEMA_VERSION, 'k8sfoamsVersion': get_version(), 'generatedAt': now, 'context': context, 'metric': 'cpu', 'query': '',
         'units': {'cpu': 'millicores', 'memory': 'MiB',
                   **{name: 'MiB' if is_bytes(name) else 'count' for name in detect_resources(nodes)}},
-        'totals': totals(nodes),
+        'totals': totals(nodes), 'pendingPods': pending_pods or 0, 'pricing': pricing or None,
         'nodes': [{
             'name': n['name'], 'topology': n['topology'],
             'cpuCapacity': n['cpuCapacity'], 'cpuUsed': n['cpuUsed'],
             'memCapacity': n['memCapacity'], 'memUsed': n['memUsed'],
             'extended': {'capacity': n['extCap'], 'used': n['extUsed']},
             'unschedulable': n['unschedulable'], 'warnings': n['warnings'], 'taints': n['taints'],
-            'conditions': n['conditions'],
+            'conditions': n['conditions'], 'price': n['price'],
             'pods': [{'name': p['name'], 'namespace': p['namespace'], 'owner': p['owner'], 'qos': p['qos'],
-                      'labels': p['labels'], 'cpu': p['cpu'], 'mem': p['mem'], 'extended': p['ext'],
+                      'labels': p['labels'], 'hasInit': p['hasInit'], 'cpu': p['cpu'], 'mem': p['mem'], 'extended': p['ext'],
                       'findings': p['findings'], 'containers': p['containers']} for p in n['pods']],
         } for n in nodes],
     }
@@ -213,10 +220,12 @@ def run_report(args: argparse.Namespace) -> int:
     """Write the report, then check --fail-on. Exit code: 0 ok, 1 a policy is violated, 2 an error."""
     try:
         client, context = _cluster(args)
-        combined = FoamTreeMapper(client.get_node_resources(), [*client.get_pod_resources()]).combined()
+        # Prices from the bundled snapshot, like synthetic serve: a one-shot run exits before a live refresh.
+        combined = FoamTreeMapper(client.get_node_resources(), [*client.get_pod_resources()], PriceBook(live=False)).combined()
         # /resources goes through Flask's jsonify, which sorts keys, and the browser export keeps that order.
-        nodes = to_nodes(json.loads(json.dumps(combined, sort_keys=True)))
-        body = report_json(nodes, context) + '\n' if args.format == 'json' else to_csv(pod_rows(nodes, context),
+        combined = json.loads(json.dumps(combined, sort_keys=True))
+        nodes = to_nodes(combined)
+        body = report_json(nodes, context, combined['pendingPods'], combined['pricing']) + '\n' if args.format == 'json' else to_csv(pod_rows(nodes, context),
                                                                                       csv_columns(nodes))
         if args.output:
             with open(args.output, 'w', encoding='utf-8', newline='') as out:
